@@ -20,12 +20,20 @@ project and wired to problem-specific targets later.
 """
 
 from dataclasses import dataclass
-from functools import lru_cache
-from itertools import product
 from typing import Callable, Optional, Sequence, Tuple
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
+
+from conditioning_utils import (
+    as_float_array as _as_float_array,
+    build_time_grid as _build_time_grid,
+    get_rng as _get_rng,
+    image_shifts as _image_shifts,
+    logsumexp as _logsumexp,
+    validate_positions as _validate_positions,
+    validate_probability_vector as _validate_probability_vector,
+)
 
 FloatArray = NDArray[np.float64]
 ComplexArray = NDArray[np.complex128]
@@ -81,61 +89,6 @@ class ParticleSimulation:
 # ---------------------------------------------------------------------------
 
 
-def _as_float_array(x: ArrayLike, *, name: str) -> FloatArray:
-    arr = np.asarray(x, dtype=np.float64)
-    if arr.size == 0:
-        raise ValueError(f"{name} must be non-empty")
-    return arr
-
-
-
-def _validate_probability_vector(x: ArrayLike, *, name: str, normalize: bool = False) -> FloatArray:
-    arr = _as_float_array(x, name=name).reshape(-1)
-    if np.any(~np.isfinite(arr)):
-        raise ValueError(f"{name} must be finite")
-    if np.any(arr <= 0.0):
-        raise ValueError(f"{name} must have strictly positive entries")
-    total = float(arr.sum())
-    if normalize:
-        arr = arr / total
-    elif not np.isclose(total, 1.0, atol=1e-10, rtol=1e-10):
-        raise ValueError(f"{name} must sum to 1; got {total}")
-    return arr
-
-
-
-def _validate_positions(x: ArrayLike, *, n: Optional[int], name: str) -> FloatArray:
-    arr = _as_float_array(x, name=name)
-    if arr.ndim == 1:
-        arr = arr[:, None]
-    if arr.ndim != 2:
-        raise ValueError(f"{name} must have shape (n, d) or (n,)")
-    if n is not None and arr.shape[0] != n:
-        raise ValueError(f"{name} must have {n} rows; got {arr.shape[0]}")
-    if np.any(~np.isfinite(arr)):
-        raise ValueError(f"{name} must be finite")
-    return arr
-
-
-
-def _build_time_grid(horizon: float, step_size: float) -> tuple[int, FloatArray]:
-    if not np.isfinite(horizon) or horizon <= 0.0:
-        raise ValueError("horizon must be positive and finite")
-    if not np.isfinite(step_size) or step_size <= 0.0:
-        raise ValueError("step_size must be positive and finite")
-    m_float = horizon / step_size
-    m_steps = int(round(m_float))
-    if m_steps <= 0 or not np.isclose(m_float, m_steps, atol=1e-12, rtol=1e-12):
-        raise ValueError("horizon / step_size must be an integer")
-    return m_steps, np.linspace(0.0, horizon, m_steps + 1, dtype=np.float64)
-
-
-
-def _get_rng(rng: Optional[np.random.Generator]) -> np.random.Generator:
-    return np.random.default_rng() if rng is None else rng
-
-
-
 def wrap_torus(x: ArrayLike) -> FloatArray:
     """Wrap coordinates onto the flat torus [0, 1)^d componentwise."""
     arr = np.asarray(x, dtype=np.float64)
@@ -151,24 +104,6 @@ def shortest_periodic_displacement(x: ArrayLike, y: ArrayLike) -> FloatArray:
     """
     dx = np.asarray(x, dtype=np.float64) - np.asarray(y, dtype=np.float64)
     return np.mod(dx + 0.5, 1.0) - 0.5
-
-
-@lru_cache(maxsize=None)
-def _image_shifts(radius: int, dimension: int) -> FloatArray:
-    if radius < 0:
-        raise ValueError("image_radius must be non-negative")
-    shifts = np.array(list(product(range(-radius, radius + 1), repeat=dimension)), dtype=np.float64)
-    return shifts
-
-
-
-def _logsumexp(a: FloatArray, axis: Optional[int] = None) -> FloatArray:
-    max_a = np.max(a, axis=axis, keepdims=True)
-    shifted = np.exp(a - max_a)
-    out = max_a + np.log(np.sum(shifted, axis=axis, keepdims=True))
-    if axis is None:
-        return np.asarray(out.reshape(()), dtype=np.float64)
-    return np.squeeze(out, axis=axis)
 
 
 

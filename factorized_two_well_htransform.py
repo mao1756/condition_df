@@ -33,11 +33,19 @@ Notes
   one also includes the full image sum.
 """
 
-from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from numpy.typing import ArrayLike, NDArray
+from numpy.typing import ArrayLike
+
+from conditioning_utils import (
+    FloatArray,
+    as_float_array as _as_float_array,
+    build_time_grid as _build_time_grid,
+    get_rng as _get_rng,
+    validate_positions as _validate_positions,
+    validate_probability_vector as _validate_probability_vector,
+)
 
 from wasserstein_conditioning_algorithms import (
     ParticleSimulation,
@@ -45,61 +53,11 @@ from wasserstein_conditioning_algorithms import (
     wrap_torus,
 )
 
-FloatArray = NDArray[np.float64]
-
 __all__ = [
     "circle_membership_stats",
     "heuristic_equal_mass_parameters",
     "simulate_factorized_gaussian_mixture_em",
 ]
-
-
-def _as_float_array(x: ArrayLike, *, name: str) -> FloatArray:
-    arr = np.asarray(x, dtype=np.float64)
-    if arr.size == 0:
-        raise ValueError(f"{name} must be non-empty")
-    if np.any(~np.isfinite(arr)):
-        raise ValueError(f"{name} must be finite")
-    return arr
-
-
-def _validate_probability_vector(x: ArrayLike, *, name: str, normalize: bool = False) -> FloatArray:
-    arr = _as_float_array(x, name=name).reshape(-1)
-    if np.any(arr <= 0.0):
-        raise ValueError(f"{name} must have strictly positive entries")
-    total = float(arr.sum())
-    if normalize:
-        arr = arr / total
-    elif not np.isclose(total, 1.0, atol=1e-10, rtol=1e-10):
-        raise ValueError(f"{name} must sum to 1; got {total}")
-    return arr
-
-
-def _validate_positions(x: ArrayLike, *, n: Optional[int], name: str) -> FloatArray:
-    arr = _as_float_array(x, name=name)
-    if arr.ndim == 1:
-        arr = arr[:, None]
-    if arr.ndim != 2:
-        raise ValueError(f"{name} must have shape (n, d) or (n,)")
-    if n is not None and arr.shape[0] != n:
-        raise ValueError(f"{name} must have {n} rows; got {arr.shape[0]}")
-    return arr
-
-
-def _build_time_grid(horizon: float, step_size: float) -> tuple[int, FloatArray]:
-    if not np.isfinite(horizon) or horizon <= 0.0:
-        raise ValueError("horizon must be positive and finite")
-    if not np.isfinite(step_size) or step_size <= 0.0:
-        raise ValueError("step_size must be positive and finite")
-    ratio = horizon / step_size
-    m_steps = int(round(ratio))
-    if m_steps <= 0 or not np.isclose(ratio, m_steps, atol=1e-12, rtol=1e-12):
-        raise ValueError("horizon / step_size must be an integer")
-    return m_steps, np.linspace(0.0, horizon, m_steps + 1, dtype=np.float64)
-
-
-def _get_rng(rng: Optional[np.random.Generator]) -> np.random.Generator:
-    return np.random.default_rng() if rng is None else rng
 
 
 def heuristic_equal_mass_parameters(
