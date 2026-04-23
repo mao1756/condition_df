@@ -1,0 +1,190 @@
+diff --git a/mnist_score_matching.py b/mnist_score_matching.py
+index fe7c46a..3c859eb 100644
+--- a/mnist_score_matching.py
++++ b/mnist_score_matching.py
+@@ -116,9 +116,14 @@ class ConditionalScoreSetNetwork(nn.Module):
+ 
+     The architecture follows the same DeepSets spirit as the terminal classifier:
+     per-point features are encoded, pooled into a global context, and then mapped
+-    back to a per-point vector field.  Internally the network predicts a
+-    ``sqrt(2 tau)``-scaled score, which keeps the training targets close to unit
+-    scale across noise levels; the returned output is the actual score field.
++    back to a per-point vector field.  By default, the network predicts a
++    noise-like quantity and returns it scaled by ``1 / sqrt(2 tau s_i)`` via
++    ``score_output_scaling='tau_mass'``.  This matches the small-time scale of
++    the weighted score target when the masses vary.  Set
++    ``score_output_scaling='tau'`` to recover the previous ``1 / sqrt(2 tau)``
++    scaling, or ``'none'`` to return the raw network output.  Torus Fourier
++    features are enabled by default to make the wrapped 0/1 chart continuous to
++    the network.
+     """
+ 
+     def __init__(
+@@ -132,6 +137,8 @@ class ConditionalScoreSetNetwork(nn.Module):
+         tau_min: float = 1e-6,
+         tau_max: float = 1e-3,
+         dropout: float = 0.0,
++        use_torus_features: bool = True,
++        score_output_scaling: str = "tau_mass",
+     ) -> None:
+         super().__init__()
+         if point_feature_dim <= 0 or hidden_dim <= 0 or conditioning_dim <= 0:
+@@ -142,11 +149,15 @@ class ConditionalScoreSetNetwork(nn.Module):
+             raise ValueError("tau_min and tau_max must satisfy 0 < tau_min <= tau_max")
+         if dropout < 0.0:
+             raise ValueError("dropout must be non-negative")
++        if score_output_scaling not in {"tau", "tau_mass", "none"}:
++            raise ValueError("score_output_scaling must be one of {'tau', 'tau_mass', 'none'}")
+ 
+         self.num_classes = int(num_classes)
+         self.condition_on_label = bool(condition_on_label)
+         self.tau_min = float(tau_min)
+         self.tau_max = float(tau_max)
++        self.use_torus_features = bool(use_torus_features)
++        self.score_output_scaling = str(score_output_scaling)
+ 
+         self.time_mlp = nn.Sequential(
+             nn.Linear(3, conditioning_dim),
+@@ -162,7 +173,8 @@ class ConditionalScoreSetNetwork(nn.Module):
+             label_dim = 0
+ 
+         cond_dim = conditioning_dim + label_dim
+-        point_input_dim = 4 + cond_dim
++        position_dim = 6 if self.use_torus_features else 2
++        point_input_dim = position_dim + 2 + cond_dim
+         self.point_mlp = nn.Sequential(
+             nn.Linear(point_input_dim, point_feature_dim),
+             nn.GELU(),
+@@ -207,6 +219,21 @@ class ConditionalScoreSetNetwork(nn.Module):
+         label_context = self.label_embedding(labels)
+         return torch.cat([time_context, label_context], dim=1)
+ 
++    def _position_features(self, positions: Tensor) -> Tensor:
++        if not self.use_torus_features:
++            return positions
++        angles = 2.0 * math.pi * positions
++        return torch.cat([positions, torch.sin(angles), torch.cos(angles)], dim=-1)
++
++    def _score_scale(self, tau: Tensor, masses: Tensor) -> Tensor:
++        if self.score_output_scaling == "none":
++            return torch.ones((*masses.shape, 1), device=masses.device, dtype=masses.dtype)
++        if self.score_output_scaling == "tau":
++            return torch.rsqrt((2.0 * tau).clamp_min(self.tau_min))[:, None, None]
++        return torch.rsqrt(
++            (2.0 * tau[:, None, None] * masses.unsqueeze(-1)).clamp_min(self.tau_min * 1e-8)
++        )
++
+     def forward(
+         self,
+         masses: Tensor,
+@@ -232,7 +259,7 @@ class ConditionalScoreSetNetwork(nn.Module):
+         log_masses = torch.log(masses.clamp_min(1e-8))
+         point_inputs = torch.cat(
+             [
+-                positions,
++                self._position_features(positions),
+                 masses.unsqueeze(-1),
+                 log_masses.unsqueeze(-1),
+                 cond_points,
+@@ -250,8 +277,7 @@ class ConditionalScoreSetNetwork(nn.Module):
+         repeated_context = global_context[:, None, :].expand(batch_size, num_points, global_context.shape[1])
+ 
+         raw_scaled_score = self.output_head(torch.cat([h, repeated_context], dim=-1))
+-        score_scale = torch.rsqrt((2.0 * tau_tensor).clamp_min(self.tau_min))[:, None, None]
+-        return raw_scaled_score * score_scale
++        return raw_scaled_score * self._score_scale(tau_tensor, masses)
+ 
+ class ConditionalScoreSetTransformer(nn.Module):
+     r"""Self-attention score network for weighted point clouds.
+diff --git a/notebooks/example_7_mnist_score_matching_generation.ipynb b/notebooks/example_7_mnist_score_matching_generation.ipynb
+index 5934565..0dfa1f4 100644
+--- a/notebooks/example_7_mnist_score_matching_generation.ipynb
++++ b/notebooks/example_7_mnist_score_matching_generation.ipynb
+@@ -1098,6 +1098,8 @@
+     "        condition_on_label=True,\n",
+     "        tau_min=TAU_MIN,\n",
+     "        tau_max=TAU_MAX,\n",
++    "        use_torus_features=(SCORE_PROJECTION == 'wrap'),\n",
++    "        score_output_scaling=SCORE_OUTPUT_SCALING,\n",
+     "    )\n",
+     "elif SCORE_ARCHITECTURE == 'set_transformer':\n",
+     "    score_model = ConditionalScoreSetTransformer(\n",
+diff --git a/notebooks/example_7_mnist_score_matching_generation_set_transformer.ipynb b/notebooks/example_7_mnist_score_matching_generation_set_transformer.ipynb
+index 1a27a21..b868e63 100644
+--- a/notebooks/example_7_mnist_score_matching_generation_set_transformer.ipynb
++++ b/notebooks/example_7_mnist_score_matching_generation_set_transformer.ipynb
+@@ -1128,6 +1128,8 @@
+     "        condition_on_label=True,\n",
+     "        tau_min=TAU_MIN,\n",
+     "        tau_max=TAU_MAX,\n",
++    "        use_torus_features=(SCORE_PROJECTION == 'wrap'),\n",
++    "        score_output_scaling=SCORE_OUTPUT_SCALING,\n",
+     "    )\n",
+     "elif SCORE_ARCHITECTURE == 'set_transformer':\n",
+     "    score_model = ConditionalScoreSetTransformer(\n",
+diff --git a/test_smoke_mnist_score_matching.py b/test_smoke_mnist_score_matching.py
+index 990bc04..b0c959b 100644
+--- a/test_smoke_mnist_score_matching.py
++++ b/test_smoke_mnist_score_matching.py
+@@ -89,6 +89,53 @@ def _test_torus_score_target_smoke() -> None:
+     assert torch.max(torch.abs(large_tau_target)).item() < 1e-5
+ 
+ 
++def _test_deepsets_score_scaling_options() -> None:
++    torch.manual_seed(1)
++    masses = torch.tensor([[0.25, 1.0]], dtype=torch.float32)
++    positions = torch.tensor([[[0.10, 0.20], [0.30, 0.40]]], dtype=torch.float32)
++    labels = torch.tensor([1], dtype=torch.long)
++    tau = torch.tensor([1e-3], dtype=torch.float32)
++
++    common_kwargs = dict(
++        point_feature_dim=12,
++        hidden_dim=16,
++        conditioning_dim=8,
++        num_classes=2,
++        condition_on_label=True,
++        tau_min=1e-5,
++        tau_max=1e-2,
++        dropout=0.0,
++        use_torus_features=True,
++    )
++
++    torch.manual_seed(2)
++    tau_model = ConditionalScoreSetNetwork(**common_kwargs, score_output_scaling="tau")
++    torch.manual_seed(2)
++    tau_mass_model = ConditionalScoreSetNetwork(**common_kwargs, score_output_scaling="tau_mass")
++    tau_mass_model.load_state_dict(tau_model.state_dict())
++
++    out_tau = tau_model(masses, positions, tau, labels)
++    out_tau_mass = tau_mass_model(masses, positions, tau, labels)
++
++    assert out_tau.shape == positions.shape
++    assert out_tau_mass.shape == positions.shape
++    assert torch.all(torch.isfinite(out_tau_mass))
++
++    expected_ratio = torch.rsqrt(masses)[:, :, None]
++    assert torch.allclose(out_tau_mass, out_tau * expected_ratio, atol=1e-6, rtol=1e-5)
++
++    raw_model = ConditionalScoreSetNetwork(**common_kwargs, score_output_scaling="none")
++    raw_out = raw_model(masses, positions, tau, labels)
++    assert raw_out.shape == positions.shape
++
++    try:
++        ConditionalScoreSetNetwork(**common_kwargs, score_output_scaling="bad")
++    except ValueError:
++        pass
++    else:
++        raise AssertionError("invalid score_output_scaling should raise ValueError")
++
++
+ def _test_training_and_generation_smoke() -> None:
+     torch.manual_seed(0)
+     np.random.seed(0)
+@@ -258,6 +305,7 @@ def _test_horizon_diagnostic_smoke() -> None:
+ if __name__ == "__main__":
+     _test_perturbation_target_matches_formula()
+     _test_torus_score_target_smoke()
++    _test_deepsets_score_scaling_options()
+     _test_training_and_generation_smoke()
+     _test_horizon_diagnostic_smoke()
+     print("All mnist_score_matching smoke tests passed.")

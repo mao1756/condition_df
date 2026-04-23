@@ -1,0 +1,269 @@
+diff --git a/mnist_score_matching.py b/mnist_score_matching.py
+index 3c859eb..a30a0fa 100644
+--- a/mnist_score_matching.py
++++ b/mnist_score_matching.py
+@@ -70,6 +70,7 @@ __all__ = [
+     "train_score_model",
+     "diagnose_score_prior_horizons",
+     "recommend_score_prior_horizon",
++    "bridge_reverse_step",
+     "generate_score_matching_point_clouds",
+     "generate_balanced_score_matching_dataset",
+ ]
+@@ -1505,6 +1506,80 @@ def train_score_model(
+ # ---------------------------------------------------------------------------
+ 
+ 
++@torch.no_grad()
++def bridge_reverse_step(
++    model: ConditionalScoreSetNetwork,
++    masses: Tensor,
++    positions: Tensor,
++    labels: Tensor,
++    tau: float,
++    tau_next: float,
++    *,
++    state_projection: str = "reflect",
++    diffusion_temperature: float = 1.0,
++    score_scale: float = 1.0,
++) -> Tensor:
++    """Single Tweedie / Brownian-bridge reverse step.
++
++    Given a current state ``Y_tau`` at noise level ``tau``, this first forms the
++    Tweedie-style clean estimate
++
++        X0_hat = Y_tau + 2 tau score_scale * S_theta(tau, s, Y_tau),
++
++    then samples the bridge marginal at the smaller noise level ``tau_next``.
++    When ``tau_next == 0`` this returns ``X0_hat`` itself.  For
++    ``state_projection='wrap'`` the interpolation uses centered torus
++    differences, so the bridge follows the shortest wrapped displacement.
++    """
++    if tau <= 0.0 or not np.isfinite(tau):
++        raise ValueError("tau must be positive and finite")
++    if tau_next < 0.0 or not np.isfinite(tau_next):
++        raise ValueError("tau_next must be non-negative and finite")
++    if tau_next > tau:
++        raise ValueError("tau_next must satisfy 0 <= tau_next <= tau")
++    if diffusion_temperature < 0.0 or not np.isfinite(diffusion_temperature):
++        raise ValueError("diffusion_temperature must be non-negative and finite")
++    if score_scale <= 0.0 or not np.isfinite(score_scale):
++        raise ValueError("score_scale must be positive and finite")
++    if masses.ndim != 2:
++        raise ValueError("masses must have shape (B, K)")
++    if positions.ndim != 3 or positions.shape[:2] != masses.shape or positions.shape[2] != 2:
++        raise ValueError("positions must have shape (B, K, 2) and match masses")
++    if labels.ndim != 1 or labels.shape != (masses.shape[0],):
++        raise ValueError("labels must have shape (B,)")
++
++    batch_size = int(masses.shape[0])
++    tau_tensor = torch.full(
++        (batch_size,),
++        float(tau),
++        device=positions.device,
++        dtype=positions.dtype,
++    )
++    score = model(masses, positions, tau_tensor, labels)
++    x0_hat = positions + (2.0 * float(tau) * float(score_scale)) * score
++    x0_hat = project_positions(x0_hat, mode=state_projection)
++
++    if tau_next <= 0.0:
++        return x0_hat
++
++    ratio = float(tau_next) / float(tau)
++    if state_projection == "wrap":
++        delta = _centered_torus_difference(positions - x0_hat)
++        mean = x0_hat + ratio * delta
++    else:
++        mean = x0_hat + ratio * (positions - x0_hat)
++    mean = project_positions(mean, mode=state_projection)
++
++    bridge_factor = max(1.0 - ratio, 0.0)
++    bridge_variance = (
++        2.0 * float(diffusion_temperature) * float(tau_next) * bridge_factor
++    ) / masses.clamp_min(1e-8)
++    noise_scale = torch.sqrt(bridge_variance.clamp_min(0.0)).unsqueeze(-1)
++    if torch.any(noise_scale > 0.0):
++        mean = mean + noise_scale * torch.randn_like(positions)
++    return project_positions(mean, mode=state_projection)
++
++
+ @torch.no_grad()
+ def generate_score_matching_point_clouds(
+     model: ConditionalScoreSetNetwork,
+@@ -1529,6 +1604,7 @@ def generate_score_matching_point_clouds(
+     state_projection: str = "reflect",
+     diffusion_temperature: float = 1.0,
+     score_scale: float = 1.0,
++    sampler_scheme: str = "euler",
+     batch_size: int = 64,
+     return_trajectories: bool = False,
+     rasterize: bool = True,
+@@ -1536,13 +1612,22 @@ def generate_score_matching_point_clouds(
+     device: Optional[str | torch.device] = None,
+     rng: Optional[np.random.Generator] = None,
+ ) -> GeneratedPointCloudSet:
+-    """Sample point clouds with the reverse-time Euler--Maruyama scheme.
++    """Sample point clouds with a reverse-time score-based sampler.
+ 
+-    The update is the score-based analogue of notebook 6's h-transform sampler:
++    ``sampler_scheme='euler'`` uses the original reverse-time Euler--Maruyama
++    update
+ 
+         X_{m+1} = X_m + 2 Δt S_theta(tau_m, s, X_m, y)
+                          + sqrt(2 Δt / s) ξ_m.
+ 
++    ``sampler_scheme='bridge'`` instead forms a Tweedie-style clean estimate
++
++        X0_hat = Y_tau + 2 tau score_scale * S_theta(tau, s, Y_tau),
++
++    then samples the Brownian-bridge marginal at the next smaller noise level.
++    This often produces a less noisy final tail than Euler--Maruyama while
++    still using the same learned score field.
++
+     ``initial_position_mode='forward_noised_bank'`` is a diagnostic mode: it
+     draws a clean empirical mass/position pair and applies the same
+     mass-dependent forward noising kernel at ``tau=horizon`` before running the
+@@ -1564,6 +1649,8 @@ def generate_score_matching_point_clouds(
+         raise ValueError("batch_size must be positive")
+     if score_scale <= 0.0 or not np.isfinite(score_scale):
+         raise ValueError("score_scale must be positive and finite")
++    if sampler_scheme not in {"euler", "bridge"}:
++        raise ValueError("sampler_scheme must be one of {'euler', 'bridge'}")
+     if joint_bank_sampling and initial_position_mode != "bank":
+         raise ValueError("joint_bank_sampling=True requires initial_position_mode='bank'")
+     if mass_sampling_mode not in {"bank", "truncated_poisson_dirichlet"}:
+@@ -1726,22 +1813,37 @@ def generate_score_matching_point_clouds(
+ 
+     for step in range(num_steps):
+         tau_value = float(horizon - times[step])
++        tau_next = max(float(horizon - times[step + 1]), 0.0)
+         for start in range(0, num_samples, batch_size):
+             stop = min(start + batch_size, num_samples)
+             batch_masses = masses[start:stop]
+             batch_positions = positions[start:stop]
+             batch_labels = label_tensor[start:stop]
+-            tau = torch.full(
+-                (stop - start,),
+-                tau_value,
+-                device=model_device,
+-                dtype=batch_positions.dtype,
+-            )
+-            score = model(batch_masses, batch_positions, tau, batch_labels)
+-            drift = 2.0 * float(score_scale) * score
+-            noise_scale = torch.sqrt((2.0 * diffusion_temperature * step_size) / batch_masses).unsqueeze(-1)
+-            batch_positions = batch_positions + step_size * drift + noise_scale * torch.randn_like(batch_positions)
+-            batch_positions = project_positions(batch_positions, mode=state_projection)
++
++            if sampler_scheme == "euler":
++                tau = torch.full(
++                    (stop - start,),
++                    tau_value,
++                    device=model_device,
++                    dtype=batch_positions.dtype,
++                )
++                score = model(batch_masses, batch_positions, tau, batch_labels)
++                drift = 2.0 * float(score_scale) * score
++                noise_scale = torch.sqrt((2.0 * diffusion_temperature * step_size) / batch_masses).unsqueeze(-1)
++                batch_positions = batch_positions + step_size * drift + noise_scale * torch.randn_like(batch_positions)
++                batch_positions = project_positions(batch_positions, mode=state_projection)
++            else:
++                batch_positions = bridge_reverse_step(
++                    model,
++                    batch_masses,
++                    batch_positions,
++                    batch_labels,
++                    tau_value,
++                    tau_next,
++                    state_projection=state_projection,
++                    diffusion_temperature=diffusion_temperature,
++                    score_scale=score_scale,
++                )
+             positions[start:stop] = batch_positions
+ 
+         if trajectories is not None:
+@@ -1792,6 +1894,7 @@ def generate_balanced_score_matching_dataset(
+     state_projection: str = "reflect",
+     diffusion_temperature: float = 1.0,
+     score_scale: float = 1.0,
++    sampler_scheme: str = "euler",
+     batch_size: int = 64,
+     rasterize: bool = True,
+     image_size: int = 28,
+@@ -1822,6 +1925,7 @@ def generate_balanced_score_matching_dataset(
+         state_projection=state_projection,
+         diffusion_temperature=diffusion_temperature,
+         score_scale=score_scale,
++        sampler_scheme=sampler_scheme,
+         batch_size=batch_size,
+         return_trajectories=False,
+         rasterize=rasterize,
+diff --git a/test_smoke_mnist_score_matching.py b/test_smoke_mnist_score_matching.py
+index b0c959b..fdc6f81 100644
+--- a/test_smoke_mnist_score_matching.py
++++ b/test_smoke_mnist_score_matching.py
+@@ -264,6 +264,57 @@ def _test_training_and_generation_smoke() -> None:
+     assert np.all(np.isfinite(generated_from_noised_bank.positions))
+ 
+ 
++
++def _test_bridge_sampler_smoke() -> None:
++    images, labels = _make_toy_images(num_per_class=3)
++    point_clouds = images_to_weighted_point_clouds(
++        images,
++        labels=labels,
++        top_k=6,
++        mass_floor=1e-3,
++    )
++
++    model = ConditionalScoreSetNetwork(
++        point_feature_dim=12,
++        hidden_dim=16,
++        conditioning_dim=8,
++        num_classes=2,
++        condition_on_label=True,
++        tau_min=5e-4,
++        tau_max=5e-3,
++        use_torus_features=True,
++        score_output_scaling="tau_mass",
++    )
++
++    generated_bridge = generate_balanced_score_matching_dataset(
++        model,
++        point_clouds.masses,
++        bank_labels=point_clouds.labels,
++        num_points=point_clouds.num_points,
++        num_per_class=2,
++        mass_sampling_mode="bank",
++        class_conditional_mass_sampling=True,
++        horizon=5e-3,
++        step_size=2.5e-3,
++        initial_position_mode="forward_noised_bank",
++        initial_position_bank=point_clouds.positions,
++        initial_position_bank_labels=point_clouds.labels,
++        state_projection="wrap",
++        diffusion_temperature=1.0,
++        score_scale=1.0,
++        sampler_scheme="bridge",
++        batch_size=2,
++        rasterize=True,
++        image_size=28,
++        device="cpu",
++        rng=np.random.default_rng(655),
++    )
++    assert generated_bridge.positions.shape == (4, point_clouds.num_points, 2)
++    assert generated_bridge.images is not None and generated_bridge.images.shape == (4, 28, 28)
++    assert np.all(np.isfinite(generated_bridge.positions))
++    assert np.all(np.isfinite(generated_bridge.images))
++
++
+ def _test_horizon_diagnostic_smoke() -> None:
+     images, labels = _make_toy_images(num_per_class=4)
+     point_clouds = images_to_weighted_point_clouds(
+@@ -307,5 +358,6 @@ if __name__ == "__main__":
+     _test_torus_score_target_smoke()
+     _test_deepsets_score_scaling_options()
+     _test_training_and_generation_smoke()
++    _test_bridge_sampler_smoke()
+     _test_horizon_diagnostic_smoke()
+     print("All mnist_score_matching smoke tests passed.")
