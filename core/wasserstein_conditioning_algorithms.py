@@ -25,7 +25,7 @@ from typing import Callable, Optional, Sequence, Tuple
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from conditioning_utils import (
+from core.conditioning_utils import (
     as_float_array as _as_float_array,
     build_time_grid as _build_time_grid,
     get_rng as _get_rng,

@@ -1,14 +1,14 @@
 """Small smoke tests for the manuscript algorithm implementations.
 
 Run with
-    python test_smoke_wasserstein_conditioning_algorithms.py
+    .venv\\Scripts\\python.exe -m tests.test_smoke_wasserstein_conditioning_algorithms
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from wasserstein_conditioning_algorithms import (
+from core.wasserstein_conditioning_algorithms import (
     shortest_periodic_displacement,
     simulate_gaussian_terminal_em,
     simulate_nonlinear_cylinder_quadrature_em,

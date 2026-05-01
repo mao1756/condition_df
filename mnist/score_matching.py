@@ -40,7 +40,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
-from mnist_conditioned_diffusion import (
+from mnist.conditioned_diffusion import (
     GeneratedPointCloudSet,
     WeightedPointCloudDataset,
     _resolve_device,
@@ -50,7 +50,7 @@ from mnist_conditioned_diffusion import (
     rasterize_weighted_point_clouds,
     sample_initial_positions,
 )
-from mnist_experiment6_fixes import (
+from mnist.experiment6_fixes import (
     draw_position_vectors_from_bank,
     sample_truncated_poisson_dirichlet_masses,
 )

@@ -1,7 +1,7 @@
 """Smoke tests for the MNIST score-matching weighted point-cloud experiment.
 
 Run with
-    python test_smoke_mnist_score_matching.py
+    .venv\\Scripts\\python.exe -m tests.test_smoke_mnist_score_matching
 """
 
 from __future__ import annotations
@@ -9,8 +9,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from mnist_weighted_point_cloud import images_to_weighted_point_clouds, normalize_images_to_measures
-from mnist_score_matching import (
+from mnist.weighted_point_cloud import images_to_weighted_point_clouds, normalize_images_to_measures
+from mnist.score_matching import (
     ConditionalScoreSetNetwork,
     ConditionalScoreSetTransformer,
     ConditionalScoreImageFieldNetwork,

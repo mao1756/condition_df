@@ -28,7 +28,7 @@ import urllib.request
 import numpy as np
 from numpy.typing import NDArray
 
-from conditioning_utils import as_float_array, validate_probability_vector
+from core.conditioning_utils import as_float_array, validate_probability_vector
 
 FloatArray = NDArray[np.float64]
 IntArray = NDArray[np.int64]

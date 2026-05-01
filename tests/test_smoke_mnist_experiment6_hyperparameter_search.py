@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from mnist_weighted_point_cloud import (
+from mnist.weighted_point_cloud import (
     images_to_weighted_point_clouds,
     normalize_images_to_measures,
 )
-from mnist_experiment6_hyperparameter_search import (
+from mnist.experiment6_hyperparameter_search import (
     Experiment6SearchConfig,
     PreparedMnistExperiment6Data,
     run_experiment6_random_search,

@@ -41,12 +41,12 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
 import math
 
-from conditioning_utils import validate_probability_vector
-from mnist_weighted_point_cloud import (
+from core.conditioning_utils import validate_probability_vector
+from mnist.weighted_point_cloud import (
     WeightedPointCloudBatch,
     rasterize_weighted_point_clouds,
 )
-from wasserstein_conditioning_algorithms import sinkhorn_plan
+from core.wasserstein_conditioning_algorithms import sinkhorn_plan
 
 FloatArray = NDArray[np.float64]
 IntArray = NDArray[np.int64]

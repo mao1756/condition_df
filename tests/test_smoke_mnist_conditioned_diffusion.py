@@ -1,7 +1,7 @@
 """Smoke tests for the MNIST weighted point-cloud experiment code.
 
 Run with
-    python test_smoke_mnist_conditioned_diffusion.py
+    .venv\\Scripts\\python.exe -m tests.test_smoke_mnist_conditioned_diffusion
 """
 
 from __future__ import annotations
@@ -9,14 +9,14 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from mnist_weighted_point_cloud import (
+from mnist.weighted_point_cloud import (
     images_to_weighted_point_clouds,
     normalize_images_to_measures,
     rasterize_weighted_point_clouds,
 )
-import mnist_conditioned_diffusion as mnist_cd
-import mnist_experiment6_fixes as mnist_fix
-from mnist_conditioned_diffusion import (
+import mnist.conditioned_diffusion as mnist_cd
+import mnist.experiment6_fixes as mnist_fix
+from mnist.conditioned_diffusion import (
     TerminalSetClassifier,
     confusion_matrix_from_predictions,
     evaluate_generation_metrics,
@@ -25,7 +25,7 @@ from mnist_conditioned_diffusion import (
     train_terminal_set_classifier,
     terminal_g_accuracy,
 )
-from mnist_experiment6_fixes import (
+from mnist.experiment6_fixes import (
     generate_balanced_synthetic_dataset_reparam,
     generate_guided_point_clouds_reparam,
     sample_truncated_poisson_dirichlet_masses,

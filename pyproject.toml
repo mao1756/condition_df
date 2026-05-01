@@ -1,0 +1,21 @@
+[tool.pytest.ini_options]
+python_files = ["test_*.py"]
+python_functions = ["test_*", "_test_*", "_regression_test_*"]
+testpaths = ["tests"]
+norecursedirs = [".git", ".venv", "__pycache__", "artifacts", "mnist_data", "notebooks", "tuning_runs"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+  ".venv",
+  "mnist_data",
+  "notebooks",
+  "tuning_runs",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]

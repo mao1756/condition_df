@@ -48,7 +48,7 @@ import math
 import numpy as np
 from numpy.typing import ArrayLike
 
-from conditioning_utils import (
+from core.conditioning_utils import (
     FloatArray,
     as_float_array as _as_float_array,
     build_time_grid as _build_time_grid,
@@ -57,7 +57,7 @@ from conditioning_utils import (
     validate_probability_vector as _validate_probability_vector,
 )
 
-from wasserstein_conditioning_algorithms import ParticleSimulation, wrap_torus
+from core.wasserstein_conditioning_algorithms import ParticleSimulation, wrap_torus
 
 __all__ = [
     "simulate_fixed_count_two_well_terminal_em",

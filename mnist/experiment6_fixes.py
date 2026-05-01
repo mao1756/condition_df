@@ -24,7 +24,7 @@ import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
 
-from mnist_conditioned_diffusion import (
+from mnist.conditioned_diffusion import (
     GeneratedPointCloudSet,
     TerminalSetClassifier,
     WeightedPointCloudDataset,

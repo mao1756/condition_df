@@ -38,7 +38,7 @@ from typing import Optional
 import numpy as np
 from numpy.typing import ArrayLike
 
-from conditioning_utils import (
+from core.conditioning_utils import (
     FloatArray,
     as_float_array as _as_float_array,
     build_time_grid as _build_time_grid,
@@ -47,7 +47,7 @@ from conditioning_utils import (
     validate_probability_vector as _validate_probability_vector,
 )
 
-from wasserstein_conditioning_algorithms import (
+from core.wasserstein_conditioning_algorithms import (
     ParticleSimulation,
     shortest_periodic_displacement,
     wrap_torus,

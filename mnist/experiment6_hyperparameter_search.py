@@ -43,19 +43,19 @@ import numpy as np
 import pandas as pd
 import torch
 
-from mnist_weighted_point_cloud import (
+from mnist.weighted_point_cloud import (
     WeightedPointCloudBatch,
     images_to_weighted_point_clouds,
     load_mnist_arrays,
 )
-from mnist_conditioned_diffusion import (
+from mnist.conditioned_diffusion import (
     TerminalSetClassifier,
     evaluate_generation_metrics,
     evaluate_terminal_set_classifier,
     project_positions,
     terminal_g_accuracy,
 )
-from mnist_experiment6_fixes import (
+from mnist.experiment6_fixes import (
     generate_balanced_synthetic_dataset_reparam,
     train_terminal_set_classifier_noisy,
 )
