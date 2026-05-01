@@ -13,6 +13,7 @@ from mnist_weighted_point_cloud import images_to_weighted_point_clouds, normaliz
 from mnist_score_matching import (
     ConditionalScoreSetNetwork,
     ConditionalScoreSetTransformer,
+    ConditionalScoreImageFieldNetwork,
     add_forward_noise_to_positions,
     diagnose_score_prior_horizons,
     evaluate_score_model,
@@ -20,6 +21,7 @@ from mnist_score_matching import (
     generate_balanced_score_matching_dataset,
     recommend_score_prior_horizon,
     perturb_weighted_point_cloud_positions,
+    weighted_denoising_score_matching_loss,
     torus_heat_kernel_score_target,
     train_score_model,
 )
@@ -134,6 +136,61 @@ def _test_deepsets_score_scaling_options() -> None:
         pass
     else:
         raise AssertionError("invalid score_output_scaling should raise ValueError")
+
+
+
+
+def _test_image_field_score_network_smoke() -> None:
+    torch.manual_seed(3)
+    np.random.seed(3)
+
+    images, labels = _make_toy_images(num_per_class=2)
+    point_clouds = images_to_weighted_point_clouds(
+        images,
+        labels=labels,
+        top_k=8,
+        mass_floor=1e-3,
+    )
+
+    model = ConditionalScoreImageFieldNetwork(
+        grid_size=16,
+        base_channels=8,
+        grid_feature_dim=12,
+        point_hidden_dim=24,
+        conditioning_dim=8,
+        num_classes=2,
+        condition_on_label=True,
+        tau_min=5e-4,
+        tau_max=5e-3,
+        dropout=0.0,
+        use_torus_features=True,
+        score_output_scaling="tau_mass",
+    )
+
+    masses = torch.tensor(point_clouds.masses[:2], dtype=torch.float32)
+    positions = torch.tensor(point_clouds.positions[:2], dtype=torch.float32)
+    labels_t = torch.tensor(point_clouds.labels[:2], dtype=torch.long)
+    tau = torch.tensor([1e-3, 2e-3], dtype=torch.float32)
+
+    noisy, target_score, _ = perturb_weighted_point_cloud_positions(
+        masses,
+        positions,
+        tau,
+        projection="wrap",
+    )
+    pred = model(masses, noisy, tau, labels_t)
+    loss, _ = weighted_denoising_score_matching_loss(
+        pred,
+        target_score,
+        masses,
+        tau,
+    )
+    loss.backward()
+
+    assert pred.shape == positions.shape
+    assert torch.all(torch.isfinite(pred))
+    assert torch.isfinite(loss)
+    assert any(param.grad is not None for param in model.parameters())
 
 
 def _test_training_and_generation_smoke() -> None:
@@ -357,6 +414,7 @@ if __name__ == "__main__":
     _test_perturbation_target_matches_formula()
     _test_torus_score_target_smoke()
     _test_deepsets_score_scaling_options()
+    _test_image_field_score_network_smoke()
     _test_training_and_generation_smoke()
     _test_bridge_sampler_smoke()
     _test_horizon_diagnostic_smoke()

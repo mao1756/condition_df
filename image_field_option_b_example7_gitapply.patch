@@ -1,0 +1,2069 @@
+diff --git a/mnist_score_matching.py b/mnist_score_matching.py
+--- a/mnist_score_matching.py
++++ b/mnist_score_matching.py
+@@ -37,6 +37,7 @@
+ 
+ import torch
+ from torch import Tensor, nn
++from torch.nn import functional as F
+ from torch.utils.data import DataLoader
+ 
+ from mnist_conditioned_diffusion import (
+@@ -60,6 +61,7 @@
+ __all__ = [
+     "ConditionalScoreSetNetwork",
+     "ConditionalScoreSetTransformer",
++    "ConditionalScoreImageFieldNetwork",
+     "sample_score_matching_noise_levels",
+     "add_forward_noise_to_positions",
+     "torus_heat_kernel_score_target",
+@@ -106,6 +108,428 @@
+     log_tau_unit = (log_tau / log_denom).clamp(0.0, 1.0)
+     sqrt_tau_unit = torch.sqrt(tau_unit.clamp_min(0.0))
+     return torch.stack([tau_unit, sqrt_tau_unit, log_tau_unit], dim=1)
++
++
++
++
++def _group_norm_groups(num_channels: int, max_groups: int = 8) -> int:
++    """Choose a small GroupNorm group count that divides ``num_channels``."""
++    for groups in reversed(range(1, max_groups + 1)):
++        if groups <= num_channels and num_channels % groups == 0:
++            return groups
++    return 1
++
++
++def _normalize_positions_for_grid(positions: Tensor, *, periodic: bool) -> Tensor:
++    """Map particle positions into the unit square used by the raster grid."""
++    if periodic:
++        return torch.remainder(positions, 1.0)
++    eps = max(torch.finfo(positions.dtype).eps, 1e-6)
++    return positions.clamp(0.0, 1.0 - eps)
++
++
++def _grid_bilinear_coordinates(
++    positions: Tensor,
++    *,
++    height: int,
++    width: int,
++    periodic: bool,
++) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
++    """Return bilinear neighbor indices and weights for unit-square positions."""
++    if height <= 0 or width <= 0:
++        raise ValueError("height and width must be positive")
++    positions = _normalize_positions_for_grid(positions, periodic=periodic)
++
++    x = positions[..., 0] * float(width) - 0.5
++    y = positions[..., 1] * float(height) - 0.5
++
++    x0 = torch.floor(x)
++    y0 = torch.floor(y)
++    x1 = x0 + 1.0
++    y1 = y0 + 1.0
++
++    wx1 = x - x0
++    wy1 = y - y0
++    wx0 = 1.0 - wx1
++    wy0 = 1.0 - wy1
++
++    x0_idx = x0.to(dtype=torch.long)
++    y0_idx = y0.to(dtype=torch.long)
++    x1_idx = x1.to(dtype=torch.long)
++    y1_idx = y1.to(dtype=torch.long)
++
++    if periodic:
++        x0_idx = torch.remainder(x0_idx, width)
++        x1_idx = torch.remainder(x1_idx, width)
++        y0_idx = torch.remainder(y0_idx, height)
++        y1_idx = torch.remainder(y1_idx, height)
++    else:
++        x0_idx = x0_idx.clamp(0, width - 1)
++        x1_idx = x1_idx.clamp(0, width - 1)
++        y0_idx = y0_idx.clamp(0, height - 1)
++        y1_idx = y1_idx.clamp(0, height - 1)
++
++    w00 = wx0 * wy0
++    w01 = wx1 * wy0
++    w10 = wx0 * wy1
++    w11 = wx1 * wy1
++    return x0_idx, x1_idx, y0_idx, y1_idx, w00, w01, w10, w11
++
++
++def _rasterize_weighted_point_clouds_torch(
++    masses: Tensor,
++    positions: Tensor,
++    *,
++    grid_size: int,
++    periodic: bool,
++    include_occupancy: bool = True,
++) -> Tensor:
++    """Rasterize weighted point clouds into density/occupancy image channels."""
++    if masses.ndim != 2:
++        raise ValueError("masses must have shape (B, K)")
++    if positions.ndim != 3 or positions.shape[:2] != masses.shape or positions.shape[2] != 2:
++        raise ValueError("positions must have shape (B, K, 2) and match masses")
++    if grid_size <= 0:
++        raise ValueError("grid_size must be positive")
++
++    batch_size, num_points = masses.shape
++    height = width = int(grid_size)
++    num_cells = height * width
++
++    x0_idx, x1_idx, y0_idx, y1_idx, w00, w01, w10, w11 = _grid_bilinear_coordinates(
++        positions,
++        height=height,
++        width=width,
++        periodic=periodic,
++    )
++
++    idx00 = y0_idx * width + x0_idx
++    idx01 = y0_idx * width + x1_idx
++    idx10 = y1_idx * width + x0_idx
++    idx11 = y1_idx * width + x1_idx
++
++    density = masses.new_zeros((batch_size, num_cells))
++    density.scatter_add_(1, idx00, masses * w00)
++    density.scatter_add_(1, idx01, masses * w01)
++    density.scatter_add_(1, idx10, masses * w10)
++    density.scatter_add_(1, idx11, masses * w11)
++    density = density.reshape(batch_size, 1, height, width)
++
++    if not include_occupancy:
++        return density
++
++    occupancy = masses.new_zeros((batch_size, num_cells))
++    point_unit = masses.new_full((batch_size, num_points), 1.0 / max(num_points, 1))
++    occupancy.scatter_add_(1, idx00, point_unit * w00)
++    occupancy.scatter_add_(1, idx01, point_unit * w01)
++    occupancy.scatter_add_(1, idx10, point_unit * w10)
++    occupancy.scatter_add_(1, idx11, point_unit * w11)
++    occupancy = occupancy.reshape(batch_size, 1, height, width)
++    return torch.cat([density, occupancy], dim=1)
++
++
++def _sample_feature_grid_at_positions(
++    feature_grid: Tensor,
++    positions: Tensor,
++    *,
++    periodic: bool,
++) -> Tensor:
++    """Sample a dense feature grid at particle locations by bilinear interpolation."""
++    if feature_grid.ndim != 4:
++        raise ValueError("feature_grid must have shape (B, C, H, W)")
++    if positions.ndim != 3 or positions.shape[0] != feature_grid.shape[0] or positions.shape[2] != 2:
++        raise ValueError("positions must have shape (B, K, 2) and match feature_grid batch size")
++
++    batch_size, channels, height, width = feature_grid.shape
++    _, num_points, _ = positions.shape
++
++    x0_idx, x1_idx, y0_idx, y1_idx, w00, w01, w10, w11 = _grid_bilinear_coordinates(
++        positions,
++        height=height,
++        width=width,
++        periodic=periodic,
++    )
++    idx00 = y0_idx * width + x0_idx
++    idx01 = y0_idx * width + x1_idx
++    idx10 = y1_idx * width + x0_idx
++    idx11 = y1_idx * width + x1_idx
++
++    flat = feature_grid.reshape(batch_size, channels, height * width)
++
++    def _gather(idx: Tensor) -> Tensor:
++        gathered = flat.gather(2, idx[:, None, :].expand(batch_size, channels, num_points))
++        return gathered.transpose(1, 2)
++
++    sampled = (
++        w00[..., None] * _gather(idx00)
++        + w01[..., None] * _gather(idx01)
++        + w10[..., None] * _gather(idx10)
++        + w11[..., None] * _gather(idx11)
++    )
++    return sampled
++
++
++class _ConvBlock2d(nn.Module):
++    """Two-layer convolutional block used by the image-field U-Net."""
++
++    def __init__(self, in_channels: int, out_channels: int, *, padding_mode: str) -> None:
++        super().__init__()
++        groups = _group_norm_groups(out_channels)
++        self.net = nn.Sequential(
++            nn.Conv2d(
++                in_channels,
++                out_channels,
++                kernel_size=3,
++                padding=1,
++                bias=False,
++                padding_mode=padding_mode,
++            ),
++            nn.GroupNorm(groups, out_channels),
++            nn.GELU(),
++            nn.Conv2d(
++                out_channels,
++                out_channels,
++                kernel_size=3,
++                padding=1,
++                bias=False,
++                padding_mode=padding_mode,
++            ),
++            nn.GroupNorm(groups, out_channels),
++            nn.GELU(),
++        )
++
++    def forward(self, x: Tensor) -> Tensor:
++        return self.net(x)
++
++
++class _SmallUNet2d(nn.Module):
++    """Small U-Net that turns rasterized clouds into dense local feature grids."""
++
++    def __init__(
++        self,
++        *,
++        in_channels: int,
++        out_channels: int,
++        base_channels: int,
++        padding_mode: str,
++    ) -> None:
++        super().__init__()
++        if in_channels <= 0 or out_channels <= 0 or base_channels <= 0:
++            raise ValueError("U-Net channel counts must be positive")
++
++        c1 = int(base_channels)
++        c2 = 2 * c1
++        c3 = 4 * c1
++
++        self.enc1 = _ConvBlock2d(in_channels, c1, padding_mode=padding_mode)
++        self.pool1 = nn.AvgPool2d(2)
++        self.enc2 = _ConvBlock2d(c1, c2, padding_mode=padding_mode)
++        self.pool2 = nn.AvgPool2d(2)
++        self.bottleneck = _ConvBlock2d(c2, c3, padding_mode=padding_mode)
++
++        self.up2 = nn.Conv2d(c3, c2, kernel_size=1)
++        self.dec2 = _ConvBlock2d(c2 + c2, c2, padding_mode=padding_mode)
++        self.up1 = nn.Conv2d(c2, c1, kernel_size=1)
++        self.dec1 = _ConvBlock2d(c1 + c1, c1, padding_mode=padding_mode)
++        self.out = nn.Conv2d(c1, out_channels, kernel_size=1)
++
++    def forward(self, x: Tensor) -> Tensor:
++        enc1 = self.enc1(x)
++        enc2 = self.enc2(self.pool1(enc1))
++        bottleneck = self.bottleneck(self.pool2(enc2))
++
++        up2 = F.interpolate(bottleneck, size=enc2.shape[-2:], mode="bilinear", align_corners=False)
++        up2 = self.up2(up2)
++        dec2 = self.dec2(torch.cat([up2, enc2], dim=1))
++
++        up1 = F.interpolate(dec2, size=enc1.shape[-2:], mode="bilinear", align_corners=False)
++        up1 = self.up1(up1)
++        dec1 = self.dec1(torch.cat([up1, enc1], dim=1))
++        return self.out(dec1)
++
++
++class ConditionalScoreImageFieldNetwork(nn.Module):
++    r"""Hybrid image-field score network for weighted point clouds.
++
++    The model first rasterizes the weighted point cloud into a small periodic
++    density image, augments it with broadcast label/time conditioning, and runs
++    a compact U-Net to produce dense local features on the canvas.  These local
++    features are then bilinearly sampled back at the particle locations and
++    passed through a lightweight particle-wise head together with the masses and
++    conditioning variables.
++
++    This is the "Option B" hybrid architecture:
++        point cloud -> rasterized image -> U-Net features
++                    -> sample local features at particles -> point head -> score
++    """
++
++    def __init__(
++        self,
++        *,
++        grid_size: int = 32,
++        base_channels: int = 32,
++        grid_feature_dim: int = 64,
++        point_hidden_dim: int = 256,
++        conditioning_dim: int = 64,
++        num_classes: int = 10,
++        condition_on_label: bool = True,
++        tau_min: float = 1e-6,
++        tau_max: float = 1e-3,
++        dropout: float = 0.0,
++        use_torus_features: bool = True,
++        score_output_scaling: str = "tau_mass",
++        include_occupancy_channel: bool = True,
++    ) -> None:
++        super().__init__()
++        if grid_size <= 0 or base_channels <= 0 or grid_feature_dim <= 0 or point_hidden_dim <= 0:
++            raise ValueError("image-field widths must be positive")
++        if conditioning_dim <= 0:
++            raise ValueError("conditioning_dim must be positive")
++        if num_classes <= 1:
++            raise ValueError("num_classes must be at least 2")
++        if tau_min <= 0.0 or tau_max <= 0.0 or tau_min > tau_max:
++            raise ValueError("tau_min and tau_max must satisfy 0 < tau_min <= tau_max")
++        if dropout < 0.0:
++            raise ValueError("dropout must be non-negative")
++        if score_output_scaling not in {"tau", "tau_mass", "none"}:
++            raise ValueError("score_output_scaling must be one of {'tau', 'tau_mass', 'none'}")
++
++        self.grid_size = int(grid_size)
++        self.base_channels = int(base_channels)
++        self.grid_feature_dim = int(grid_feature_dim)
++        self.point_hidden_dim = int(point_hidden_dim)
++        self.num_classes = int(num_classes)
++        self.condition_on_label = bool(condition_on_label)
++        self.tau_min = float(tau_min)
++        self.tau_max = float(tau_max)
++        self.use_torus_features = bool(use_torus_features)
++        self.score_output_scaling = str(score_output_scaling)
++        self.include_occupancy_channel = bool(include_occupancy_channel)
++
++        self.time_mlp = nn.Sequential(
++            nn.Linear(3, conditioning_dim),
++            nn.GELU(),
++            nn.Linear(conditioning_dim, conditioning_dim),
++            nn.GELU(),
++        )
++        if self.condition_on_label:
++            self.label_embedding = nn.Embedding(self.num_classes, conditioning_dim)
++            label_dim = conditioning_dim
++        else:
++            self.label_embedding = None
++            label_dim = 0
++        cond_dim = conditioning_dim + label_dim
++
++        raster_channels = 2 if self.include_occupancy_channel else 1
++        self.feature_unet = _SmallUNet2d(
++            in_channels=raster_channels + cond_dim,
++            out_channels=self.grid_feature_dim,
++            base_channels=self.base_channels,
++            padding_mode="circular" if self.use_torus_features else "zeros",
++        )
++
++        position_dim = 6 if self.use_torus_features else 2
++        point_input_dim = self.grid_feature_dim + position_dim + 2 + cond_dim
++        self.point_head = nn.Sequential(
++            nn.Linear(point_input_dim, self.point_hidden_dim),
++            nn.GELU(),
++            nn.Dropout(dropout),
++            nn.Linear(self.point_hidden_dim, self.point_hidden_dim),
++            nn.GELU(),
++            nn.Dropout(dropout),
++            nn.Linear(self.point_hidden_dim, 2),
++        )
++
++    def _prepare_tau(self, tau: Tensor | float, batch_size: int, *, device: torch.device, dtype: torch.dtype) -> Tensor:
++        if isinstance(tau, Tensor):
++            tau_tensor = tau.to(device=device, dtype=dtype).reshape(-1)
++        else:
++            tau_tensor = torch.full((batch_size,), float(tau), device=device, dtype=dtype)
++        if tau_tensor.numel() == 1:
++            tau_tensor = tau_tensor.expand(batch_size)
++        if tau_tensor.shape != (batch_size,):
++            raise ValueError("tau must be a scalar or have shape (B,)")
++        return tau_tensor
++
++    def _prepare_conditioning(self, tau: Tensor, labels: Optional[Tensor]) -> Tensor:
++        time_context = self.time_mlp(
++            _tau_features(tau, tau_min=self.tau_min, tau_max=self.tau_max)
++        )
++        if not self.condition_on_label:
++            return time_context
++        if labels is None:
++            raise ValueError("labels are required when condition_on_label=True")
++        labels = labels.reshape(-1).to(device=tau.device, dtype=torch.long)
++        if labels.shape != tau.shape:
++            raise ValueError("labels must have shape (B,)")
++        label_context = self.label_embedding(labels)
++        return torch.cat([time_context, label_context], dim=1)
++
++    def _position_features(self, positions: Tensor) -> Tensor:
++        if not self.use_torus_features:
++            return positions
++        angles = 2.0 * math.pi * positions
++        return torch.cat([positions, torch.sin(angles), torch.cos(angles)], dim=-1)
++
++    def _score_scale(self, tau: Tensor, masses: Tensor) -> Tensor:
++        if self.score_output_scaling == "none":
++            return torch.ones((*masses.shape, 1), device=masses.device, dtype=masses.dtype)
++        if self.score_output_scaling == "tau":
++            return torch.rsqrt((2.0 * tau).clamp_min(self.tau_min))[:, None, None]
++        return torch.rsqrt(
++            (2.0 * tau[:, None, None] * masses.unsqueeze(-1)).clamp_min(self.tau_min * 1e-8)
++        )
++
++    def forward(
++        self,
++        masses: Tensor,
++        positions: Tensor,
++        tau: Tensor | float,
++        labels: Optional[Tensor] = None,
++    ) -> Tensor:
++        if masses.ndim != 2:
++            raise ValueError("masses must have shape (B, K)")
++        if positions.ndim != 3 or positions.shape[:2] != masses.shape or positions.shape[2] != 2:
++            raise ValueError("positions must have shape (B, K, 2) and match masses")
++
++        batch_size, num_points = masses.shape
++        tau_tensor = self._prepare_tau(
++            tau,
++            batch_size,
++            device=positions.device,
++            dtype=positions.dtype,
++        )
++        cond = self._prepare_conditioning(tau_tensor, labels)
++        cond_points = cond[:, None, :].expand(batch_size, num_points, cond.shape[1])
++
++        raster = _rasterize_weighted_point_clouds_torch(
++            masses,
++            positions,
++            grid_size=self.grid_size,
++            periodic=self.use_torus_features,
++            include_occupancy=self.include_occupancy_channel,
++        )
++        cond_grid = cond[:, :, None, None].expand(batch_size, cond.shape[1], self.grid_size, self.grid_size)
++        feature_grid = self.feature_unet(torch.cat([raster, cond_grid], dim=1))
++        local_features = _sample_feature_grid_at_positions(
++            feature_grid,
++            positions,
++            periodic=self.use_torus_features,
++        )
++
++        log_masses = torch.log(masses.clamp_min(1e-8))
++        point_inputs = torch.cat(
++            [
++                local_features,
++                self._position_features(positions),
++                masses.unsqueeze(-1),
++                log_masses.unsqueeze(-1),
++                cond_points,
++            ],
++            dim=-1,
++        )
++        raw_scaled_score = self.point_head(point_inputs)
++        return raw_scaled_score * self._score_scale(tau_tensor, masses)
+ 
+ 
+ class ConditionalScoreSetNetwork(nn.Module):
+diff --git a/test_smoke_mnist_score_matching.py b/test_smoke_mnist_score_matching.py
+--- a/test_smoke_mnist_score_matching.py
++++ b/test_smoke_mnist_score_matching.py
+@@ -13,6 +13,7 @@
+ from mnist_score_matching import (
+     ConditionalScoreSetNetwork,
+     ConditionalScoreSetTransformer,
++    ConditionalScoreImageFieldNetwork,
+     add_forward_noise_to_positions,
+     diagnose_score_prior_horizons,
+     evaluate_score_model,
+@@ -20,6 +21,7 @@
+     generate_balanced_score_matching_dataset,
+     recommend_score_prior_horizon,
+     perturb_weighted_point_cloud_positions,
++    weighted_denoising_score_matching_loss,
+     torus_heat_kernel_score_target,
+     train_score_model,
+ )
+@@ -136,6 +138,61 @@
+         raise AssertionError("invalid score_output_scaling should raise ValueError")
+ 
+ 
++
++
++def _test_image_field_score_network_smoke() -> None:
++    torch.manual_seed(3)
++    np.random.seed(3)
++
++    images, labels = _make_toy_images(num_per_class=2)
++    point_clouds = images_to_weighted_point_clouds(
++        images,
++        labels=labels,
++        top_k=8,
++        mass_floor=1e-3,
++    )
++
++    model = ConditionalScoreImageFieldNetwork(
++        grid_size=16,
++        base_channels=8,
++        grid_feature_dim=12,
++        point_hidden_dim=24,
++        conditioning_dim=8,
++        num_classes=2,
++        condition_on_label=True,
++        tau_min=5e-4,
++        tau_max=5e-3,
++        dropout=0.0,
++        use_torus_features=True,
++        score_output_scaling="tau_mass",
++    )
++
++    masses = torch.tensor(point_clouds.masses[:2], dtype=torch.float32)
++    positions = torch.tensor(point_clouds.positions[:2], dtype=torch.float32)
++    labels_t = torch.tensor(point_clouds.labels[:2], dtype=torch.long)
++    tau = torch.tensor([1e-3, 2e-3], dtype=torch.float32)
++
++    noisy, target_score, _ = perturb_weighted_point_cloud_positions(
++        masses,
++        positions,
++        tau,
++        projection="wrap",
++    )
++    pred = model(masses, noisy, tau, labels_t)
++    loss, _ = weighted_denoising_score_matching_loss(
++        pred,
++        target_score,
++        masses,
++        tau,
++    )
++    loss.backward()
++
++    assert pred.shape == positions.shape
++    assert torch.all(torch.isfinite(pred))
++    assert torch.isfinite(loss)
++    assert any(param.grad is not None for param in model.parameters())
++
++
+ def _test_training_and_generation_smoke() -> None:
+     torch.manual_seed(0)
+     np.random.seed(0)
+@@ -357,6 +414,7 @@
+     _test_perturbation_target_matches_formula()
+     _test_torus_score_target_smoke()
+     _test_deepsets_score_scaling_options()
++    _test_image_field_score_network_smoke()
+     _test_training_and_generation_smoke()
+     _test_bridge_sampler_smoke()
+     _test_horizon_diagnostic_smoke()
+diff --git a/notebooks/example_7_mnist_score_matching_generation_image_field.ipynb b/notebooks/example_7_mnist_score_matching_generation_image_field.ipynb
+new file mode 100644
+--- /dev/null
++++ b/notebooks/example_7_mnist_score_matching_generation_image_field.ipynb
+@@ -0,0 +1,1527 @@
++{
++ "cells": [
++  {
++   "cell_type": "markdown",
++   "id": "5cbc1ff5",
++   "metadata": {},
++   "source": [
++    "# Example 7 — MNIST weighted point clouds with denoising score matching (image-field score network)\n",
++    "\n",
++    "This notebook mirrors the MNIST weighted-point-cloud setup of **Example 6**, but the generator is now trained with the denoising score-matching procedure from the score-matching note.\n",
++    "\n",
++    "Each normalized MNIST image is represented as a weighted atomic probability measure\n",
++    "\n",
++    "$$\n",
++    "\\mu_x = \\sum_{i=1}^n s_i \\, \\delta_{\\xi_i},\n",
++    "$$\n",
++    "\n",
++    "where the atoms are the centers of the `top_k` brightest pixels and the masses are the corresponding normalized pixel intensities.  The score model learns the noisy-position score field while keeping the masses frozen.\n",
++    "\n",
++    "To stay close to Example 6, the notebook is **class-conditional**: the score network takes the digit label as an additional conditioning variable.  Without the label embedding, the same code can be used on the unconditional empirical law.\n",
++    "\n",
++    "This variant keeps the Example 7 data pipeline, DSM objective, sampling scheme, and evaluation protocol unchanged, but replaces the point-set score model by a rasterized **image-field** score network (Option B).\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "c6937db7",
++   "metadata": {},
++   "source": [
++    "## Theory used in the code\n",
++    "\n",
++    "Fix a mass vector `s = (s_1, ..., s_n)` and clean particle positions `X = (X_1, ..., X_n)`.\n",
++    "\n",
++    "For a noise level `\\tau > 0`, the forward noising kernel is the finite-particle heat kernel with frozen masses,\n",
++    "\n",
++    "$$\n",
++    "Y_i = X_i + \\sqrt{\\frac{2 \\tau}{s_i}} Z_i, \\qquad Z_i \\sim \\mathcal N(0, I_2),\n",
++    "$$\n",
++    "\n",
++    "followed by the configured state projection.  The default in this notebook is `SCORE_PROJECTION='wrap'`, so positions live on the unit torus.\n",
++    "\n",
++    "On the Euclidean cover, the weighted gradient score of the kernel is\n",
++    "\n",
++    "$$\n",
++    "D^{(n)}_{y_i} \\log p_{\\tau,s}(y \\mid x)\n",
++    "=\n",
++    "-\\frac{y_i - x_i}{2\\tau},\n",
++    "\\qquad\n",
++    "D^{(n)}_i = \\frac{1}{s_i}\\nabla_{y_i}.\n",
++    "$$\n",
++    "\n",
++    "For `wrap`, the code instead uses the periodized torus heat-kernel score target.  This is the wrapped analogue of the same weighted score and is evaluated by stable image/Fourier sums.\n",
++    "\n",
++    "The noisy marginal score satisfies\n",
++    "\n",
++    "$$\n",
++    "D^{(n)}_y \\log \\rho_{\\tau,s}(y)\n",
++    "=\n",
++    "\\mathbb E\\!\\left[\n",
++    "D^{(n)}_y \\log p_{\\tau,s}(y \\mid X)\n",
++    "\\,\\middle|\\, Y = y, s\n",
++    "\\right].\n",
++    "$$\n",
++    "\n",
++    "So we train a score network `S_\\theta(\\tau, s, y, \\ell)` by denoising score matching.\n",
++    "\n",
++    "To sample, we run the reverse-time Euler--Maruyama scheme\n",
++    "\n",
++    "$$\n",
++    "X_{m+1}\n",
++    "=\n",
++    "X_m + 2 \\, \\Delta t \\, S_\\theta(\\tau_m, s, X_m, \\ell)\n",
++    "+ \\sqrt{\\frac{2 \\Delta t}{s}} \\, Z_m,\n",
++    "$$\n",
++    "\n",
++    "followed by the same torus wrapping.  The generation update intentionally leaves the drift unclipped; clipping would simulate a different SDE from the one written above.\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "024b48e0",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "from __future__ import annotations\n",
++    "\n",
++    "from pathlib import Path\n",
++    "import sys\n",
++    "import random\n",
++    "\n",
++    "import numpy as np\n",
++    "import matplotlib.pyplot as plt\n",
++    "import pandas as pd\n",
++    "import torch\n",
++    "\n",
++    "REPO_ROOT = Path.cwd().resolve().parents[0] if Path.cwd().name == 'notebooks' else Path.cwd().resolve()\n",
++    "if str(REPO_ROOT) not in sys.path:\n",
++    "    sys.path.insert(0, str(REPO_ROOT))\n",
++    "\n",
++    "from mnist_experiment6_fixes import train_terminal_set_classifier_noisy\n",
++    "from mnist_weighted_point_cloud import (\n",
++    "    WeightedPointCloudBatch,\n",
++    "    load_mnist_arrays,\n",
++    "    images_to_weighted_point_clouds,\n",
++    "    rasterize_weighted_point_clouds,\n",
++    ")\n",
++    "from mnist_conditioned_diffusion import (\n",
++    "    TerminalSetClassifier,\n",
++    "    SmallMnistCNN,\n",
++    "    evaluate_terminal_set_classifier,\n",
++    "    evaluate_generation_metrics,\n",
++    "    train_image_classifier,\n",
++    "    evaluate_image_classifier,\n",
++    "    predict_terminal_logits,\n",
++    "    confusion_matrix_from_predictions,\n",
++    ")\n",
++    "from mnist_score_matching import (\n",
++    "    ConditionalScoreSetNetwork,\n",
++    "    ConditionalScoreSetTransformer,\n",
++    "    ConditionalScoreImageFieldNetwork,\n",
++    "    train_score_model,\n",
++    "    evaluate_score_model,\n",
++    "    evaluate_score_model_by_tau_bins,\n",
++    "    diagnose_score_prior_horizons,\n",
++    "    recommend_score_prior_horizon,\n",
++    "    generate_balanced_score_matching_dataset,\n",
++    ")\n",
++    "\n",
++    "SEED = 1234\n",
++    "random.seed(SEED)\n",
++    "np.random.seed(SEED)\n",
++    "torch.manual_seed(SEED)\n",
++    "\n",
++    "DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'\n",
++    "print('device =', DEVICE)\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "ed426cb0",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "def _softmax_np(logits: np.ndarray) -> np.ndarray:\n",
++    "    shifted = logits - np.max(logits, axis=1, keepdims=True)\n",
++    "    exp = np.exp(shifted)\n",
++    "    return exp / np.maximum(exp.sum(axis=1, keepdims=True), 1e-12)\n",
++    "\n",
++    "\n",
++    "def _select_generated_indices(\n",
++    "    generated,\n",
++    "    *,\n",
++    "    label: int,\n",
++    "    count: int,\n",
++    "    selection: str,\n",
++    "    rng: np.random.Generator,\n",
++    "    score_values: np.ndarray | None = None,\n",
++    ") -> np.ndarray:\n",
++    "    idx = np.flatnonzero(generated.labels == label)\n",
++    "    if len(idx) == 0:\n",
++    "        return idx\n",
++    "    if selection == 'first':\n",
++    "        chosen = idx[:count]\n",
++    "    elif selection == 'random':\n",
++    "        chosen = rng.choice(idx, size=min(count, len(idx)), replace=False)\n",
++    "    elif selection in {'best', 'highest'}:\n",
++    "        if score_values is None:\n",
++    "            raise ValueError('score_values are required for best/highest selection')\n",
++    "        chosen = idx[np.argsort(score_values[idx])[::-1][:count]]\n",
++    "    elif selection in {'worst', 'lowest'}:\n",
++    "        if score_values is None:\n",
++    "            raise ValueError('score_values are required for worst/lowest selection')\n",
++    "        chosen = idx[np.argsort(score_values[idx])[:count]]\n",
++    "    else:\n",
++    "        raise ValueError(\"selection must be 'first', 'random', 'best', or 'worst'\")\n",
++    "    return np.asarray(chosen, dtype=np.int64)\n",
++    "\n",
++    "\n",
++    "def show_synthetic_examples(\n",
++    "    generated,\n",
++    "    count_per_class: int = 4,\n",
++    "    title_prefix: str = '',\n",
++    "    *,\n",
++    "    selection: str = 'first',\n",
++    "    score_values: np.ndarray | None = None,\n",
++    "    rng: np.random.Generator | None = None,\n",
++    ") -> None:\n",
++    "    rng = np.random.default_rng(SEED + 991) if rng is None else rng\n",
++    "    fig, axes = plt.subplots(10, count_per_class, figsize=(1.9 * count_per_class, 18), squeeze=False)\n",
++    "    for label in range(10):\n",
++    "        idx = _select_generated_indices(\n",
++    "            generated,\n",
++    "            label=label,\n",
++    "            count=count_per_class,\n",
++    "            selection=selection,\n",
++    "            rng=rng,\n",
++    "            score_values=score_values,\n",
++    "        )\n",
++    "        for j in range(count_per_class):\n",
++    "            ax = axes[label, j]\n",
++    "            ax.axis('off')\n",
++    "            if j >= len(idx):\n",
++    "                continue\n",
++    "            i = int(idx[j])\n",
++    "            ax.imshow(generated.images[i], cmap='gray')\n",
++    "            title_parts = []\n",
++    "            if title_prefix:\n",
++    "                title_parts.append(title_prefix)\n",
++    "            title_parts.append(f'y={label}')\n",
++    "            if score_values is not None:\n",
++    "                title_parts.append(f'p={score_values[i]:.2f}')\n",
++    "            ax.set_title(' '.join(title_parts), fontsize=9)\n",
++    "    plt.tight_layout()\n",
++    "\n",
++    "\n",
++    "def generated_auxiliary_classifier_diagnostics(terminal_model, generated, *, device=DEVICE) -> pd.DataFrame:\n",
++    "    logits = predict_terminal_logits(\n",
++    "        terminal_model,\n",
++    "        generated.masses,\n",
++    "        generated.positions,\n",
++    "        device=device,\n",
++    "    )\n",
++    "    probs = _softmax_np(logits)\n",
++    "    labels = np.asarray(generated.labels, dtype=np.int64)\n",
++    "    pred = np.argmax(probs, axis=1)\n",
++    "    target_probability = probs[np.arange(len(labels)), labels]\n",
++    "    return pd.DataFrame(\n",
++    "        {\n",
++    "            'label': labels,\n",
++    "            'aux_prediction': pred,\n",
++    "            'aux_target_probability': target_probability,\n",
++    "            'aux_pred_probability': probs[np.arange(len(labels)), pred],\n",
++    "            'aux_correct': pred == labels,\n",
++    "        }\n",
++    "    )\n",
++    "\n",
++    "\n",
++    "def plot_confusion_matrix(matrix: np.ndarray, *, title: str, normalize: bool = True) -> None:\n",
++    "    arr = np.asarray(matrix, dtype=np.float64)\n",
++    "    fig, ax = plt.subplots(figsize=(6, 5))\n",
++    "    im = ax.imshow(arr)\n",
++    "    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)\n",
++    "    ax.set_title(title)\n",
++    "    ax.set_xlabel('predicted label')\n",
++    "    ax.set_ylabel('true / requested label')\n",
++    "    ax.set_xticks(range(arr.shape[1]))\n",
++    "    ax.set_yticks(range(arr.shape[0]))\n",
++    "    for i in range(arr.shape[0]):\n",
++    "        for j in range(arr.shape[1]):\n",
++    "            value = arr[i, j]\n",
++    "            text = f'{value:.2f}' if normalize else f'{int(round(value))}'\n",
++    "            ax.text(j, i, text, ha='center', va='center', fontsize=7)\n",
++    "    plt.tight_layout()\n",
++    "\n",
++    "\n",
++    "def rescale_images_for_classifier(images: np.ndarray, image_scale: float | None) -> np.ndarray:\n",
++    "    arr = np.asarray(images, dtype=np.float32)\n",
++    "    if image_scale is None:\n",
++    "        return arr\n",
++    "    return arr * float(image_scale)\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "9ed08ccf",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "FAST_DEMO = False\n",
++    "\n",
++    "# The defaults below keep the data split and evaluation protocol close to Example 6,\n",
++    "# but generation now follows the denoising score-matching construction.\n",
++    "\n",
++    "if FAST_DEMO:\n",
++    "    TRAIN_PER_CLASS = 512\n",
++    "    VAL_PER_CLASS = 128\n",
++    "    TEST_PER_CLASS = 256\n",
++    "    TOP_K = 24\n",
++    "    MASS_FLOOR = 1e-4\n",
++    "\n",
++    "    AUX_CLASSIFIER_EPOCHS = 6\n",
++    "    AUX_CLASSIFIER_BATCH_SIZE = 256\n",
++    "    AUX_CLASSIFIER_LR = 2e-3\n",
++    "\n",
++    "    SCORE_EPOCHS = 10\n",
++    "    SCORE_BATCH_SIZE = 256\n",
++    "    SCORE_LR = 2e-3\n",
++    "    SCORE_TAU_SAMPLING = 'uniform'\n",
++    "    SCORE_PROJECTION = 'wrap'\n",
++    "    SCORE_ARCHITECTURE = 'image_field'\n",
++    "    SCORE_TRANSFORMER_POINT_FEATURE_DIM = 128\n",
++    "    SCORE_TRANSFORMER_HIDDEN_DIM = 256\n",
++    "    SCORE_TRANSFORMER_NUM_LAYERS = 2\n",
++    "    SCORE_TRANSFORMER_NUM_HEADS = 4\n",
++    "    SCORE_TRANSFORMER_DROPOUT = 0.05\n",
++    "    SCORE_OUTPUT_SCALING = 'tau_mass'\n",
++    "    SCORE_IMAGE_FIELD_GRID_SIZE = 24\n",
++    "    SCORE_IMAGE_FIELD_BASE_CHANNELS = 16\n",
++    "    SCORE_IMAGE_FIELD_FEATURE_DIM = 32\n",
++    "    SCORE_IMAGE_FIELD_POINT_HIDDEN_DIM = 128\n",
++    "    SCORE_IMAGE_FIELD_DROPOUT = 0.0\n",
++    "\n",
++    "    SYNTHETIC_PER_CLASS = 128\n",
++    "    HORIZON = 5e-4\n",
++    "    TARGET_STEP_SIZE = 1e-6\n",
++    "    REVERSE_STEPS = int(np.ceil(HORIZON / TARGET_STEP_SIZE))\n",
++    "    STEP_SIZE = HORIZON / REVERSE_STEPS\n",
++    "    AUX_CLASSIFIER_MAX_TAU_CAP = 5e-4\n",
++    "    SCORE_SCALE = 1.0\n",
++    "    DIFFUSION_TEMPERATURE = 1.0\n",
++    "\n",
++    "    MASS_SAMPLING_MODE = 'bank'\n",
++    "    CLASS_CONDITIONAL_MASS_SAMPLING = True\n",
++    "    POISSON_DIRICHLET_BETA = 2.0 * TOP_K\n",
++    "    POISSON_DIRICHLET_MAX_TERMS = None\n",
++    "\n",
++    "    INITIAL_POSITION_MODE = 'uniform'\n",
++    "    INITIAL_POSITION_SCALE = 0.12\n",
++    "    CLASS_CONDITIONAL_INITIAL_POSITIONS = False\n",
++    "    JOINT_BANK_SAMPLING = False\n",
++    "    INITIAL_POSITION_JITTER = 0.0\n",
++    "\n",
++    "    # Optional diagnostic: generate a smaller batch from forward-noised empirical\n",
++    "    # starts.  If this works while uniform-start generation fails, the problem is\n",
++    "    # the chosen prior/horizon rather than the local denoising score.\n",
++    "    RUN_FORWARD_NOISED_BANK_SANITY_CHECK = True\n",
++    "    FORWARD_NOISED_BANK_SYNTHETIC_PER_CLASS = 64\n",
++    "\n",
++    "    RUN_T_DIAGNOSTIC = True\n",
++    "    AUTO_USE_RECOMMENDED_HORIZON = False\n",
++    "    T_DIAGNOSTIC_HORIZONS = HORIZON * np.asarray([1.0, 2.0, 5.0, 10.0, 20.0], dtype=np.float64)\n",
++    "    T_DIAGNOSTIC_MAX_SAMPLES = 512\n",
++    "    T_DIAGNOSTIC_FEATURE_GRID_SIZE = 8\n",
++    "    T_DIAGNOSTIC_CLASSIFIER_EPOCHS = 30\n",
++    "    T_DIAGNOSTIC_PRIOR_ACCURACY_THRESHOLD = 0.55\n",
++    "    T_DIAGNOSTIC_LABEL_ACCURACY_SLACK = 0.05\n",
++    "\n",
++    "    CAS_EPOCHS = 6\n",
++    "    CAS_BATCH_SIZE = 128\n",
++    "    CAS_LR = 1e-3\n",
++    "    CAS_IMAGE_SCALE = 28.0 * 28.0\n",
++    "\n",
++    "    VISUAL_DIAGNOSTIC_SAMPLES_PER_CLASS = 6\n",
++    "    RUN_REAL_TRAINED_IMAGE_DIAGNOSTIC = True\n",
++    "    REAL_IMAGE_CLASSIFIER_EPOCHS = 4\n",
++    "    REAL_IMAGE_CLASSIFIER_BATCH_SIZE = 128\n",
++    "    REAL_IMAGE_CLASSIFIER_LR = 1e-3\n",
++    "\n",
++    "    SINKHORN_SUBSAMPLE_PER_CLASS = 32\n",
++    "    SINKHORN_EPSILON = 0.02\n",
++    "    SINKHORN_ITERATIONS = 40\n",
++    "else:\n",
++    "    TRAIN_PER_CLASS = 5000\n",
++    "    VAL_PER_CLASS = 500\n",
++    "    TEST_PER_CLASS = 1000\n",
++    "    TOP_K = 64\n",
++    "    MASS_FLOOR = 1e-4\n",
++    "\n",
++    "    AUX_CLASSIFIER_EPOCHS = 12\n",
++    "    AUX_CLASSIFIER_BATCH_SIZE = 256\n",
++    "    AUX_CLASSIFIER_LR = 1e-3\n",
++    "\n",
++    "    SCORE_EPOCHS = 50\n",
++    "    SCORE_BATCH_SIZE = 128\n",
++    "    SCORE_LR = 1e-3\n",
++    "    SCORE_TAU_SAMPLING = 'log_uniform'\n",
++    "    SCORE_PROJECTION = 'wrap'\n",
++    "    SCORE_ARCHITECTURE = 'image_field'\n",
++    "    SCORE_TRANSFORMER_POINT_FEATURE_DIM = 192\n",
++    "    SCORE_TRANSFORMER_HIDDEN_DIM = 384\n",
++    "    SCORE_TRANSFORMER_NUM_LAYERS = 4\n",
++    "    SCORE_TRANSFORMER_NUM_HEADS = 8\n",
++    "    SCORE_TRANSFORMER_DROPOUT = 0.05\n",
++    "    SCORE_OUTPUT_SCALING = 'tau_mass'\n",
++    "    SCORE_IMAGE_FIELD_GRID_SIZE = 32\n",
++    "    SCORE_IMAGE_FIELD_BASE_CHANNELS = 32\n",
++    "    SCORE_IMAGE_FIELD_FEATURE_DIM = 64\n",
++    "    SCORE_IMAGE_FIELD_POINT_HIDDEN_DIM = 256\n",
++    "    SCORE_IMAGE_FIELD_DROPOUT = 0.0\n",
++    "\n",
++    "    SYNTHETIC_PER_CLASS = 1000\n",
++    "    HORIZON = 5e-4\n",
++    "    TARGET_STEP_SIZE = 5e-6\n",
++    "    REVERSE_STEPS = int(np.ceil(HORIZON / TARGET_STEP_SIZE))\n",
++    "    STEP_SIZE = HORIZON / REVERSE_STEPS\n",
++    "    AUX_CLASSIFIER_MAX_TAU_CAP = 5e-4\n",
++    "    SCORE_SCALE = 1.00\n",
++    "    DIFFUSION_TEMPERATURE = 1.00\n",
++    "    SAMPLER_SCHEME=\"bridge\"\n",
++    "\n",
++    "    MASS_SAMPLING_MODE = 'bank'\n",
++    "    CLASS_CONDITIONAL_MASS_SAMPLING = True\n",
++    "    POISSON_DIRICHLET_BETA = 2.0 * TOP_K\n",
++    "    POISSON_DIRICHLET_MAX_TERMS = None\n",
++    "\n",
++    "    INITIAL_POSITION_MODE = 'uniform'\n",
++    "    INITIAL_POSITION_SCALE = 0.12\n",
++    "    CLASS_CONDITIONAL_INITIAL_POSITIONS = False\n",
++    "    JOINT_BANK_SAMPLING = False\n",
++    "    INITIAL_POSITION_JITTER = 0.0\n",
++    "\n",
++    "    # Optional diagnostic: generate a smaller batch from forward-noised empirical\n",
++    "    # starts.  If this works while uniform-start generation fails, the problem is\n",
++    "    # the chosen prior/horizon rather than the local denoising score.\n",
++    "    RUN_FORWARD_NOISED_BANK_SANITY_CHECK = True\n",
++    "    FORWARD_NOISED_BANK_SYNTHETIC_PER_CLASS = 64\n",
++    "\n",
++    "    RUN_T_DIAGNOSTIC = True\n",
++    "    AUTO_USE_RECOMMENDED_HORIZON = False\n",
++    "    T_DIAGNOSTIC_HORIZONS = HORIZON * np.asarray([1.0, 2.0, 5.0, 10.0, 20.0], dtype=np.float64)\n",
++    "    T_DIAGNOSTIC_MAX_SAMPLES = 2048\n",
++    "    T_DIAGNOSTIC_FEATURE_GRID_SIZE = 8\n",
++    "    T_DIAGNOSTIC_CLASSIFIER_EPOCHS = 50\n",
++    "    T_DIAGNOSTIC_PRIOR_ACCURACY_THRESHOLD = 0.55\n",
++    "    T_DIAGNOSTIC_LABEL_ACCURACY_SLACK = 0.05\n",
++    "\n",
++    "    CAS_EPOCHS = 10\n",
++    "    CAS_BATCH_SIZE = 128\n",
++    "    CAS_LR = 1e-3\n",
++    "    CAS_IMAGE_SCALE = 28.0 * 28.0\n",
++    "\n",
++    "    VISUAL_DIAGNOSTIC_SAMPLES_PER_CLASS = 6\n",
++    "    RUN_REAL_TRAINED_IMAGE_DIAGNOSTIC = True\n",
++    "    REAL_IMAGE_CLASSIFIER_EPOCHS = 8\n",
++    "    REAL_IMAGE_CLASSIFIER_BATCH_SIZE = 128\n",
++    "    REAL_IMAGE_CLASSIFIER_LR = 1e-3\n",
++    "\n",
++    "    SINKHORN_SUBSAMPLE_PER_CLASS = 64\n",
++    "    SINKHORN_EPSILON = 0.02\n",
++    "    SINKHORN_ITERATIONS = 50\n",
++    "\n",
++    "TAU_MIN = STEP_SIZE\n",
++    "TAU_MAX = HORIZON\n",
++    "AUX_CLASSIFIER_MAX_TAU = min(TAU_MAX, AUX_CLASSIFIER_MAX_TAU_CAP)\n",
++    "\n",
++    "DATA_ROOT = REPO_ROOT / 'mnist_data'\n",
++    "print('FAST_DEMO =', FAST_DEMO)\n",
++    "print('TOP_K =', TOP_K)\n",
++    "print('synthetic samples =', 10 * SYNTHETIC_PER_CLASS)\n",
++    "print('mass sampling mode =', MASS_SAMPLING_MODE)\n",
++    "print('initial position mode =', INITIAL_POSITION_MODE)\n",
++    "print('tau range =', (TAU_MIN, TAU_MAX))\n",
++    "print('target step size =', TARGET_STEP_SIZE)\n",
++    "print('reverse steps =', REVERSE_STEPS)\n",
++    "print('aux classifier max tau =', AUX_CLASSIFIER_MAX_TAU)\n",
++    "print('state projection =', SCORE_PROJECTION)\n",
++    "print('score tau sampling =', SCORE_TAU_SAMPLING)\n",
++    "print('score architecture =', SCORE_ARCHITECTURE)\n",
++    "print('score output scaling =', SCORE_OUTPUT_SCALING)\n",
++    "if SCORE_ARCHITECTURE == 'image_field':\n",
++    "    print('score image-field grid size =', SCORE_IMAGE_FIELD_GRID_SIZE)\n",
++    "    print('score image-field base channels =', SCORE_IMAGE_FIELD_BASE_CHANNELS)\n",
++    "    print('score image-field feature dim =', SCORE_IMAGE_FIELD_FEATURE_DIM)\n",
++    "    print('score image-field point hidden dim =', SCORE_IMAGE_FIELD_POINT_HIDDEN_DIM)\n",
++    "print('CAS image scale =', CAS_IMAGE_SCALE)\n",
++    "print('real-trained image diagnostic =', RUN_REAL_TRAINED_IMAGE_DIAGNOSTIC)\n",
++    "print('drift clipping = disabled')\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "0a98cd78",
++   "metadata": {},
++   "source": [
++    "## Load MNIST and convert it to weighted point clouds\n",
++    "\n",
++    "As in Example 6, every image is normalized to total mass one and then converted to a weighted point cloud by keeping the `top_k` brightest pixels.\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "02619456",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "mnist = load_mnist_arrays(DATA_ROOT, download=True, normalize_to_measure=True)\n",
++    "\n",
++    "train_images_full = mnist['train_images']\n",
++    "train_labels_full = mnist['train_labels']\n",
++    "test_images_full = mnist['test_images']\n",
++    "test_labels_full = mnist['test_labels']\n",
++    "\n",
++    "print('train images:', train_images_full.shape)\n",
++    "print('test images :', test_images_full.shape)\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "c0e9d96a",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "def class_counts(labels: np.ndarray) -> np.ndarray:\n",
++    "    return np.bincount(np.asarray(labels, dtype=np.int64), minlength=10)\n",
++    "\n",
++    "def balanced_take(\n",
++    "    images: np.ndarray,\n",
++    "    labels: np.ndarray,\n",
++    "    per_class: int,\n",
++    "    *,\n",
++    "    seed: int,\n",
++    ") -> tuple[np.ndarray, np.ndarray]:\n",
++    "    rng = np.random.default_rng(seed)\n",
++    "    labels = np.asarray(labels, dtype=np.int64)\n",
++    "    selected = []\n",
++    "    for label in range(10):\n",
++    "        idx = np.flatnonzero(labels == label)\n",
++    "        if len(idx) < per_class:\n",
++    "            raise ValueError(\n",
++    "                f'label {label} only has {len(idx)} examples, need {per_class}. '\n",
++    "                f'Max balanced choice is {int(class_counts(labels).min())}.'\n",
++    "            )\n",
++    "        selected.append(rng.choice(idx, size=per_class, replace=False))\n",
++    "    selected_idx = np.concatenate(selected)\n",
++    "    rng.shuffle(selected_idx)\n",
++    "    return images[selected_idx], labels[selected_idx]\n",
++    "\n",
++    "def balanced_train_val_split(\n",
++    "    images: np.ndarray,\n",
++    "    labels: np.ndarray,\n",
++    "    train_per_class: int,\n",
++    "    val_per_class: int,\n",
++    "    *,\n",
++    "    seed: int,\n",
++    ") -> tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]:\n",
++    "    rng = np.random.default_rng(seed)\n",
++    "    labels = np.asarray(labels, dtype=np.int64)\n",
++    "\n",
++    "    train_selected = []\n",
++    "    val_selected = []\n",
++    "    for label in range(10):\n",
++    "        idx = np.flatnonzero(labels == label)\n",
++    "        need = train_per_class + val_per_class\n",
++    "        if len(idx) < need:\n",
++    "            raise ValueError(\n",
++    "                f'label {label} only has {len(idx)} training examples, need train+val={need}'\n",
++    "            )\n",
++    "        idx = rng.permutation(idx)\n",
++    "        train_selected.append(idx[:train_per_class])\n",
++    "        val_selected.append(idx[train_per_class:train_per_class + val_per_class])\n",
++    "\n",
++    "    train_idx = np.concatenate(train_selected)\n",
++    "    val_idx = np.concatenate(val_selected)\n",
++    "    rng.shuffle(train_idx)\n",
++    "    rng.shuffle(val_idx)\n",
++    "    return (images[train_idx], labels[train_idx]), (images[val_idx], labels[val_idx])\n",
++    "\n",
++    "train_counts = class_counts(train_labels_full)\n",
++    "test_counts = class_counts(test_labels_full)\n",
++    "\n",
++    "safe_train_per_class = TRAIN_PER_CLASS\n",
++    "max_train_per_class_disjoint = int(train_counts.min()) - VAL_PER_CLASS\n",
++    "if safe_train_per_class > max_train_per_class_disjoint:\n",
++    "    safe_train_per_class = max_train_per_class_disjoint\n",
++    "    print(\n",
++    "        f'Requested TRAIN_PER_CLASS={TRAIN_PER_CLASS} with VAL_PER_CLASS={VAL_PER_CLASS}, '\n",
++    "        f'but the smallest training class has only {int(train_counts.min())} examples. '\n",
++    "        f'Using TRAIN_PER_CLASS={safe_train_per_class} so train/val stay disjoint.'\n",
++    "    )\n",
++    "\n",
++    "(train_images, train_labels), (val_images, val_labels) = balanced_train_val_split(\n",
++    "    train_images_full,\n",
++    "    train_labels_full,\n",
++    "    safe_train_per_class,\n",
++    "    VAL_PER_CLASS,\n",
++    "    seed=SEED,\n",
++    ")\n",
++    "\n",
++    "safe_test_per_class = min(TEST_PER_CLASS, int(test_counts.min()))\n",
++    "if safe_test_per_class < TEST_PER_CLASS:\n",
++    "    print(\n",
++    "        f'Requested TEST_PER_CLASS={TEST_PER_CLASS}, but the smallest test class has '\n",
++    "        f'{int(test_counts.min())} examples. Using {safe_test_per_class} per class instead.'\n",
++    "    )\n",
++    "\n",
++    "real_test_images, real_test_labels = balanced_take(\n",
++    "    test_images_full,\n",
++    "    test_labels_full,\n",
++    "    safe_test_per_class,\n",
++    "    seed=SEED + 2,\n",
++    ")\n",
++    "\n",
++    "train_pc = images_to_weighted_point_clouds(train_images, labels=train_labels, top_k=TOP_K, mass_floor=MASS_FLOOR)\n",
++    "val_pc = images_to_weighted_point_clouds(val_images, labels=val_labels, top_k=TOP_K, mass_floor=MASS_FLOOR)\n",
++    "real_test_pc = images_to_weighted_point_clouds(real_test_images, labels=real_test_labels, top_k=TOP_K, mass_floor=MASS_FLOOR)\n",
++    "\n",
++    "print('train counts      :', train_counts)\n",
++    "print('test counts       :', test_counts)\n",
++    "print('train point clouds:', train_pc.masses.shape, train_pc.positions.shape)\n",
++    "print('val point clouds  :', val_pc.masses.shape, val_pc.positions.shape)\n",
++    "print('balanced test use :', safe_test_per_class, 'per class')\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "5f6933be",
++   "metadata": {},
++   "source": [
++    "## Check whether the chosen horizon matches the initial-position prior\n",
++    "\n",
++    "For a reverse score sampler that starts from iid uniform positions, the forward-noised data distribution at `tau = T` should already be close to the same uniform prior.  The helper below forward-noises real point clouds with the exact mass-dependent noise scale `sqrt(2 T / s_i)` and then checks two diagnostics for each candidate `T`:\n",
++    "\n",
++    "- whether a small classifier can distinguish forward-noised data from prior samples (`prior_accuracy`, baseline 0.5),\n",
++    "- whether a small classifier can still predict the digit label from forward-noised data (`label_accuracy`, baseline 0.1 for ten classes).\n",
++    "\n",
++    "Set `AUTO_USE_RECOMMENDED_HORIZON = True` above to let the notebook replace `HORIZON`, `STEP_SIZE`, `TAU_MIN`, and `TAU_MAX` with the smallest candidate that passes the diagnostic thresholds.  Otherwise this cell only reports the recommendation.\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "bee0bff3",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "if RUN_T_DIAGNOSTIC:\n",
++    "    diagnostic_prior_mode = INITIAL_POSITION_MODE if INITIAL_POSITION_MODE in {'uniform', 'centered_gaussian'} else 'uniform'\n",
++    "    t_diagnostic_rows = diagnose_score_prior_horizons(\n",
++    "        train_pc.masses,\n",
++    "        train_pc.positions,\n",
++    "        train_pc.labels,\n",
++    "        T_DIAGNOSTIC_HORIZONS,\n",
++    "        projection=SCORE_PROJECTION,\n",
++    "        prior_position_mode=diagnostic_prior_mode,\n",
++    "        prior_position_scale=INITIAL_POSITION_SCALE,\n",
++    "        max_samples=T_DIAGNOSTIC_MAX_SAMPLES,\n",
++    "        feature_grid_size=T_DIAGNOSTIC_FEATURE_GRID_SIZE,\n",
++    "        classifier_epochs=T_DIAGNOSTIC_CLASSIFIER_EPOCHS,\n",
++    "        device=DEVICE,\n",
++    "        rng=np.random.default_rng(SEED + 7),\n",
++    "    )\n",
++    "    t_diagnostic_df = pd.DataFrame(t_diagnostic_rows)\n",
++    "    recommended_T_row = recommend_score_prior_horizon(\n",
++    "        t_diagnostic_rows,\n",
++    "        max_prior_accuracy=T_DIAGNOSTIC_PRIOR_ACCURACY_THRESHOLD,\n",
++    "        label_accuracy_slack=T_DIAGNOSTIC_LABEL_ACCURACY_SLACK,\n",
++    "    )\n",
++    "    recommended_T = float(recommended_T_row['horizon'])\n",
++    "    status = 'passed thresholds' if recommended_T_row['recommendation_status'] == 1.0 else 'fallback: no candidate passed thresholds'\n",
++    "    print(f'recommended T = {recommended_T:.6g} ({status})')\n",
++    "\n",
++    "    if AUTO_USE_RECOMMENDED_HORIZON:\n",
++    "        HORIZON = recommended_T\n",
++    "        REVERSE_STEPS = int(np.ceil(HORIZON / TARGET_STEP_SIZE))\n",
++    "        STEP_SIZE = HORIZON / REVERSE_STEPS\n",
++    "        TAU_MIN = STEP_SIZE\n",
++    "        TAU_MAX = HORIZON\n",
++    "        AUX_CLASSIFIER_MAX_TAU = min(TAU_MAX, AUX_CLASSIFIER_MAX_TAU_CAP)\n",
++    "        print('Updated tau range =', (TAU_MIN, TAU_MAX))\n",
++    "        print('Updated reverse steps =', REVERSE_STEPS)\n",
++    "        print('Updated aux classifier max tau =', AUX_CLASSIFIER_MAX_TAU)\n",
++    "else:\n",
++    "    t_diagnostic_df = pd.DataFrame()\n",
++    "    recommended_T_row = None\n",
++    "\n",
++    "t_diagnostic_df\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "3b2fd6ee",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "def show_real_reconstructions(batch: WeightedPointCloudBatch, count: int = 6) -> None:\n",
++    "    idx = np.arange(min(count, len(batch)))\n",
++    "    recon = rasterize_weighted_point_clouds(batch.masses[idx], batch.positions[idx])\n",
++    "\n",
++    "    fig, axes = plt.subplots(2, len(idx), figsize=(2.0 * len(idx), 4.0))\n",
++    "    for j, i in enumerate(idx):\n",
++    "        axes[0, j].imshow(batch.images[i], cmap='gray')\n",
++    "        axes[0, j].set_title(f'real y={int(batch.labels[i])}')\n",
++    "        axes[0, j].axis('off')\n",
++    "\n",
++    "        axes[1, j].imshow(recon[j], cmap='gray')\n",
++    "        axes[1, j].scatter(\n",
++    "            batch.positions[i, :, 0] * 28 - 0.5,\n",
++    "            batch.positions[i, :, 1] * 28 - 0.5,\n",
++    "            s=10 + 220 * batch.masses[i],\n",
++    "            edgecolors='tab:red',\n",
++    "            facecolors='none',\n",
++    "            linewidths=0.7,\n",
++    "        )\n",
++    "        axes[1, j].set_title('weighted cloud')\n",
++    "        axes[1, j].axis('off')\n",
++    "    plt.tight_layout()\n",
++    "\n",
++    "show_real_reconstructions(train_pc, count=6)\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "4bc2ded1",
++   "metadata": {},
++   "source": [
++    "## Train an auxiliary point-cloud classifier for evaluation\n",
++    "\n",
++    "The generator in this notebook uses only the score network below.  We still train a small classifier so we can reuse the same evaluation protocol from Example 6 (`g_accuracy`, CAS, Sinkhorn-based two-sample metrics).\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "9cadca52",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "eval_classifier = TerminalSetClassifier(point_feature_dim=128, hidden_dim=256, num_classes=10)\n",
++    "print('training auxiliary classifier with max_tau =', AUX_CLASSIFIER_MAX_TAU)\n",
++    "\n",
++    "_ = train_terminal_set_classifier_noisy(\n",
++    "    eval_classifier,\n",
++    "    train_pc.masses,\n",
++    "    train_pc.positions,\n",
++    "    train_pc.labels,\n",
++    "    val_masses=val_pc.masses,\n",
++    "    val_positions=val_pc.positions,\n",
++    "    val_labels=val_pc.labels,\n",
++    "    epochs=AUX_CLASSIFIER_EPOCHS,\n",
++    "    batch_size=AUX_CLASSIFIER_BATCH_SIZE,\n",
++    "    lr=AUX_CLASSIFIER_LR,\n",
++    "    position_jitter_std=2e-3,\n",
++    "    max_tau=AUX_CLASSIFIER_MAX_TAU,\n",
++    "    projection=SCORE_PROJECTION,\n",
++    "    device=DEVICE,\n",
++    "    verbose=True,\n",
++    ")\n",
++    "\n",
++    "eval_train_metrics = evaluate_terminal_set_classifier(\n",
++    "    eval_classifier,\n",
++    "    train_pc.masses,\n",
++    "    train_pc.positions,\n",
++    "    train_pc.labels,\n",
++    "    device=DEVICE,\n",
++    ")\n",
++    "eval_val_metrics = evaluate_terminal_set_classifier(\n",
++    "    eval_classifier,\n",
++    "    val_pc.masses,\n",
++    "    val_pc.positions,\n",
++    "    val_pc.labels,\n",
++    "    device=DEVICE,\n",
++    ")\n",
++    "\n",
++    "print('aux classifier train accuracy =', eval_train_metrics['accuracy'])\n",
++    "print('aux classifier val accuracy   =', eval_val_metrics['accuracy'])\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "94a148ad",
++   "metadata": {},
++   "source": [
++    "## Train the denoising score network\n",
++    "\n",
++    "The score network receives\n",
++    "\n",
++    "- the noisy positions,\n",
++    "- the frozen mass vector,\n",
++    "- the noise level `tau`,\n",
++    "- and the digit label,\n",
++    "\n",
++    "and predicts the weighted score field.  The training loss is the weighted denoising score-matching objective from the note.\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "945013fb",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "if SCORE_ARCHITECTURE == 'deepsets':\n",
++    "    score_model = ConditionalScoreSetNetwork(\n",
++    "        point_feature_dim=128,\n",
++    "        hidden_dim=256,\n",
++    "        conditioning_dim=64,\n",
++    "        num_classes=10,\n",
++    "        condition_on_label=True,\n",
++    "        tau_min=TAU_MIN,\n",
++    "        tau_max=TAU_MAX,\n",
++    "        use_torus_features=(SCORE_PROJECTION == 'wrap'),\n",
++    "        score_output_scaling=SCORE_OUTPUT_SCALING,\n",
++    "    )\n",
++    "elif SCORE_ARCHITECTURE == 'image_field':\n",
++    "    score_model = ConditionalScoreImageFieldNetwork(\n",
++    "        grid_size=SCORE_IMAGE_FIELD_GRID_SIZE,\n",
++    "        base_channels=SCORE_IMAGE_FIELD_BASE_CHANNELS,\n",
++    "        grid_feature_dim=SCORE_IMAGE_FIELD_FEATURE_DIM,\n",
++    "        point_hidden_dim=SCORE_IMAGE_FIELD_POINT_HIDDEN_DIM,\n",
++    "        conditioning_dim=64,\n",
++    "        num_classes=10,\n",
++    "        condition_on_label=True,\n",
++    "        tau_min=TAU_MIN,\n",
++    "        tau_max=TAU_MAX,\n",
++    "        dropout=SCORE_IMAGE_FIELD_DROPOUT,\n",
++    "        use_torus_features=(SCORE_PROJECTION == 'wrap'),\n",
++    "        score_output_scaling=SCORE_OUTPUT_SCALING,\n",
++    "    )\n",
++    "elif SCORE_ARCHITECTURE == 'set_transformer':\n",
++    "    score_model = ConditionalScoreSetTransformer(\n",
++    "        point_feature_dim=SCORE_TRANSFORMER_POINT_FEATURE_DIM,\n",
++    "        hidden_dim=SCORE_TRANSFORMER_HIDDEN_DIM,\n",
++    "        conditioning_dim=64,\n",
++    "        num_classes=10,\n",
++    "        condition_on_label=True,\n",
++    "        tau_min=TAU_MIN,\n",
++    "        tau_max=TAU_MAX,\n",
++    "        dropout=SCORE_TRANSFORMER_DROPOUT,\n",
++    "        num_attention_layers=SCORE_TRANSFORMER_NUM_LAYERS,\n",
++    "        num_attention_heads=SCORE_TRANSFORMER_NUM_HEADS,\n",
++    "        use_torus_features=(SCORE_PROJECTION == 'wrap'),\n",
++    "        score_output_scaling=SCORE_OUTPUT_SCALING,\n",
++    "    )\n",
++    "else:\n",
++    "    raise ValueError(\"SCORE_ARCHITECTURE must be 'deepsets', 'image_field', or 'set_transformer'\")\n",
++    "\n",
++    "num_score_parameters = sum(p.numel() for p in score_model.parameters())\n",
++    "print(score_model)\n",
++    "print('score model parameters =', f'{num_score_parameters:,}')\n",
++    "\n",
++    "score_history = train_score_model(\n",
++    "    score_model,\n",
++    "    train_pc.masses,\n",
++    "    train_pc.positions,\n",
++    "    train_pc.labels,\n",
++    "    val_masses=val_pc.masses,\n",
++    "    val_positions=val_pc.positions,\n",
++    "    val_labels=val_pc.labels,\n",
++    "    epochs=SCORE_EPOCHS,\n",
++    "    batch_size=SCORE_BATCH_SIZE,\n",
++    "    lr=SCORE_LR,\n",
++    "    position_jitter_std=0.0,\n",
++    "    tau_min=TAU_MIN,\n",
++    "    tau_max=TAU_MAX,\n",
++    "    tau_sampling=SCORE_TAU_SAMPLING,\n",
++    "    projection=SCORE_PROJECTION,\n",
++    "    device=DEVICE,\n",
++    "    verbose=True,\n",
++    ")\n",
++    "\n",
++    "score_train_metrics = evaluate_score_model(\n",
++    "    score_model,\n",
++    "    train_pc.masses,\n",
++    "    train_pc.positions,\n",
++    "    train_pc.labels,\n",
++    "    batch_size=SCORE_BATCH_SIZE,\n",
++    "    tau_min=TAU_MIN,\n",
++    "    tau_max=TAU_MAX,\n",
++    "    tau_sampling=SCORE_TAU_SAMPLING,\n",
++    "    projection=SCORE_PROJECTION,\n",
++    "    device=DEVICE,\n",
++    ")\n",
++    "score_val_metrics = evaluate_score_model(\n",
++    "    score_model,\n",
++    "    val_pc.masses,\n",
++    "    val_pc.positions,\n",
++    "    val_pc.labels,\n",
++    "    batch_size=SCORE_BATCH_SIZE,\n",
++    "    tau_min=TAU_MIN,\n",
++    "    tau_max=TAU_MAX,\n",
++    "    tau_sampling=SCORE_TAU_SAMPLING,\n",
++    "    projection=SCORE_PROJECTION,\n",
++    "    device=DEVICE,\n",
++    ")\n",
++    "\n",
++    "print('score train loss =', score_train_metrics['loss'])\n",
++    "print('score val loss   =', score_val_metrics['loss'])\n",
++    "print('score train zero baseline =', score_train_metrics.get('zero_predictor_loss'))\n",
++    "print('score val zero baseline   =', score_val_metrics.get('zero_predictor_loss'))\n",
++    "print('score val fraction improved over zero =', score_val_metrics.get('fraction_improved_over_zero'))\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "bb50a612",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "score_tau_diagnostics = evaluate_score_model_by_tau_bins(\n",
++    "    score_model,\n",
++    "    val_pc.masses,\n",
++    "    val_pc.positions,\n",
++    "    val_pc.labels,\n",
++    "    batch_size=SCORE_BATCH_SIZE,\n",
++    "    tau_min=TAU_MIN,\n",
++    "    tau_max=TAU_MAX,\n",
++    "    num_bins=8,\n",
++    "    projection=SCORE_PROJECTION,\n",
++    "    device=DEVICE,\n",
++    ")\n",
++    "score_tau_diagnostics_df = pd.DataFrame(score_tau_diagnostics)\n",
++    "score_tau_diagnostics_df\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "8065d92e",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "fig = plt.figure(figsize=(6, 4))\n",
++    "plt.plot(score_history['train_loss'], label='train weighted DSM loss')\n",
++    "plt.plot(score_history['val_loss'], label='val weighted DSM loss')\n",
++    "plt.xlabel('epoch')\n",
++    "plt.ylabel('loss')\n",
++    "plt.legend()\n",
++    "plt.tight_layout()\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "67265b2a",
++   "metadata": {},
++   "source": [
++    "## Generate synthetic weighted point clouds\n",
++    "\n",
++    "By default the mass vectors are sampled from the empirical training bank, which matches the statement that `rho_0` is the empirical MNIST distribution in weighted-point-cloud form.  You can switch `MASS_SAMPLING_MODE` to `'truncated_poisson_dirichlet'` to explore out-of-bank masses, just as in the more generative ablation of Example 6.\n",
++    "\n",
++    "The reverse sampler uses the Euler--Maruyama drift `2 * SCORE_SCALE * S_theta` directly.  No drift clipping is applied.  The default projection is now `wrap`, matching the torus/modulo state space in the PDF and avoiding the large-noise reflection-score mismatch that occurs with `reflect`.\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "86ea999d",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "initial_position_bank = train_pc.positions if INITIAL_POSITION_MODE == 'bank' else None\n",
++    "initial_position_bank_labels = train_pc.labels if INITIAL_POSITION_MODE == 'bank' else None\n",
++    "mass_bank = train_pc.masses if MASS_SAMPLING_MODE == 'bank' else None\n",
++    "mass_bank_labels = train_pc.labels if MASS_SAMPLING_MODE == 'bank' else None\n",
++    "\n",
++    "synthetic = generate_balanced_score_matching_dataset(\n",
++    "    score_model,\n",
++    "    mass_bank,\n",
++    "    bank_labels=mass_bank_labels,\n",
++    "    num_points=TOP_K,\n",
++    "    num_per_class=SYNTHETIC_PER_CLASS,\n",
++    "    mass_sampling_mode=MASS_SAMPLING_MODE,\n",
++    "    class_conditional_mass_sampling=CLASS_CONDITIONAL_MASS_SAMPLING,\n",
++    "    poisson_dirichlet_beta=POISSON_DIRICHLET_BETA,\n",
++    "    poisson_dirichlet_max_terms=POISSON_DIRICHLET_MAX_TERMS,\n",
++    "    horizon=HORIZON,\n",
++    "    step_size=STEP_SIZE,\n",
++    "    initial_position_mode=INITIAL_POSITION_MODE,\n",
++    "    initial_position_scale=INITIAL_POSITION_SCALE,\n",
++    "    initial_position_bank=initial_position_bank,\n",
++    "    initial_position_bank_labels=initial_position_bank_labels,\n",
++    "    class_conditional_initial_positions=CLASS_CONDITIONAL_INITIAL_POSITIONS,\n",
++    "    joint_bank_sampling=JOINT_BANK_SAMPLING,\n",
++    "    initial_position_jitter=INITIAL_POSITION_JITTER,\n",
++    "    state_projection=SCORE_PROJECTION,\n",
++    "    diffusion_temperature=DIFFUSION_TEMPERATURE,\n",
++    "    score_scale=SCORE_SCALE,\n",
++    "    batch_size=64,\n",
++    "    rasterize=True,\n",
++    "    image_size=28,\n",
++    "    device=DEVICE,\n",
++    "    rng=np.random.default_rng(SEED),\n",
++    ")\n",
++    "\n",
++    "print('synthetic positions:', synthetic.positions.shape)\n",
++    "print('synthetic images   :', synthetic.images.shape)\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "42a3df63",
++   "metadata": {},
++   "source": [
++    "### Optional forward-noised-bank sanity check\n",
++    "\n",
++    "This is not the final independent generator. It starts from empirical point clouds noised with the exact mass-dependent kernel at `tau=HORIZON`. Use it to check whether the learned reverse dynamics work when the initial law is known to match score training.\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "c9b1eeb1",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "for H in [1e-4, 2e-4, 5e-4]:\n",
++    "    sanity = generate_balanced_score_matching_dataset(\n",
++    "        score_model,\n",
++    "        train_pc.masses,\n",
++    "        bank_labels=train_pc.labels,\n",
++    "        num_per_class=64,\n",
++    "        mass_sampling_mode=\"bank\",\n",
++    "        class_conditional_mass_sampling=True,\n",
++    "        horizon=H,\n",
++    "        step_size=5e-6,\n",
++    "        initial_position_mode=\"forward_noised_bank\",\n",
++    "        initial_position_bank=train_pc.positions,\n",
++    "        initial_position_bank_labels=train_pc.labels,\n",
++    "        state_projection=SCORE_PROJECTION,\n",
++    "        diffusion_temperature=1.0,\n",
++    "        sampler_scheme=SAMPLER_SCHEME,\n",
++    "        score_scale=1.0,\n",
++    "        batch_size=SCORE_BATCH_SIZE,\n",
++    "        device=DEVICE,\n",
++    "        rng=np.random.default_rng(SEED + int(H * 1e7)),\n",
++    "    )\n",
++    "    show_synthetic_examples(sanity, count_per_class=4, title_prefix=f\"sanity T={H}\")"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "0f01ee1c",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "if RUN_FORWARD_NOISED_BANK_SANITY_CHECK:\n",
++    "    forward_noised_bank_sanity = generate_balanced_score_matching_dataset(\n",
++    "        score_model,\n",
++    "        train_pc.masses,\n",
++    "        bank_labels=train_pc.labels,\n",
++    "        num_points=TOP_K,\n",
++    "        num_per_class=FORWARD_NOISED_BANK_SYNTHETIC_PER_CLASS,\n",
++    "        mass_sampling_mode='bank',\n",
++    "        class_conditional_mass_sampling=CLASS_CONDITIONAL_MASS_SAMPLING,\n",
++    "        horizon=HORIZON,\n",
++    "        step_size=STEP_SIZE,\n",
++    "        initial_position_mode='forward_noised_bank',\n",
++    "        initial_position_bank=train_pc.positions,\n",
++    "        initial_position_bank_labels=train_pc.labels,\n",
++    "        state_projection=SCORE_PROJECTION,\n",
++    "        diffusion_temperature=DIFFUSION_TEMPERATURE,\n",
++    "        score_scale=SCORE_SCALE,\n",
++    "        batch_size=64,\n",
++    "        rasterize=True,\n",
++    "        image_size=28,\n",
++    "        sampler_scheme=SAMPLER_SCHEME,\n",
++    "        device=DEVICE,\n",
++    "        rng=np.random.default_rng(SEED + 123),\n",
++    "    )\n",
++    "    show_synthetic_examples(forward_noised_bank_sanity, count_per_class=4, title_prefix='sanity')\n",
++    "else:\n",
++    "    forward_noised_bank_sanity = None\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "3d42aaa3",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "show_synthetic_examples(synthetic, count_per_class=4, title_prefix='uniform first', selection='first')\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "d767a581",
++   "metadata": {},
++   "source": [
++    "# One-stop denoising diagnostic\n",
++    "The reverse sampler is stochastic, so it can hide whether the score itself is good. Add a direct diagnostic:\n",
++    "\\(\\hat{X} = Y + 2\\tau S_{\\theta}(\\tau,s, Y) \\)\n",
++    "\n",
++    "If this one-step denoising is bad, the score model is the bottleneck. If this is good but the reverse sampler is bad, the sampler/noise schedule is the bottleneck."
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "bff4a614",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "from mnist_score_matching import perturb_weighted_point_cloud_positions\n",
++    "from mnist_weighted_point_cloud import rasterize_weighted_point_clouds\n",
++    "from mnist_conditioned_diffusion import project_positions\n",
++    "\n",
++    "@torch.no_grad()\n",
++    "def one_step_denoising_samples(\n",
++    "    model,\n",
++    "    masses_np,\n",
++    "    positions_np,\n",
++    "    labels_np,\n",
++    "    *,\n",
++    "    tau_value,\n",
++    "    count=64,\n",
++    "    projection=\"wrap\",\n",
++    "    device=DEVICE,\n",
++    "):\n",
++    "    model.eval()\n",
++    "    idx = np.arange(min(count, len(labels_np)))\n",
++    "\n",
++    "    masses = torch.tensor(masses_np[idx], dtype=torch.float32, device=device)\n",
++    "    clean = torch.tensor(positions_np[idx], dtype=torch.float32, device=device)\n",
++    "    labels = torch.tensor(labels_np[idx], dtype=torch.long, device=device)\n",
++    "    tau = torch.full((len(idx),), float(tau_value), dtype=torch.float32, device=device)\n",
++    "\n",
++    "    noisy, target_score, _ = perturb_weighted_point_cloud_positions(\n",
++    "        masses,\n",
++    "        clean,\n",
++    "        tau,\n",
++    "        projection=projection,\n",
++    "    )\n",
++    "\n",
++    "    pred_score = model(masses, noisy, tau, labels)\n",
++    "\n",
++    "    # Tweedie-style denoising displacement.\n",
++    "    denoised = noisy + 2.0 * tau[:, None, None] * pred_score\n",
++    "    denoised = project_positions(denoised, mode=projection)\n",
++    "\n",
++    "    masses_np_out = masses.detach().cpu().numpy()\n",
++    "    clean_np = clean.detach().cpu().numpy()\n",
++    "    noisy_np = noisy.detach().cpu().numpy()\n",
++    "    denoised_np = denoised.detach().cpu().numpy()\n",
++    "\n",
++    "    clean_img = rasterize_weighted_point_clouds(\n",
++    "        masses_np_out, project_positions(clean_np, mode=\"clip\"), image_size=28\n",
++    "    )\n",
++    "    noisy_img = rasterize_weighted_point_clouds(\n",
++    "        masses_np_out, project_positions(noisy_np, mode=\"clip\"), image_size=28\n",
++    "    )\n",
++    "    denoised_img = rasterize_weighted_point_clouds(\n",
++    "        masses_np_out, project_positions(denoised_np, mode=\"clip\"), image_size=28\n",
++    "    )\n",
++    "\n",
++    "    return clean_img, noisy_img, denoised_img, labels_np[idx]\n",
++    "\n",
++    "def plot_one_step_denoising_diagnostic(\n",
++    "    clean_img,\n",
++    "    noisy_img,\n",
++    "    denoised_img,\n",
++    "    labels_used,\n",
++    "    *,\n",
++    "    examples_per_label=2,\n",
++    "    max_labels=10,\n",
++    "    sort_labels=True,\n",
++    "    figsize_per_panel=1.8,\n",
++    "    title=None,\n",
++    "):\n",
++    "    \"\"\"\n",
++    "    Plot one-step denoising diagnostic as rows of:\n",
++    "        Clean | Noisy | Denoised\n",
++    "\n",
++    "    Parameters\n",
++    "    ----------\n",
++    "    clean_img : np.ndarray, shape (N, H, W)\n",
++    "    noisy_img : np.ndarray, shape (N, H, W)\n",
++    "    denoised_img : np.ndarray, shape (N, H, W)\n",
++    "    labels_used : array-like, shape (N,)\n",
++    "    examples_per_label : int\n",
++    "        Number of examples to show per label.\n",
++    "    max_labels : int\n",
++    "        Maximum number of distinct labels to include.\n",
++    "    sort_labels : bool\n",
++    "        Whether to sort labels ascending.\n",
++    "    figsize_per_panel : float\n",
++    "        Controls overall figure size.\n",
++    "    title : str or None\n",
++    "        Optional figure title.\n",
++    "    \"\"\"\n",
++    "    labels_used = np.asarray(labels_used)\n",
++    "\n",
++    "    unique_labels = np.unique(labels_used)\n",
++    "    if sort_labels:\n",
++    "        unique_labels = np.sort(unique_labels)\n",
++    "    unique_labels = unique_labels[:max_labels]\n",
++    "\n",
++    "    selected_indices = []\n",
++    "    for y in unique_labels:\n",
++    "        idx = np.where(labels_used == y)[0][:examples_per_label]\n",
++    "        selected_indices.extend(idx.tolist())\n",
++    "\n",
++    "    if len(selected_indices) == 0:\n",
++    "        print(\"No samples selected for plotting.\")\n",
++    "        return\n",
++    "\n",
++    "    n_rows = len(selected_indices)\n",
++    "    n_cols = 3\n",
++    "\n",
++    "    fig, axes = plt.subplots(\n",
++    "        n_rows,\n",
++    "        n_cols,\n",
++    "        figsize=(n_cols * figsize_per_panel, n_rows * figsize_per_panel),\n",
++    "        squeeze=False,\n",
++    "    )\n",
++    "\n",
++    "    col_titles = [\"Clean\", \"Noisy\", \"Denoised\"]\n",
++    "    for j in range(n_cols):\n",
++    "        axes[0, j].set_title(col_titles[j])\n",
++    "\n",
++    "    for row, idx in enumerate(selected_indices):\n",
++    "        images = [clean_img[idx], noisy_img[idx], denoised_img[idx]]\n",
++    "        y = labels_used[idx]\n",
++    "\n",
++    "        for col, img in enumerate(images):\n",
++    "            ax = axes[row, col]\n",
++    "            ax.imshow(img, cmap=\"gray\", interpolation=\"nearest\")\n",
++    "            ax.set_xticks([])\n",
++    "            ax.set_yticks([])\n",
++    "            if col == 0:\n",
++    "                ax.set_ylabel(f\"y={y}\", rotation=0, labelpad=20, va=\"center\")\n",
++    "\n",
++    "    if title is not None:\n",
++    "        fig.suptitle(title, y=1.02)\n",
++    "\n",
++    "    plt.tight_layout()\n",
++    "    plt.show()"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "d6d397ba",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "for tau_value in [5e-6, 1e-5, 2e-5, 5e-5, 1e-4]:\n",
++    "    clean_img, noisy_img, denoised_img, labels_used = one_step_denoising_samples(\n",
++    "        score_model,\n",
++    "        val_pc.masses,\n",
++    "        val_pc.positions,\n",
++    "        val_pc.labels,\n",
++    "        tau_value=tau_value,\n",
++    "        count=64,\n",
++    "        projection=SCORE_PROJECTION,\n",
++    "    )\n",
++    "    plot_one_step_denoising_diagnostic(\n",
++    "    clean_img,\n",
++    "    noisy_img,\n",
++    "    denoised_img,\n",
++    "    labels_used,\n",
++    "    examples_per_label=2,\n",
++    "    title=f\"One-step denoising diagnostic, tau={tau_value:.1e}\",\n",
++    ")"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "3657e43d",
++   "metadata": {},
++   "source": [
++    "### Visual diagnostics\n",
++    "\n",
++    "The first gallery is deterministic: it shows the first generated samples in class order.  The diagnostics below also show random samples, high-confidence samples, and low-confidence samples according to the auxiliary point-cloud classifier.\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "c948a5ab",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "show_synthetic_examples(\n",
++    "    synthetic,\n",
++    "    count_per_class=VISUAL_DIAGNOSTIC_SAMPLES_PER_CLASS,\n",
++    "    title_prefix='random uniform',\n",
++    "    selection='random',\n",
++    "    rng=np.random.default_rng(SEED + 501),\n",
++    ")\n",
++    "\n",
++    "aux_visual_diagnostics_df = generated_auxiliary_classifier_diagnostics(eval_classifier, synthetic, device=DEVICE)\n",
++    "aux_target_probability = aux_visual_diagnostics_df['aux_target_probability'].to_numpy()\n",
++    "\n",
++    "aux_visual_summary = aux_visual_diagnostics_df.groupby('label').agg(\n",
++    "    aux_accuracy=('aux_correct', 'mean'),\n",
++    "    mean_target_probability=('aux_target_probability', 'mean'),\n",
++    "    median_target_probability=('aux_target_probability', 'median'),\n",
++    ").reset_index()\n",
++    "\n",
++    "aux_confusion_true = confusion_matrix_from_predictions(\n",
++    "    synthetic.labels,\n",
++    "    aux_visual_diagnostics_df['aux_prediction'].to_numpy(),\n",
++    "    num_classes=10,\n",
++    "    normalize='true',\n",
++    ")\n",
++    "plot_confusion_matrix(aux_confusion_true, title='Auxiliary point-cloud classifier on generated: row-normalized confusion')\n",
++    "aux_visual_summary\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "39399d2b",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "show_synthetic_examples(\n",
++    "    synthetic,\n",
++    "    count_per_class=VISUAL_DIAGNOSTIC_SAMPLES_PER_CLASS,\n",
++    "    title_prefix='best aux',\n",
++    "    selection='best',\n",
++    "    score_values=aux_target_probability,\n",
++    ")\n",
++    "\n",
++    "show_synthetic_examples(\n",
++    "    synthetic,\n",
++    "    count_per_class=VISUAL_DIAGNOSTIC_SAMPLES_PER_CLASS,\n",
++    "    title_prefix='worst aux',\n",
++    "    selection='worst',\n",
++    "    score_values=aux_target_probability,\n",
++    ")\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "e3e783dc",
++   "metadata": {},
++   "source": [
++    "## Evaluation\n",
++    "\n",
++    "We reuse the same evaluation function as Example 6.  The auxiliary classifier above is used only for reporting the classifier-based accuracy metric; generation itself is entirely score-based.\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "6e1e4296",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "metrics = evaluate_generation_metrics(\n",
++    "    eval_classifier,\n",
++    "    synthetic,\n",
++    "    real_test_pc,\n",
++    "    real_test_images,\n",
++    "    real_test_labels,\n",
++    "    cas_epochs=CAS_EPOCHS,\n",
++    "    cas_batch_size=CAS_BATCH_SIZE,\n",
++    "    cas_lr=CAS_LR,\n",
++    "    cas_image_scale=CAS_IMAGE_SCALE,\n",
++    "    sinkhorn_epsilon=SINKHORN_EPSILON,\n",
++    "    sinkhorn_iterations=SINKHORN_ITERATIONS,\n",
++    "    sinkhorn_subsample_per_class=SINKHORN_SUBSAMPLE_PER_CLASS,\n",
++    "    device=DEVICE,\n",
++    "    rng=np.random.default_rng(SEED),\n",
++    "    verbose=True,\n",
++    ")\n",
++    "\n",
++    "summary = {\n",
++    "    'aux_point_cloud_classifier_accuracy': metrics['g_accuracy'],\n",
++    "    'aux_point_cloud_mean_target_probability': metrics['g_mean_target_probability'],\n",
++    "    'cas_accuracy': metrics['cas_accuracy'],\n",
++    "    'cas_image_scale': metrics.get('cas_image_scale', np.nan),\n",
++    "    'one_nn_accuracy_macro': metrics['one_nn_accuracy_macro'],\n",
++    "    'coverage_macro': metrics['coverage_macro'],\n",
++    "    'mean_real_to_generated_sinkhorn_macro': metrics['mean_real_to_generated_sinkhorn_macro'],\n",
++    "    'mean_generated_to_real_sinkhorn_macro': metrics['mean_generated_to_real_sinkhorn_macro'],\n",
++    "    'mean_generated_diversity_macro': metrics['mean_generated_diversity_macro'],\n",
++    "}\n",
++    "\n",
++    "summary_df = pd.DataFrame([summary]).T\n",
++    "summary_df.columns = ['value']\n",
++    "summary_df\n",
++    "\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "4d696680",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "cas_test_metrics = metrics['cas_details'].get('test_metrics')\n",
++    "if cas_test_metrics is not None:\n",
++    "    cas_confusion_true = confusion_matrix_from_predictions(\n",
++    "        real_test_labels,\n",
++    "        cas_test_metrics['predictions'],\n",
++    "        num_classes=10,\n",
++    "        normalize='true',\n",
++    "    )\n",
++    "    plot_confusion_matrix(cas_confusion_true, title='CAS classifier on real test: row-normalized confusion')\n",
++    "else:\n",
++    "    cas_confusion_true = None\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "9f62487e",
++   "metadata": {},
++   "source": [
++    "### Real-trained image classifier diagnostic\n",
++    "\n",
++    "CAS trains on generated images and tests on real images.  The reverse diagnostic below trains the same small CNN on real MNIST images and evaluates it on generated images.  This helps identify which generated classes look like their requested labels to a classifier that only saw real data.\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "f1b864d2",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "if RUN_REAL_TRAINED_IMAGE_DIAGNOSTIC:\n",
++    "    real_image_classifier = SmallMnistCNN()\n",
++    "    real_image_history = train_image_classifier(\n",
++    "        real_image_classifier,\n",
++    "        rescale_images_for_classifier(train_images, CAS_IMAGE_SCALE),\n",
++    "        train_labels,\n",
++    "        val_images=rescale_images_for_classifier(val_images, CAS_IMAGE_SCALE),\n",
++    "        val_labels=val_labels,\n",
++    "        epochs=REAL_IMAGE_CLASSIFIER_EPOCHS,\n",
++    "        batch_size=REAL_IMAGE_CLASSIFIER_BATCH_SIZE,\n",
++    "        lr=REAL_IMAGE_CLASSIFIER_LR,\n",
++    "        device=DEVICE,\n",
++    "        verbose=True,\n",
++    "    )\n",
++    "    real_on_generated_metrics = evaluate_image_classifier(\n",
++    "        real_image_classifier,\n",
++    "        rescale_images_for_classifier(synthetic.images, CAS_IMAGE_SCALE),\n",
++    "        synthetic.labels,\n",
++    "        batch_size=REAL_IMAGE_CLASSIFIER_BATCH_SIZE,\n",
++    "        device=DEVICE,\n",
++    "    )\n",
++    "    real_generated_confusion_true = confusion_matrix_from_predictions(\n",
++    "        synthetic.labels,\n",
++    "        real_on_generated_metrics['predictions'],\n",
++    "        num_classes=10,\n",
++    "        normalize='true',\n",
++    "    )\n",
++    "    real_generated_logits = real_on_generated_metrics['logits']\n",
++    "    real_generated_probs = _softmax_np(real_generated_logits)\n",
++    "    real_generated_target_probability = real_generated_probs[np.arange(len(synthetic.labels)), synthetic.labels]\n",
++    "    print('real-trained classifier accuracy on generated images =', real_on_generated_metrics['accuracy'])\n",
++    "    plot_confusion_matrix(\n",
++    "        real_generated_confusion_true,\n",
++    "        title='Real-trained classifier on generated images: row-normalized confusion',\n",
++    "    )\n",
++    "else:\n",
++    "    real_image_classifier = None\n",
++    "    real_image_history = None\n",
++    "    real_on_generated_metrics = None\n",
++    "    real_generated_target_probability = None\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "b14ba744",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "if real_generated_target_probability is not None:\n",
++    "    show_synthetic_examples(\n",
++    "        synthetic,\n",
++    "        count_per_class=VISUAL_DIAGNOSTIC_SAMPLES_PER_CLASS,\n",
++    "        title_prefix='best real-CNN',\n",
++    "        selection='best',\n",
++    "        score_values=real_generated_target_probability,\n",
++    "    )\n",
++    "    show_synthetic_examples(\n",
++    "        synthetic,\n",
++    "        count_per_class=VISUAL_DIAGNOSTIC_SAMPLES_PER_CLASS,\n",
++    "        title_prefix='worst real-CNN',\n",
++    "        selection='worst',\n",
++    "        score_values=real_generated_target_probability,\n",
++    "    )\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "407262af",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "per_label_df = pd.DataFrame(metrics['per_label']).T.sort_index()\n",
++    "per_label_df.index.name = 'label'\n",
++    "per_label_df"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "57c06032",
++   "metadata": {},
++   "source": [
++    "## Reading the results\n",
++    "\n",
++    "A reasonable first comparison against Example 6 is:\n",
++    "\n",
++    "1. Keep the **same data split**, **same `top_k` representation**, and **same evaluation protocol**.\n",
++    "2. Compare the new score-based generator to the Example 6 `h`-transform generator on:\n",
++    "   - auxiliary classifier accuracy,\n",
++    "   - CAS,\n",
++    "   - 1-NN accuracy,\n",
++    "   - coverage,\n",
++    "   - Sinkhorn distances.\n",
++    "3. Then vary:\n",
++    "   - `MASS_SAMPLING_MODE` (`'bank'` vs `'truncated_poisson_dirichlet'`),\n",
++    "   - `SCORE_PROJECTION`,\n",
++    "   - `HORIZON`,\n",
++    "   - and the sampling schedule for `tau`.\n",
++    "\n",
++    "Because the denoising target is explicit, notebook 7 removes the terminal Monte Carlo drift estimation entirely and learns the reverse drift directly through the score network.\n"
++   ]
++  }
++ ],
++ "metadata": {
++  "kernelspec": {
++   "display_name": ".venv (3.14.4)",
++   "language": "python",
++   "name": "python3"
++  },
++  "language_info": {
++   "codemirror_mode": {
++    "name": "ipython",
++    "version": 3
++   },
++   "file_extension": ".py",
++   "mimetype": "text/x-python",
++   "name": "python",
++   "nbconvert_exporter": "python",
++   "pygments_lexer": "ipython3",
++   "version": "3.14.4"
++  }
++ },
++ "nbformat": 4,
++ "nbformat_minor": 5
++}

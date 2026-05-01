@@ -37,6 +37,7 @@ from numpy.typing import NDArray
 
 import torch
 from torch import Tensor, nn
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 from mnist_conditioned_diffusion import (
@@ -60,6 +61,7 @@ IntArray = NDArray[np.int64]
 __all__ = [
     "ConditionalScoreSetNetwork",
     "ConditionalScoreSetTransformer",
+    "ConditionalScoreImageFieldNetwork",
     "sample_score_matching_noise_levels",
     "add_forward_noise_to_positions",
     "torus_heat_kernel_score_target",
@@ -106,6 +108,428 @@ def _tau_features(
     log_tau_unit = (log_tau / log_denom).clamp(0.0, 1.0)
     sqrt_tau_unit = torch.sqrt(tau_unit.clamp_min(0.0))
     return torch.stack([tau_unit, sqrt_tau_unit, log_tau_unit], dim=1)
+
+
+
+
+def _group_norm_groups(num_channels: int, max_groups: int = 8) -> int:
+    """Choose a small GroupNorm group count that divides ``num_channels``."""
+    for groups in reversed(range(1, max_groups + 1)):
+        if groups <= num_channels and num_channels % groups == 0:
+            return groups
+    return 1
+
+
+def _normalize_positions_for_grid(positions: Tensor, *, periodic: bool) -> Tensor:
+    """Map particle positions into the unit square used by the raster grid."""
+    if periodic:
+        return torch.remainder(positions, 1.0)
+    eps = max(torch.finfo(positions.dtype).eps, 1e-6)
+    return positions.clamp(0.0, 1.0 - eps)
+
+
+def _grid_bilinear_coordinates(
+    positions: Tensor,
+    *,
+    height: int,
+    width: int,
+    periodic: bool,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Return bilinear neighbor indices and weights for unit-square positions."""
+    if height <= 0 or width <= 0:
+        raise ValueError("height and width must be positive")
+    positions = _normalize_positions_for_grid(positions, periodic=periodic)
+
+    x = positions[..., 0] * float(width) - 0.5
+    y = positions[..., 1] * float(height) - 0.5
+
+    x0 = torch.floor(x)
+    y0 = torch.floor(y)
+    x1 = x0 + 1.0
+    y1 = y0 + 1.0
+
+    wx1 = x - x0
+    wy1 = y - y0
+    wx0 = 1.0 - wx1
+    wy0 = 1.0 - wy1
+
+    x0_idx = x0.to(dtype=torch.long)
+    y0_idx = y0.to(dtype=torch.long)
+    x1_idx = x1.to(dtype=torch.long)
+    y1_idx = y1.to(dtype=torch.long)
+
+    if periodic:
+        x0_idx = torch.remainder(x0_idx, width)
+        x1_idx = torch.remainder(x1_idx, width)
+        y0_idx = torch.remainder(y0_idx, height)
+        y1_idx = torch.remainder(y1_idx, height)
+    else:
+        x0_idx = x0_idx.clamp(0, width - 1)
+        x1_idx = x1_idx.clamp(0, width - 1)
+        y0_idx = y0_idx.clamp(0, height - 1)
+        y1_idx = y1_idx.clamp(0, height - 1)
+
+    w00 = wx0 * wy0
+    w01 = wx1 * wy0
+    w10 = wx0 * wy1
+    w11 = wx1 * wy1
+    return x0_idx, x1_idx, y0_idx, y1_idx, w00, w01, w10, w11
+
+
+def _rasterize_weighted_point_clouds_torch(
+    masses: Tensor,
+    positions: Tensor,
+    *,
+    grid_size: int,
+    periodic: bool,
+    include_occupancy: bool = True,
+) -> Tensor:
+    """Rasterize weighted point clouds into density/occupancy image channels."""
+    if masses.ndim != 2:
+        raise ValueError("masses must have shape (B, K)")
+    if positions.ndim != 3 or positions.shape[:2] != masses.shape or positions.shape[2] != 2:
+        raise ValueError("positions must have shape (B, K, 2) and match masses")
+    if grid_size <= 0:
+        raise ValueError("grid_size must be positive")
+
+    batch_size, num_points = masses.shape
+    height = width = int(grid_size)
+    num_cells = height * width
+
+    x0_idx, x1_idx, y0_idx, y1_idx, w00, w01, w10, w11 = _grid_bilinear_coordinates(
+        positions,
+        height=height,
+        width=width,
+        periodic=periodic,
+    )
+
+    idx00 = y0_idx * width + x0_idx
+    idx01 = y0_idx * width + x1_idx
+    idx10 = y1_idx * width + x0_idx
+    idx11 = y1_idx * width + x1_idx
+
+    density = masses.new_zeros((batch_size, num_cells))
+    density.scatter_add_(1, idx00, masses * w00)
+    density.scatter_add_(1, idx01, masses * w01)
+    density.scatter_add_(1, idx10, masses * w10)
+    density.scatter_add_(1, idx11, masses * w11)
+    density = density.reshape(batch_size, 1, height, width)
+
+    if not include_occupancy:
+        return density
+
+    occupancy = masses.new_zeros((batch_size, num_cells))
+    point_unit = masses.new_full((batch_size, num_points), 1.0 / max(num_points, 1))
+    occupancy.scatter_add_(1, idx00, point_unit * w00)
+    occupancy.scatter_add_(1, idx01, point_unit * w01)
+    occupancy.scatter_add_(1, idx10, point_unit * w10)
+    occupancy.scatter_add_(1, idx11, point_unit * w11)
+    occupancy = occupancy.reshape(batch_size, 1, height, width)
+    return torch.cat([density, occupancy], dim=1)
+
+
+def _sample_feature_grid_at_positions(
+    feature_grid: Tensor,
+    positions: Tensor,
+    *,
+    periodic: bool,
+) -> Tensor:
+    """Sample a dense feature grid at particle locations by bilinear interpolation."""
+    if feature_grid.ndim != 4:
+        raise ValueError("feature_grid must have shape (B, C, H, W)")
+    if positions.ndim != 3 or positions.shape[0] != feature_grid.shape[0] or positions.shape[2] != 2:
+        raise ValueError("positions must have shape (B, K, 2) and match feature_grid batch size")
+
+    batch_size, channels, height, width = feature_grid.shape
+    _, num_points, _ = positions.shape
+
+    x0_idx, x1_idx, y0_idx, y1_idx, w00, w01, w10, w11 = _grid_bilinear_coordinates(
+        positions,
+        height=height,
+        width=width,
+        periodic=periodic,
+    )
+    idx00 = y0_idx * width + x0_idx
+    idx01 = y0_idx * width + x1_idx
+    idx10 = y1_idx * width + x0_idx
+    idx11 = y1_idx * width + x1_idx
+
+    flat = feature_grid.reshape(batch_size, channels, height * width)
+
+    def _gather(idx: Tensor) -> Tensor:
+        gathered = flat.gather(2, idx[:, None, :].expand(batch_size, channels, num_points))
+        return gathered.transpose(1, 2)
+
+    sampled = (
+        w00[..., None] * _gather(idx00)
+        + w01[..., None] * _gather(idx01)
+        + w10[..., None] * _gather(idx10)
+        + w11[..., None] * _gather(idx11)
+    )
+    return sampled
+
+
+class _ConvBlock2d(nn.Module):
+    """Two-layer convolutional block used by the image-field U-Net."""
+
+    def __init__(self, in_channels: int, out_channels: int, *, padding_mode: str) -> None:
+        super().__init__()
+        groups = _group_norm_groups(out_channels)
+        self.net = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=3,
+                padding=1,
+                bias=False,
+                padding_mode=padding_mode,
+            ),
+            nn.GroupNorm(groups, out_channels),
+            nn.GELU(),
+            nn.Conv2d(
+                out_channels,
+                out_channels,
+                kernel_size=3,
+                padding=1,
+                bias=False,
+                padding_mode=padding_mode,
+            ),
+            nn.GroupNorm(groups, out_channels),
+            nn.GELU(),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.net(x)
+
+
+class _SmallUNet2d(nn.Module):
+    """Small U-Net that turns rasterized clouds into dense local feature grids."""
+
+    def __init__(
+        self,
+        *,
+        in_channels: int,
+        out_channels: int,
+        base_channels: int,
+        padding_mode: str,
+    ) -> None:
+        super().__init__()
+        if in_channels <= 0 or out_channels <= 0 or base_channels <= 0:
+            raise ValueError("U-Net channel counts must be positive")
+
+        c1 = int(base_channels)
+        c2 = 2 * c1
+        c3 = 4 * c1
+
+        self.enc1 = _ConvBlock2d(in_channels, c1, padding_mode=padding_mode)
+        self.pool1 = nn.AvgPool2d(2)
+        self.enc2 = _ConvBlock2d(c1, c2, padding_mode=padding_mode)
+        self.pool2 = nn.AvgPool2d(2)
+        self.bottleneck = _ConvBlock2d(c2, c3, padding_mode=padding_mode)
+
+        self.up2 = nn.Conv2d(c3, c2, kernel_size=1)
+        self.dec2 = _ConvBlock2d(c2 + c2, c2, padding_mode=padding_mode)
+        self.up1 = nn.Conv2d(c2, c1, kernel_size=1)
+        self.dec1 = _ConvBlock2d(c1 + c1, c1, padding_mode=padding_mode)
+        self.out = nn.Conv2d(c1, out_channels, kernel_size=1)
+
+    def forward(self, x: Tensor) -> Tensor:
+        enc1 = self.enc1(x)
+        enc2 = self.enc2(self.pool1(enc1))
+        bottleneck = self.bottleneck(self.pool2(enc2))
+
+        up2 = F.interpolate(bottleneck, size=enc2.shape[-2:], mode="bilinear", align_corners=False)
+        up2 = self.up2(up2)
+        dec2 = self.dec2(torch.cat([up2, enc2], dim=1))
+
+        up1 = F.interpolate(dec2, size=enc1.shape[-2:], mode="bilinear", align_corners=False)
+        up1 = self.up1(up1)
+        dec1 = self.dec1(torch.cat([up1, enc1], dim=1))
+        return self.out(dec1)
+
+
+class ConditionalScoreImageFieldNetwork(nn.Module):
+    r"""Hybrid image-field score network for weighted point clouds.
+
+    The model first rasterizes the weighted point cloud into a small periodic
+    density image, augments it with broadcast label/time conditioning, and runs
+    a compact U-Net to produce dense local features on the canvas.  These local
+    features are then bilinearly sampled back at the particle locations and
+    passed through a lightweight particle-wise head together with the masses and
+    conditioning variables.
+
+    This is the "Option B" hybrid architecture:
+        point cloud -> rasterized image -> U-Net features
+                    -> sample local features at particles -> point head -> score
+    """
+
+    def __init__(
+        self,
+        *,
+        grid_size: int = 32,
+        base_channels: int = 32,
+        grid_feature_dim: int = 64,
+        point_hidden_dim: int = 256,
+        conditioning_dim: int = 64,
+        num_classes: int = 10,
+        condition_on_label: bool = True,
+        tau_min: float = 1e-6,
+        tau_max: float = 1e-3,
+        dropout: float = 0.0,
+        use_torus_features: bool = True,
+        score_output_scaling: str = "tau_mass",
+        include_occupancy_channel: bool = True,
+    ) -> None:
+        super().__init__()
+        if grid_size <= 0 or base_channels <= 0 or grid_feature_dim <= 0 or point_hidden_dim <= 0:
+            raise ValueError("image-field widths must be positive")
+        if conditioning_dim <= 0:
+            raise ValueError("conditioning_dim must be positive")
+        if num_classes <= 1:
+            raise ValueError("num_classes must be at least 2")
+        if tau_min <= 0.0 or tau_max <= 0.0 or tau_min > tau_max:
+            raise ValueError("tau_min and tau_max must satisfy 0 < tau_min <= tau_max")
+        if dropout < 0.0:
+            raise ValueError("dropout must be non-negative")
+        if score_output_scaling not in {"tau", "tau_mass", "none"}:
+            raise ValueError("score_output_scaling must be one of {'tau', 'tau_mass', 'none'}")
+
+        self.grid_size = int(grid_size)
+        self.base_channels = int(base_channels)
+        self.grid_feature_dim = int(grid_feature_dim)
+        self.point_hidden_dim = int(point_hidden_dim)
+        self.num_classes = int(num_classes)
+        self.condition_on_label = bool(condition_on_label)
+        self.tau_min = float(tau_min)
+        self.tau_max = float(tau_max)
+        self.use_torus_features = bool(use_torus_features)
+        self.score_output_scaling = str(score_output_scaling)
+        self.include_occupancy_channel = bool(include_occupancy_channel)
+
+        self.time_mlp = nn.Sequential(
+            nn.Linear(3, conditioning_dim),
+            nn.GELU(),
+            nn.Linear(conditioning_dim, conditioning_dim),
+            nn.GELU(),
+        )
+        if self.condition_on_label:
+            self.label_embedding = nn.Embedding(self.num_classes, conditioning_dim)
+            label_dim = conditioning_dim
+        else:
+            self.label_embedding = None
+            label_dim = 0
+        cond_dim = conditioning_dim + label_dim
+
+        raster_channels = 2 if self.include_occupancy_channel else 1
+        self.feature_unet = _SmallUNet2d(
+            in_channels=raster_channels + cond_dim,
+            out_channels=self.grid_feature_dim,
+            base_channels=self.base_channels,
+            padding_mode="circular" if self.use_torus_features else "zeros",
+        )
+
+        position_dim = 6 if self.use_torus_features else 2
+        point_input_dim = self.grid_feature_dim + position_dim + 2 + cond_dim
+        self.point_head = nn.Sequential(
+            nn.Linear(point_input_dim, self.point_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.point_hidden_dim, self.point_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.point_hidden_dim, 2),
+        )
+
+    def _prepare_tau(self, tau: Tensor | float, batch_size: int, *, device: torch.device, dtype: torch.dtype) -> Tensor:
+        if isinstance(tau, Tensor):
+            tau_tensor = tau.to(device=device, dtype=dtype).reshape(-1)
+        else:
+            tau_tensor = torch.full((batch_size,), float(tau), device=device, dtype=dtype)
+        if tau_tensor.numel() == 1:
+            tau_tensor = tau_tensor.expand(batch_size)
+        if tau_tensor.shape != (batch_size,):
+            raise ValueError("tau must be a scalar or have shape (B,)")
+        return tau_tensor
+
+    def _prepare_conditioning(self, tau: Tensor, labels: Optional[Tensor]) -> Tensor:
+        time_context = self.time_mlp(
+            _tau_features(tau, tau_min=self.tau_min, tau_max=self.tau_max)
+        )
+        if not self.condition_on_label:
+            return time_context
+        if labels is None:
+            raise ValueError("labels are required when condition_on_label=True")
+        labels = labels.reshape(-1).to(device=tau.device, dtype=torch.long)
+        if labels.shape != tau.shape:
+            raise ValueError("labels must have shape (B,)")
+        label_context = self.label_embedding(labels)
+        return torch.cat([time_context, label_context], dim=1)
+
+    def _position_features(self, positions: Tensor) -> Tensor:
+        if not self.use_torus_features:
+            return positions
+        angles = 2.0 * math.pi * positions
+        return torch.cat([positions, torch.sin(angles), torch.cos(angles)], dim=-1)
+
+    def _score_scale(self, tau: Tensor, masses: Tensor) -> Tensor:
+        if self.score_output_scaling == "none":
+            return torch.ones((*masses.shape, 1), device=masses.device, dtype=masses.dtype)
+        if self.score_output_scaling == "tau":
+            return torch.rsqrt((2.0 * tau).clamp_min(self.tau_min))[:, None, None]
+        return torch.rsqrt(
+            (2.0 * tau[:, None, None] * masses.unsqueeze(-1)).clamp_min(self.tau_min * 1e-8)
+        )
+
+    def forward(
+        self,
+        masses: Tensor,
+        positions: Tensor,
+        tau: Tensor | float,
+        labels: Optional[Tensor] = None,
+    ) -> Tensor:
+        if masses.ndim != 2:
+            raise ValueError("masses must have shape (B, K)")
+        if positions.ndim != 3 or positions.shape[:2] != masses.shape or positions.shape[2] != 2:
+            raise ValueError("positions must have shape (B, K, 2) and match masses")
+
+        batch_size, num_points = masses.shape
+        tau_tensor = self._prepare_tau(
+            tau,
+            batch_size,
+            device=positions.device,
+            dtype=positions.dtype,
+        )
+        cond = self._prepare_conditioning(tau_tensor, labels)
+        cond_points = cond[:, None, :].expand(batch_size, num_points, cond.shape[1])
+
+        raster = _rasterize_weighted_point_clouds_torch(
+            masses,
+            positions,
+            grid_size=self.grid_size,
+            periodic=self.use_torus_features,
+            include_occupancy=self.include_occupancy_channel,
+        )
+        cond_grid = cond[:, :, None, None].expand(batch_size, cond.shape[1], self.grid_size, self.grid_size)
+        feature_grid = self.feature_unet(torch.cat([raster, cond_grid], dim=1))
+        local_features = _sample_feature_grid_at_positions(
+            feature_grid,
+            positions,
+            periodic=self.use_torus_features,
+        )
+
+        log_masses = torch.log(masses.clamp_min(1e-8))
+        point_inputs = torch.cat(
+            [
+                local_features,
+                self._position_features(positions),
+                masses.unsqueeze(-1),
+                log_masses.unsqueeze(-1),
+                cond_points,
+            ],
+            dim=-1,
+        )
+        raw_scaled_score = self.point_head(point_inputs)
+        return raw_scaled_score * self._score_scale(tau_tensor, masses)
 
 
 class ConditionalScoreSetNetwork(nn.Module):
