@@ -11,6 +11,7 @@ import core.wasserstein_conditioning_algorithms as wasserstein_conditioning_algo
 import mnist.conditioned_diffusion as mnist_conditioned_diffusion
 import mnist.experiment6_fixes as mnist_experiment6_fixes
 import mnist.experiment6_hyperparameter_search as mnist_experiment6_hyperparameter_search
+import mnist.mnist_cp as mnist_cp
 import mnist.score_matching as mnist_score_matching
 import mnist.weighted_point_cloud as mnist_weighted_point_cloud
 
@@ -35,9 +36,11 @@ def test_direct_package_imports() -> None:
         "mnist.experiment6_hyperparameter_search",
     )
     _assert_alias(mnist_score_matching, "mnist.score_matching")
+    _assert_alias(mnist_cp, "mnist.mnist_cp")
 
     assert hasattr(mnist_score_matching, "train_score_model")
     assert hasattr(mnist_conditioned_diffusion, "generate_guided_point_clouds")
+    assert hasattr(mnist_cp, "load_mnist_cp_splits")
     assert hasattr(wasserstein_conditioning_algorithms, "simulate_wasserstein_mc_sinkhorn_em")
 
 

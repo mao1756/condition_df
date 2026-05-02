@@ -7,8 +7,9 @@ with small numerical examples and MNIST weighted-point-cloud experiments.
 
 - `core/`: shared numerical helpers and manuscript-level algorithms.
 - `examples/`: small h-transform examples used by the early notebooks.
-- `mnist/`: MNIST point-cloud conversion, classifiers, guided diffusion,
-  score matching, generation metrics, and experiment search utilities.
+- `mnist/`: MNIST point-cloud conversion, MNIST-CP contour adapters,
+  classifiers, guided diffusion, score matching, generation metrics, and
+  experiment search utilities.
 - `notebooks/`: interactive examples that import the package modules directly.
 - `tests/`: lightweight regression/smoke checks.
 - `docs/`: paper/reference notes and PDFs.
@@ -23,6 +24,7 @@ Use direct package imports:
 from core.wasserstein_conditioning_algorithms import simulate_gaussian_terminal_em
 from examples.factorized_two_well_htransform import simulate_factorized_gaussian_mixture_em
 from mnist.score_matching import train_score_model
+from mnist.mnist_cp import load_mnist_cp_splits
 ```
 
 ## Smoke Tests
@@ -34,6 +36,7 @@ Use the virtual environment Python on Windows:
 .venv\Scripts\python.exe -m tests.test_smoke_wasserstein_conditioning_algorithms
 .venv\Scripts\python.exe -m tests.test_smoke_mnist_conditioned_diffusion
 .venv\Scripts\python.exe -m tests.test_smoke_mnist_score_matching
+.venv\Scripts\python.exe -m tests.test_smoke_mnist_cp
 .venv\Scripts\python.exe -m tests.test_smoke_mnist_experiment6_hyperparameter_search
 ```
 
