@@ -6,6 +6,8 @@ Run with
 
 from __future__ import annotations
 
+import tempfile
+
 import numpy as np
 import torch
 
@@ -21,6 +23,7 @@ from mnist.target_conditioned_score import (
     LatentCritic,
     LatentGenerator,
     TargetConditionedScoreModel,
+    load_target_conditioned_experiment_checkpoint,
     encode_target_latents,
     empirical_mixture_scaled_score_target,
     evaluate_hybrid_oracle_neural_reconstruction,
@@ -45,6 +48,7 @@ from mnist.target_conditioned_score import (
     sample_pca_latent_prior,
     sample_pca_gmm_latent_prior,
     sample_target_conditioned_annealed_dynamics,
+    save_target_conditioned_experiment_checkpoint,
     sample_wgan_latent_prior,
     target_conditioned_score_matching_loss,
     train_latent_wgan_gp,
@@ -67,31 +71,35 @@ def _toy_contours(num_samples: int = 6, num_points: int = 16) -> tuple[np.ndarra
     return masses, np.asarray(positions, dtype=np.float64), np.asarray(labels, dtype=np.int64)
 
 
+def _small_model_config(tau_min: float, tau_max: float) -> dict[str, object]:
+    return {
+        "latent_dim": 16,
+        "target_encoder_hidden_dim": 32,
+        "grid_size": 16,
+        "base_channels": 8,
+        "grid_feature_dim": 12,
+        "set_feature_dim": 16,
+        "set_hidden_dim": 16,
+        "set_blocks": 1,
+        "score_hidden_dim": 32,
+        "score_residual_blocks": 1,
+        "time_dim": 16,
+        "context_dim": 24,
+        "condition_on_label": True,
+        "tau_min": tau_min,
+        "tau_max": tau_max,
+        "dropout": 0.0,
+        "use_image_field": False,
+        "use_target_grid_conditioning": True,
+        "target_grid_feature_dim": 8,
+        "target_grid_dropout_probability": 0.10,
+        "measure_gate_init": -5.0,
+        "measure_gate_max": 0.10,
+    }
+
+
 def _small_model(tau_min: float, tau_max: float) -> TargetConditionedScoreModel:
-    return TargetConditionedScoreModel(
-        latent_dim=16,
-        target_encoder_hidden_dim=32,
-        grid_size=16,
-        base_channels=8,
-        grid_feature_dim=12,
-        set_feature_dim=16,
-        set_hidden_dim=16,
-        set_blocks=1,
-        score_hidden_dim=32,
-        score_residual_blocks=1,
-        time_dim=16,
-        context_dim=24,
-        condition_on_label=True,
-        tau_min=tau_min,
-        tau_max=tau_max,
-        dropout=0.0,
-        use_image_field=False,
-        use_target_grid_conditioning=True,
-        target_grid_feature_dim=8,
-        target_grid_dropout_probability=0.10,
-        measure_gate_init=-5.0,
-        measure_gate_max=0.10,
-    )
+    return TargetConditionedScoreModel(**_small_model_config(tau_min, tau_max))
 
 
 def test_forward_loss_and_training_smoke() -> None:
@@ -323,7 +331,70 @@ def test_sampling_and_latent_priors_smoke() -> None:
     assert np.array_equal(y_wgan, np.asarray([0, 1]))
 
 
+
+def test_checkpoint_round_trip_smoke() -> None:
+    torch.manual_seed(6)
+    masses, positions, labels = _toy_contours(num_samples=4, num_points=12)
+    sigma_levels, tau_levels = make_sigma_tau_schedule(num_points=12, num_levels=2, sigma_max=0.06, sigma_min=0.03)
+    model_config = _small_model_config(float(np.min(tau_levels)), float(np.max(tau_levels)))
+    model = TargetConditionedScoreModel(**model_config)
+
+    calibration = fit_score_calibration_against_mixture_oracle(
+        model,
+        masses,
+        positions,
+        labels,
+        tau_levels=tau_levels,
+        query_modes=("uniform",),
+        max_samples=2,
+        batch_size=2,
+        device="cpu",
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = f"{tmpdir}/experiment8b_checkpoint.pt"
+        saved_path = save_target_conditioned_experiment_checkpoint(
+            path,
+            model,
+            model_config=model_config,
+            score_history={"train_loss": [1.0]},
+            sigma_levels=sigma_levels,
+            tau_levels=tau_levels,
+            score_calibration=calibration,
+            score_norm_clip=calibration.physical_norm_clip,
+            metadata={"stage": "smoke"},
+        )
+        loaded = load_target_conditioned_experiment_checkpoint(saved_path, device="cpu")
+        assert loaded["model_config"] == model_config
+        assert loaded["score_history"]["train_loss"] == [1.0]
+        assert np.allclose(loaded["tau_levels"], tau_levels)
+        assert loaded["score_calibration"] is not None
+
+        batch_masses = torch.tensor(masses[:2], dtype=torch.float32)
+        clean = torch.tensor(positions[:2], dtype=torch.float32)
+        batch_labels = torch.tensor(labels[:2], dtype=torch.long)
+        tau = torch.full((2,), float(tau_levels[0]), dtype=torch.float32)
+        pred_before = model.predict_scaled_score(
+            batch_masses,
+            clean,
+            tau,
+            target_positions=clean,
+            target_masses=batch_masses,
+            labels=batch_labels,
+        )
+        pred_after = loaded["model"].predict_scaled_score(
+            batch_masses,
+            clean,
+            tau,
+            target_positions=clean,
+            target_masses=batch_masses,
+            labels=batch_labels,
+        )
+        assert torch.allclose(pred_before, pred_after, atol=1e-6)
+
+
 if __name__ == "__main__":
     test_forward_loss_and_training_smoke()
     test_sampling_and_latent_priors_smoke()
+    test_checkpoint_round_trip_smoke()
     print("All target-conditioned MNIST-CP score smoke tests passed.")

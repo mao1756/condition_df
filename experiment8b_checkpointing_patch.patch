@@ -1,0 +1,827 @@
+diff --git a/mnist/target_conditioned_score.py b/mnist/target_conditioned_score.py
+index 6010e6b..63030ef 100644
+--- a/mnist/target_conditioned_score.py
++++ b/mnist/target_conditioned_score.py
+@@ -29,6 +29,7 @@ finite-dimensional SDE drift ``2 S_theta``.
+ """
+ 
+ from dataclasses import dataclass
++from pathlib import Path
+ from typing import Any, Mapping, Optional, Sequence
+ 
+ import copy
+@@ -77,6 +78,10 @@ class ScoreCalibration:
+ 
+ __all__ = [
+     "ScoreCalibration",
++    "score_calibration_to_dict",
++    "score_calibration_from_dict",
++    "save_target_conditioned_experiment_checkpoint",
++    "load_target_conditioned_experiment_checkpoint",
+     "TargetConditionedScoreModel",
+     "TargetPointCloudEncoder",
+     "NoisySetEquivariantEncoder",
+@@ -2285,6 +2290,147 @@ def reconstruct_target_conditioned_from_latents(
+     )
+ 
+ 
++# ---------------------------------------------------------------------------
++# Experiment checkpoint helpers
++# ---------------------------------------------------------------------------
++
++
++def score_calibration_to_dict(calibration: Optional[ScoreCalibration]) -> Optional[dict[str, Any]]:
++    """Convert a :class:`ScoreCalibration` object to a torch-saveable dict."""
++    if calibration is None:
++        return None
++    if not isinstance(calibration, ScoreCalibration):
++        raise TypeError("calibration must be a ScoreCalibration or None")
++    return {
++        "tau_levels": np.asarray(calibration.tau_levels, dtype=np.float64),
++        "physical_score_scale": np.asarray(calibration.physical_score_scale, dtype=np.float64),
++        "physical_norm_clip": (
++            None
++            if calibration.physical_norm_clip is None
++            else np.asarray(calibration.physical_norm_clip, dtype=np.float64)
++        ),
++        "metadata": copy.deepcopy(calibration.metadata),
++    }
++
++
++def score_calibration_from_dict(payload: Optional[Mapping[str, Any] | ScoreCalibration]) -> Optional[ScoreCalibration]:
++    """Restore a :class:`ScoreCalibration` object from a checkpoint payload."""
++    if payload is None:
++        return None
++    if isinstance(payload, ScoreCalibration):
++        return payload
++    if not isinstance(payload, Mapping):
++        raise TypeError("calibration payload must be a mapping, ScoreCalibration, or None")
++    return ScoreCalibration(
++        tau_levels=np.asarray(payload["tau_levels"], dtype=np.float64),
++        physical_score_scale=np.asarray(payload["physical_score_scale"], dtype=np.float64),
++        physical_norm_clip=(
++            None
++            if payload.get("physical_norm_clip") is None
++            else np.asarray(payload["physical_norm_clip"], dtype=np.float64)
++        ),
++        metadata=copy.deepcopy(payload.get("metadata")),
++    )
++
++
++def _state_dict_to_cpu(state_dict: Mapping[str, Tensor]) -> dict[str, Tensor]:
++    """Clone a model state dict onto CPU before checkpointing."""
++    return {
++        key: value.detach().cpu().clone() if torch.is_tensor(value) else copy.deepcopy(value)
++        for key, value in state_dict.items()
++    }
++
++
++def save_target_conditioned_experiment_checkpoint(
++    path: str | Path,
++    model: TargetConditionedScoreModel,
++    *,
++    model_config: Mapping[str, Any],
++    score_history: Optional[Mapping[str, Sequence[float]]] = None,
++    sigma_levels: Optional[Sequence[float] | np.ndarray] = None,
++    tau_levels: Optional[Sequence[float] | np.ndarray] = None,
++    score_calibration: Optional[ScoreCalibration] = None,
++    score_norm_clip: Optional[Sequence[float] | np.ndarray] = None,
++    metadata: Optional[Mapping[str, Any]] = None,
++    extra: Optional[Mapping[str, Any]] = None,
++) -> Path:
++    r"""Save the trained Experiment 8b score model and sampler metadata.
++
++    The checkpoint stores CPU copies of the model weights plus the architecture
++    kwargs needed to reconstruct ``TargetConditionedScoreModel``.  It also stores
++    the multi-scale schedule and optional calibration/clipping arrays, so the
++    notebook can resume from the reconstruction and latent-prior sections without
++    rerunning score training.
++    """
++    checkpoint_path = Path(path)
++    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
++
++    payload: dict[str, Any] = {
++        "format_version": 1,
++        "model_class": "TargetConditionedScoreModel",
++        "model_config": copy.deepcopy(dict(model_config)),
++        "model_state_dict": _state_dict_to_cpu(model.state_dict()),
++        "score_history": copy.deepcopy(dict(score_history or {})),
++        "sigma_levels": None if sigma_levels is None else np.asarray(sigma_levels, dtype=np.float64),
++        "tau_levels": None if tau_levels is None else np.asarray(tau_levels, dtype=np.float64),
++        "score_calibration": score_calibration_to_dict(score_calibration),
++        "score_norm_clip": None if score_norm_clip is None else np.asarray(score_norm_clip, dtype=np.float64),
++        "metadata": copy.deepcopy(dict(metadata or {})),
++    }
++    if extra is not None:
++        payload["extra"] = copy.deepcopy(dict(extra))
++    torch.save(payload, checkpoint_path)
++    return checkpoint_path
++
++
++def load_target_conditioned_experiment_checkpoint(
++    path: str | Path,
++    *,
++    device: Optional[str | torch.device] = None,
++    strict: bool = True,
++) -> dict[str, Any]:
++    r"""Load an Experiment 8b checkpoint and reconstruct the score model.
++
++    Returns the raw payload with two normalized entries added/replaced:
++    ``payload["model"]`` is the loaded model on ``device`` and
++    ``payload["score_calibration"]`` is a :class:`ScoreCalibration` object or
++    ``None``.
++    """
++    checkpoint_path = Path(path)
++    if not checkpoint_path.exists():
++        raise FileNotFoundError(checkpoint_path)
++    resolved_device = _resolve_device(device)
++
++    try:
++        payload = torch.load(checkpoint_path, map_location=resolved_device, weights_only=False)
++    except TypeError:
++        # Older PyTorch versions do not expose the weights_only argument.
++        payload = torch.load(checkpoint_path, map_location=resolved_device)
++
++    if not isinstance(payload, Mapping):
++        raise TypeError("checkpoint payload must be a mapping")
++    if payload.get("model_class", "TargetConditionedScoreModel") != "TargetConditionedScoreModel":
++        raise ValueError(f"unsupported model_class={payload.get('model_class')!r}")
++    if "model_config" not in payload or "model_state_dict" not in payload:
++        raise KeyError("checkpoint must contain model_config and model_state_dict")
++
++    model = TargetConditionedScoreModel(**dict(payload["model_config"]))
++    model.load_state_dict(payload["model_state_dict"], strict=strict)
++    model.to(resolved_device)
++    model.eval()
++
++    restored = dict(payload)
++    restored["model"] = model
++    restored["score_calibration"] = score_calibration_from_dict(payload.get("score_calibration"))
++    if restored.get("score_norm_clip") is not None:
++        restored["score_norm_clip"] = np.asarray(restored["score_norm_clip"], dtype=np.float64)
++    if restored.get("sigma_levels") is not None:
++        restored["sigma_levels"] = np.asarray(restored["sigma_levels"], dtype=np.float64)
++    if restored.get("tau_levels") is not None:
++        restored["tau_levels"] = np.asarray(restored["tau_levels"], dtype=np.float64)
++    return restored
++
++
+ # ---------------------------------------------------------------------------
+ # Latent priors
+ # ---------------------------------------------------------------------------
+diff --git a/notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb b/notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb
+index a9d4d17..ce9edde 100644
+--- a/notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb
++++ b/notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb
+@@ -99,6 +99,7 @@
+     "    LatentCritic,\n",
+     "    LatentGenerator,\n",
+     "    TargetConditionedScoreModel,\n",
++    "    load_target_conditioned_experiment_checkpoint,\n",
+     "    encode_target_latents,\n",
+     "    evaluate_hybrid_oracle_neural_reconstruction,\n",
+     "    evaluate_model_vs_mixture_oracle,\n",
+@@ -121,6 +122,7 @@
+     "    sample_pca_gmm_latent_prior,\n",
+     "    sample_pca_latent_prior,\n",
+     "    sample_target_conditioned_annealed_dynamics,\n",
++    "    save_target_conditioned_experiment_checkpoint,\n",
+     "    sample_wgan_latent_prior,\n",
+     "    train_latent_wgan_gp,\n",
+     "    train_target_conditioned_score_model,\n",
+@@ -197,6 +199,15 @@
+     "\n",
+     "MNIST_CP_PATH = REPO_ROOT / \"mnist_data\" / \"mnist_cp.npz\"\n",
+     "\n",
++    "# Score-autoencoder checkpointing.\n",
++    "# \"auto\": load the checkpoint if it exists, otherwise train and save it.\n",
++    "# \"load\": require an existing checkpoint and skip score training.\n",
++    "# \"train\": ignore any existing checkpoint and retrain.\n",
++    "CHECKPOINT_MODE = \"auto\"\n",
++    "SAVE_SCORE_CHECKPOINT = True\n",
++    "CHECKPOINT_DIR = REPO_ROOT / \"artifacts\" / \"checkpoints\"\n",
++    "EXPERIMENT8B_CHECKPOINT_PATH = CHECKPOINT_DIR / \"example_8b_mnist_cp_target_conditioned_score.pt\"\n",
++    "\n",
+     "if FAST_DEMO:\n",
+     "    TRAIN_PER_CLASS = 128\n",
+     "    VAL_PER_CLASS = 32\n",
+@@ -349,7 +360,9 @@
+     "print(\"sampler =\", SAMPLER_SCHEME, \"steps per level =\", STEPS_PER_LEVEL)\n",
+     "print(\"direct/replay probabilities =\", (DIRECT_MIXTURE_PROBABILITY, ORACLE_REPLAY_PROBABILITY))\n",
+     "print(\"target-grid dropout =\", TARGET_GRID_DROPOUT_PROBABILITY)\n",
+-    "print(\"latent priors: Gaussian covariance scale =\", GAUSSIAN_LATENT_COVARIANCE_SCALE, \"PCA dim =\", PCA_LATENT_DIM)\n"
++    "print(\"latent priors: Gaussian covariance scale =\", GAUSSIAN_LATENT_COVARIANCE_SCALE, \"PCA dim =\", PCA_LATENT_DIM)\n",
++    "\n",
++    "print(\"checkpoint mode/path =\", CHECKPOINT_MODE, EXPERIMENT8B_CHECKPOINT_PATH)\n"
+    ]
+   },
+   {
+@@ -618,6 +631,118 @@
+     "schedule_df\n"
+    ]
+   },
++  {
++   "cell_type": "markdown",
++   "id": "fe86d725",
++   "metadata": {},
++   "source": [
++    "## Checkpoint helpers\n",
++    "\n",
++    "These helpers save the trained score autoencoder, schedule, and calibration so the later reconstruction and latent-prior sections can be rerun without repeating score training."
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "1c6bd7fc",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "def current_score_model_config() -> dict[str, object]:\n",
++    "    \"\"\"Architecture kwargs needed to reconstruct the score model from a checkpoint.\"\"\"\n",
++    "    return {\n",
++    "        \"latent_dim\": Z_DIM,\n",
++    "        \"target_encoder_hidden_dim\": TARGET_ENCODER_HIDDEN_DIM,\n",
++    "        \"target_encoder_layers\": 3,\n",
++    "        \"grid_size\": SCORE_GRID_SIZE,\n",
++    "        \"base_channels\": SCORE_BASE_CHANNELS,\n",
++    "        \"grid_feature_dim\": SCORE_GRID_FEATURE_DIM,\n",
++    "        \"set_feature_dim\": SET_FEATURE_DIM,\n",
++    "        \"set_hidden_dim\": SET_HIDDEN_DIM,\n",
++    "        \"set_blocks\": 3,\n",
++    "        \"score_hidden_dim\": SCORE_HIDDEN_DIM,\n",
++    "        \"score_residual_blocks\": 2,\n",
++    "        \"time_dim\": 64,\n",
++    "        \"context_dim\": 128 if not FAST_DEMO else 96,\n",
++    "        \"condition_on_label\": True,\n",
++    "        \"num_classes\": 10,\n",
++    "        \"tau_min\": TAU_MIN,\n",
++    "        \"tau_max\": TAU_MAX,\n",
++    "        \"dropout\": 0.02,\n",
++    "        \"use_fourier_features\": False,\n",
++    "        \"include_occupancy_channel\": True,\n",
++    "        \"use_image_field\": True,\n",
++    "        \"use_measure_residual\": USE_MEASURE_RESIDUAL,\n",
++    "        \"use_target_grid_conditioning\": USE_TARGET_GRID_CONDITIONING,\n",
++    "        \"target_grid_feature_dim\": TARGET_GRID_FEATURE_DIM,\n",
++    "        \"target_grid_dropout_probability\": TARGET_GRID_DROPOUT_PROBABILITY,\n",
++    "        \"measure_gate_init\": MEASURE_GATE_INIT,\n",
++    "        \"measure_gate_max\": MEASURE_GATE_MAX,\n",
++    "    }\n",
++    "\n",
++    "\n",
++    "def checkpoint_metadata(stage: str) -> dict[str, object]:\n",
++    "    \"\"\"Small JSON-like metadata block for reproducibility.\"\"\"\n",
++    "    return {\n",
++    "        \"stage\": stage,\n",
++    "        \"seed\": SEED,\n",
++    "        \"fast_demo\": FAST_DEMO,\n",
++    "        \"points_per_cloud\": POINTS_PER_CLOUD if POINTS_PER_CLOUD is not None else \"all\",\n",
++    "        \"train_val_test_per_class\": (TRAIN_PER_CLASS, VAL_PER_CLASS, TEST_PER_CLASS),\n",
++    "        \"sampler_scheme\": SAMPLER_SCHEME,\n",
++    "        \"langevin_alpha\": LANGEVIN_ALPHA,\n",
++    "        \"steps_per_level\": STEPS_PER_LEVEL,\n",
++    "        \"direct_mixture_probability\": DIRECT_MIXTURE_PROBABILITY,\n",
++    "        \"oracle_replay_probability\": ORACLE_REPLAY_PROBABILITY,\n",
++    "        \"oracle_replay_weight\": ORACLE_REPLAY_WEIGHT,\n",
++    "        \"state_projection\": STATE_PROJECTION,\n",
++    "        \"use_target_grid_conditioning\": USE_TARGET_GRID_CONDITIONING,\n",
++    "        \"target_grid_dropout_probability\": TARGET_GRID_DROPOUT_PROBABILITY,\n",
++    "        \"use_measure_residual\": USE_MEASURE_RESIDUAL,\n",
++    "        \"measure_gate_max\": MEASURE_GATE_MAX,\n",
++    "    }\n",
++    "\n",
++    "\n",
++    "def save_current_score_checkpoint(stage: str = \"manual\"):\n",
++    "    \"\"\"Save the current score model and any available calibration/latent diagnostics.\"\"\"\n",
++    "    if not SAVE_SCORE_CHECKPOINT:\n",
++    "        print(\"SAVE_SCORE_CHECKPOINT=False; not saving.\")\n",
++    "        return None\n",
++    "    if \"score_model\" not in globals():\n",
++    "        raise RuntimeError(\"score_model is not defined yet.\")\n",
++    "    extra: dict[str, object] = {}\n",
++    "    # These are inexpensive compared with training and allow later cells to resume faster.\n",
++    "    for name in [\n",
++    "        \"train_latents\",\n",
++    "        \"val_latents\",\n",
++    "        \"latent_prior\",\n",
++    "        \"pca_latent_prior\",\n",
++    "        \"pca_gmm_latent_prior\",\n",
++    "        \"latent_nn_df\",\n",
++    "        \"latent_generation_df\",\n",
++    "    ]:\n",
++    "        if name in globals():\n",
++    "            value = globals()[name]\n",
++    "            if isinstance(value, pd.DataFrame):\n",
++    "                extra[name] = value.reset_index().to_dict(orient=\"list\")\n",
++    "            else:\n",
++    "                extra[name] = value\n",
++    "    path = save_target_conditioned_experiment_checkpoint(\n",
++    "        EXPERIMENT8B_CHECKPOINT_PATH,\n",
++    "        score_model,\n",
++    "        model_config=current_score_model_config(),\n",
++    "        score_history=globals().get(\"score_history\", {}),\n",
++    "        sigma_levels=globals().get(\"sigma_levels\"),\n",
++    "        tau_levels=globals().get(\"tau_levels\"),\n",
++    "        score_calibration=globals().get(\"score_calibration\"),\n",
++    "        score_norm_clip=globals().get(\"score_norm_clip\"),\n",
++    "        metadata=checkpoint_metadata(stage),\n",
++    "        extra=extra,\n",
++    "    )\n",
++    "    print(f\"Saved score checkpoint [{stage}] to {path}\")\n",
++    "    return path\n"
++   ]
++  },
+   {
+    "cell_type": "markdown",
+    "id": "6b7d12fb",
+@@ -862,35 +987,34 @@
+     }
+    ],
+    "source": [
+-    "score_model = TargetConditionedScoreModel(\n",
+-    "    latent_dim=Z_DIM,\n",
+-    "    target_encoder_hidden_dim=TARGET_ENCODER_HIDDEN_DIM,\n",
+-    "    target_encoder_layers=3,\n",
+-    "    grid_size=SCORE_GRID_SIZE,\n",
+-    "    base_channels=SCORE_BASE_CHANNELS,\n",
+-    "    grid_feature_dim=SCORE_GRID_FEATURE_DIM,\n",
+-    "    set_feature_dim=SET_FEATURE_DIM,\n",
+-    "    set_hidden_dim=SET_HIDDEN_DIM,\n",
+-    "    set_blocks=3,\n",
+-    "    score_hidden_dim=SCORE_HIDDEN_DIM,\n",
+-    "    score_residual_blocks=2,\n",
+-    "    time_dim=64,\n",
+-    "    context_dim=128 if not FAST_DEMO else 96,\n",
+-    "    condition_on_label=True,\n",
+-    "    num_classes=10,\n",
+-    "    tau_min=TAU_MIN,\n",
+-    "    tau_max=TAU_MAX,\n",
+-    "    dropout=0.02,\n",
+-    "    use_fourier_features=False,\n",
+-    "    include_occupancy_channel=True,\n",
+-    "    use_image_field=True,\n",
+-    "    use_measure_residual=USE_MEASURE_RESIDUAL,\n",
+-    "    use_target_grid_conditioning=USE_TARGET_GRID_CONDITIONING,\n",
+-    "    target_grid_feature_dim=TARGET_GRID_FEATURE_DIM,\n",
+-    "    target_grid_dropout_probability=TARGET_GRID_DROPOUT_PROBABILITY,\n",
+-    "    measure_gate_init=MEASURE_GATE_INIT,\n",
+-    "    measure_gate_max=MEASURE_GATE_MAX,\n",
+-    ")\n",
++    "score_model_config = current_score_model_config()\n",
++    "score_checkpoint_payload = None\n",
++    "\n",
++    "if CHECKPOINT_MODE not in {\"auto\", \"load\", \"train\"}:\n",
++    "    raise ValueError('CHECKPOINT_MODE must be one of \"auto\", \"load\", or \"train\".')\n",
++    "\n",
++    "checkpoint_exists = EXPERIMENT8B_CHECKPOINT_PATH.exists()\n",
++    "if CHECKPOINT_MODE == \"load\" and not checkpoint_exists:\n",
++    "    raise FileNotFoundError(EXPERIMENT8B_CHECKPOINT_PATH)\n",
++    "\n",
++    "if CHECKPOINT_MODE in {\"auto\", \"load\"} and checkpoint_exists:\n",
++    "    score_checkpoint_payload = load_target_conditioned_experiment_checkpoint(\n",
++    "        EXPERIMENT8B_CHECKPOINT_PATH,\n",
++    "        device=DEVICE,\n",
++    "    )\n",
++    "    score_model = score_checkpoint_payload[\"model\"]\n",
++    "    score_history = score_checkpoint_payload.get(\"score_history\", {})\n",
++    "    loaded_config = score_checkpoint_payload.get(\"model_config\", {})\n",
++    "    if loaded_config != score_model_config:\n",
++    "        print(\"Warning: checkpoint model_config differs from the current notebook config.\")\n",
++    "        print(\"Using the checkpoint model_config for the loaded model.\")\n",
++    "    if score_checkpoint_payload.get(\"tau_levels\") is not None and not np.allclose(score_checkpoint_payload[\"tau_levels\"], tau_levels):\n",
++    "        print(\"Warning: checkpoint tau_levels differ from the current notebook schedule.\")\n",
++    "    print(f\"Loaded score checkpoint from {EXPERIMENT8B_CHECKPOINT_PATH}\")\n",
++    "else:\n",
++    "    score_model = TargetConditionedScoreModel(**score_model_config).to(DEVICE)\n",
++    "    print(\"No score checkpoint loaded; training will run in the next cell.\")\n",
++    "\n",
+     "print(score_model)\n"
+    ]
+   },
+@@ -919,45 +1043,72 @@
+     }
+    ],
+    "source": [
+-    "score_history = train_target_conditioned_score_model(\n",
+-    "    score_model,\n",
+-    "    train_pc.masses,\n",
+-    "    train_pc.positions,\n",
+-    "    train_pc.labels,\n",
+-    "    val_masses=val_pc.masses,\n",
+-    "    val_positions=val_pc.positions,\n",
+-    "    val_labels=val_pc.labels,\n",
+-    "    tau_levels=tau_levels,\n",
+-    "    epochs=SCORE_EPOCHS,\n",
+-    "    batch_size=SCORE_BATCH_SIZE,\n",
+-    "    lr=SCORE_LR,\n",
+-    "    encoder_lr=ENCODER_LR,\n",
+-    "    weight_decay=WEIGHT_DECAY,\n",
+-    "    projection=DSM_PROJECTION,\n",
+-    "    time_weighting=TIME_WEIGHTING,\n",
+-    "    direct_mixture_probability=DIRECT_MIXTURE_PROBABILITY,\n",
+-    "    oracle_replay_probability=ORACLE_REPLAY_PROBABILITY,\n",
+-    "    oracle_replay_weight=ORACLE_REPLAY_WEIGHT,\n",
+-    "    oracle_replay_steps_per_level=ORACLE_REPLAY_STEPS_PER_LEVEL,\n",
+-    "    oracle_replay_max_levels=ORACLE_REPLAY_MAX_LEVELS,\n",
+-    "    oracle_replay_initial_modes=ORACLE_REPLAY_INITIAL_MODES,\n",
+-    "    oracle_replay_langevin_alpha=LANGEVIN_ALPHA,\n",
+-    "    oracle_replay_diffusion_temperature=DIFFUSION_TEMPERATURE,\n",
+-    "    oracle_replay_score_scale=SCORE_SCALE,\n",
+-    "    direct_query_modes=DIRECT_QUERY_MODES,\n",
+-    "    direct_query_center_std=DIRECT_QUERY_CENTER_STD,\n",
+-    "    mixture_chunk_size=MIXTURE_CHUNK_SIZE,\n",
+-    "    mixture_target_norm_clip=MIXTURE_TARGET_NORM_CLIP,\n",
+-    "    measure_gate_regularization=MEASURE_GATE_REGULARIZATION,\n",
+-    "    freeze_measure_branch_epochs=FREEZE_MEASURE_BRANCH_EPOCHS,\n",
+-    "    early_stopping_patience=EARLY_STOPPING_PATIENCE,\n",
+-    "    lr_scheduler_patience=LR_SCHEDULER_PATIENCE,\n",
+-    "    lr_scheduler_factor=LR_SCHEDULER_FACTOR,\n",
+-    "    min_lr=MIN_LR,\n",
+-    "    max_grad_norm=5.0,\n",
+-    "    device=DEVICE,\n",
+-    "    verbose=True,\n",
+-    ")\n"
++    "if score_checkpoint_payload is not None:\n",
++    "    print(\"Checkpoint loaded; skipping score training. Set CHECKPOINT_MODE = \\\"train\\\" to retrain.\")\n",
++    "else:\n",
++    "    score_history = train_target_conditioned_score_model(\n",
++    "        score_model,\n",
++    "        train_pc.masses,\n",
++    "        train_pc.positions,\n",
++    "        train_pc.labels,\n",
++    "        val_masses=val_pc.masses,\n",
++    "        val_positions=val_pc.positions,\n",
++    "        val_labels=val_pc.labels,\n",
++    "        tau_levels=tau_levels,\n",
++    "        epochs=SCORE_EPOCHS,\n",
++    "        batch_size=SCORE_BATCH_SIZE,\n",
++    "        lr=SCORE_LR,\n",
++    "        encoder_lr=ENCODER_LR,\n",
++    "        weight_decay=WEIGHT_DECAY,\n",
++    "        projection=DSM_PROJECTION,\n",
++    "        time_weighting=TIME_WEIGHTING,\n",
++    "        direct_mixture_probability=DIRECT_MIXTURE_PROBABILITY,\n",
++    "        oracle_replay_probability=ORACLE_REPLAY_PROBABILITY,\n",
++    "        oracle_replay_weight=ORACLE_REPLAY_WEIGHT,\n",
++    "        oracle_replay_steps_per_level=ORACLE_REPLAY_STEPS_PER_LEVEL,\n",
++    "        oracle_replay_max_levels=ORACLE_REPLAY_MAX_LEVELS,\n",
++    "        oracle_replay_initial_modes=ORACLE_REPLAY_INITIAL_MODES,\n",
++    "        oracle_replay_langevin_alpha=LANGEVIN_ALPHA,\n",
++    "        oracle_replay_diffusion_temperature=DIFFUSION_TEMPERATURE,\n",
++    "        oracle_replay_score_scale=SCORE_SCALE,\n",
++    "        direct_query_modes=DIRECT_QUERY_MODES,\n",
++    "        direct_query_center_std=DIRECT_QUERY_CENTER_STD,\n",
++    "        mixture_chunk_size=MIXTURE_CHUNK_SIZE,\n",
++    "        mixture_target_norm_clip=MIXTURE_TARGET_NORM_CLIP,\n",
++    "        measure_gate_regularization=MEASURE_GATE_REGULARIZATION,\n",
++    "        freeze_measure_branch_epochs=FREEZE_MEASURE_BRANCH_EPOCHS,\n",
++    "        early_stopping_patience=EARLY_STOPPING_PATIENCE,\n",
++    "        lr_scheduler_patience=LR_SCHEDULER_PATIENCE,\n",
++    "        lr_scheduler_factor=LR_SCHEDULER_FACTOR,\n",
++    "        min_lr=MIN_LR,\n",
++    "        max_grad_norm=5.0,\n",
++    "        device=DEVICE,\n",
++    "        verbose=True,\n",
++    "    )\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "af91152a",
++   "metadata": {},
++   "source": [
++    "### Save score checkpoint\n",
++    "\n",
++    "Run this cell after score training. If you already trained the model in this kernel before applying this patch, rerun the imports, configuration, schedule, and checkpoint-helper cells, then run this cell to write the checkpoint without retraining."
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "id": "77ab974e",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "# Save immediately after training so an interrupted later diagnostic section does not lose the expensive part.\n",
++    "if globals().get(\"score_checkpoint_payload\") is None:\n",
++    "    save_current_score_checkpoint(\"after_score_training\")\n",
++    "else:\n",
++    "    print(\"Score checkpoint was loaded; it will be refreshed after calibration if needed.\")\n"
+    ]
+   },
+   {
+@@ -1117,29 +1268,18 @@
+     }
+    ],
+    "source": [
+-    "fig = plt.figure(figsize=(6, 4))\n",
+-    "plt.plot(score_history[\"train_loss\"], label=\"train mixed score loss\")\n",
+-    "if score_history.get(\"val_loss\"):\n",
+-    "    plt.plot(score_history[\"val_loss\"], label=\"val mixed score loss\")\n",
+-    "plt.yscale(\"log\")\n",
+-    "plt.xlabel(\"epoch\")\n",
+-    "plt.ylabel(\"loss\")\n",
+-    "plt.legend()\n",
+-    "plt.title(\"Target-conditioned score training\")\n",
+-    "plt.show()\n",
+-    "\n",
+-    "history_df = pd.DataFrame({k: v for k, v in score_history.items() if isinstance(v, list) and len(v) == len(score_history[\"train_loss\"])})\n",
+-    "display(history_df.tail())\n",
+-    "\n",
+-    "if \"train_replay_fraction\" in history_df:\n",
+-    "    fig = plt.figure(figsize=(6, 3))\n",
+-    "    plt.plot(history_df[\"train_direct_fraction\"], label=\"direct mixture\")\n",
+-    "    plt.plot(history_df[\"train_replay_fraction\"], label=\"oracle replay\")\n",
+-    "    plt.plot(history_df[\"measure_gate\"], label=\"measure gate\")\n",
++    "if \"train_loss\" in score_history and len(score_history[\"train_loss\"]) > 0:\n",
++    "    fig = plt.figure(figsize=(6, 4))\n",
++    "    plt.plot(score_history[\"train_loss\"], label=\"train mixed score loss\")\n",
++    "    if \"val_loss\" in score_history:\n",
++    "        plt.plot(score_history[\"val_loss\"], label=\"val mixed score loss\")\n",
+     "    plt.xlabel(\"epoch\")\n",
++    "    plt.ylabel(\"scaled-score MSE\")\n",
+     "    plt.legend()\n",
+-    "    plt.title(\"Training objective mixture and residual gate\")\n",
+-    "    plt.show()\n"
++    "    plt.title(\"Target-conditioned score training\")\n",
++    "    plt.show()\n",
++    "else:\n",
++    "    print(\"No training history found in checkpoint.\")\n"
+    ]
+   },
+   {
+@@ -1597,7 +1737,17 @@
+     }
+    ],
+    "source": [
+-    "if USE_SCORE_CALIBRATION:\n",
++    "loaded_score_calibration = None\n",
++    "loaded_score_norm_clip = None\n",
++    "if globals().get(\"score_checkpoint_payload\") is not None:\n",
++    "    loaded_score_calibration = score_checkpoint_payload.get(\"score_calibration\")\n",
++    "    loaded_score_norm_clip = score_checkpoint_payload.get(\"score_norm_clip\")\n",
++    "\n",
++    "if USE_SCORE_CALIBRATION and loaded_score_calibration is not None:\n",
++    "    score_calibration = loaded_score_calibration\n",
++    "    score_norm_clip = loaded_score_norm_clip if USE_SCORE_CLIPPING else None\n",
++    "    print(\"Loaded score calibration from checkpoint.\")\n",
++    "elif USE_SCORE_CALIBRATION:\n",
+     "    score_calibration = fit_score_calibration_against_mixture_oracle(\n",
+     "        score_model,\n",
+     "        val_pc.masses,\n",
+@@ -1612,20 +1762,29 @@
+     "        clip_quantile=SCORE_CALIBRATION_CLIP_QUANTILE if USE_SCORE_CLIPPING else None,\n",
+     "        device=DEVICE,\n",
+     "    )\n",
++    "    score_norm_clip = score_calibration.physical_norm_clip if USE_SCORE_CLIPPING else None\n",
++    "else:\n",
++    "    score_calibration = None\n",
++    "    score_norm_clip = None\n",
++    "    calibration_df = None\n",
++    "    print(\"Skipping score calibration.\")\n",
++    "\n",
++    "if score_calibration is not None:\n",
++    "    clip_values = score_calibration.physical_norm_clip\n",
++    "    if clip_values is None:\n",
++    "        clip_values = np.full_like(score_calibration.tau_levels, np.nan, dtype=np.float64)\n",
+     "    calibration_df = pd.DataFrame({\n",
+     "        \"level\": np.arange(len(score_calibration.tau_levels)),\n",
+     "        \"tau\": score_calibration.tau_levels,\n",
+     "        \"sigma_unit_square\": np.sqrt(2.0 * K * score_calibration.tau_levels),\n",
+     "        \"physical_score_scale\": score_calibration.physical_score_scale,\n",
+-    "        \"physical_norm_clip\": score_calibration.physical_norm_clip,\n",
++    "        \"physical_norm_clip\": clip_values,\n",
+     "    })\n",
+-    "    score_norm_clip = score_calibration.physical_norm_clip if USE_SCORE_CLIPPING else None\n",
+     "    display(calibration_df)\n",
+-    "else:\n",
+-    "    score_calibration = None\n",
+-    "    score_norm_clip = None\n",
+-    "    calibration_df = None\n",
+-    "    print(\"Skipping score calibration.\")\n"
++    "\n",
++    "# Refresh checkpoint after calibration so future runs can skip both training and calibration.\n",
++    "if SAVE_SCORE_CHECKPOINT:\n",
++    "    save_current_score_checkpoint(\"after_score_calibration\")\n"
+    ]
+   },
+   {
+@@ -2150,20 +2309,29 @@
+     }
+    ],
+    "source": [
+-    "train_latents = encode_target_latents(\n",
+-    "    score_model,\n",
+-    "    train_pc.masses,\n",
+-    "    train_pc.positions,\n",
+-    "    batch_size=SCORE_BATCH_SIZE,\n",
+-    "    device=DEVICE,\n",
+-    ")\n",
+-    "val_latents = encode_target_latents(\n",
+-    "    score_model,\n",
+-    "    val_pc.masses,\n",
+-    "    val_pc.positions,\n",
+-    "    batch_size=SCORE_BATCH_SIZE,\n",
+-    "    device=DEVICE,\n",
+-    ")\n",
++    "checkpoint_extra = {}\n",
++    "if globals().get(\"score_checkpoint_payload\") is not None:\n",
++    "    checkpoint_extra = score_checkpoint_payload.get(\"extra\", {}) or {}\n",
++    "\n",
++    "if \"train_latents\" in checkpoint_extra and \"val_latents\" in checkpoint_extra:\n",
++    "    train_latents = np.asarray(checkpoint_extra[\"train_latents\"], dtype=np.float64)\n",
++    "    val_latents = np.asarray(checkpoint_extra[\"val_latents\"], dtype=np.float64)\n",
++    "    print(\"Loaded train/val latents from checkpoint.\")\n",
++    "else:\n",
++    "    train_latents = encode_target_latents(\n",
++    "        score_model,\n",
++    "        train_pc.masses,\n",
++    "        train_pc.positions,\n",
++    "        batch_size=SCORE_BATCH_SIZE,\n",
++    "        device=DEVICE,\n",
++    "    )\n",
++    "    val_latents = encode_target_latents(\n",
++    "        score_model,\n",
++    "        val_pc.masses,\n",
++    "        val_pc.positions,\n",
++    "        batch_size=SCORE_BATCH_SIZE,\n",
++    "        device=DEVICE,\n",
++    "    )\n",
+     "print(\"train latents:\", train_latents.shape, \"val latents:\", val_latents.shape)\n",
+     "\n",
+     "latent_prior = fit_gaussian_latent_prior(\n",
+@@ -2282,7 +2450,12 @@
+     "        seed=seed + 1,\n",
+     "    )\n",
+     "    metrics = {\"prior\": name, **{k: v for k, v in metrics.items() if k != \"per_label\"}}\n",
+-    "    return generated, metrics\n"
++    "    return generated, metrics\n",
++    "\n",
++    "\n",
++    "# Save encoded latents and fitted latent-prior objects for faster reruns of the diagnostic section.\n",
++    "if SAVE_SCORE_CHECKPOINT:\n",
++    "    save_current_score_checkpoint(\"after_latent_prior_fit\")\n"
+    ]
+   },
+   {
+diff --git a/tests/test_smoke_mnist_target_conditioned_score.py b/tests/test_smoke_mnist_target_conditioned_score.py
+index 6760512..9329f8a 100644
+--- a/tests/test_smoke_mnist_target_conditioned_score.py
++++ b/tests/test_smoke_mnist_target_conditioned_score.py
+@@ -6,6 +6,8 @@ Run with
+ 
+ from __future__ import annotations
+ 
++import tempfile
++
+ import numpy as np
+ import torch
+ 
+@@ -21,6 +23,7 @@ from mnist.target_conditioned_score import (
+     LatentCritic,
+     LatentGenerator,
+     TargetConditionedScoreModel,
++    load_target_conditioned_experiment_checkpoint,
+     encode_target_latents,
+     empirical_mixture_scaled_score_target,
+     evaluate_hybrid_oracle_neural_reconstruction,
+@@ -45,6 +48,7 @@ from mnist.target_conditioned_score import (
+     sample_pca_latent_prior,
+     sample_pca_gmm_latent_prior,
+     sample_target_conditioned_annealed_dynamics,
++    save_target_conditioned_experiment_checkpoint,
+     sample_wgan_latent_prior,
+     target_conditioned_score_matching_loss,
+     train_latent_wgan_gp,
+@@ -67,31 +71,35 @@ def _toy_contours(num_samples: int = 6, num_points: int = 16) -> tuple[np.ndarra
+     return masses, np.asarray(positions, dtype=np.float64), np.asarray(labels, dtype=np.int64)
+ 
+ 
++def _small_model_config(tau_min: float, tau_max: float) -> dict[str, object]:
++    return {
++        "latent_dim": 16,
++        "target_encoder_hidden_dim": 32,
++        "grid_size": 16,
++        "base_channels": 8,
++        "grid_feature_dim": 12,
++        "set_feature_dim": 16,
++        "set_hidden_dim": 16,
++        "set_blocks": 1,
++        "score_hidden_dim": 32,
++        "score_residual_blocks": 1,
++        "time_dim": 16,
++        "context_dim": 24,
++        "condition_on_label": True,
++        "tau_min": tau_min,
++        "tau_max": tau_max,
++        "dropout": 0.0,
++        "use_image_field": False,
++        "use_target_grid_conditioning": True,
++        "target_grid_feature_dim": 8,
++        "target_grid_dropout_probability": 0.10,
++        "measure_gate_init": -5.0,
++        "measure_gate_max": 0.10,
++    }
++
++
+ def _small_model(tau_min: float, tau_max: float) -> TargetConditionedScoreModel:
+-    return TargetConditionedScoreModel(
+-        latent_dim=16,
+-        target_encoder_hidden_dim=32,
+-        grid_size=16,
+-        base_channels=8,
+-        grid_feature_dim=12,
+-        set_feature_dim=16,
+-        set_hidden_dim=16,
+-        set_blocks=1,
+-        score_hidden_dim=32,
+-        score_residual_blocks=1,
+-        time_dim=16,
+-        context_dim=24,
+-        condition_on_label=True,
+-        tau_min=tau_min,
+-        tau_max=tau_max,
+-        dropout=0.0,
+-        use_image_field=False,
+-        use_target_grid_conditioning=True,
+-        target_grid_feature_dim=8,
+-        target_grid_dropout_probability=0.10,
+-        measure_gate_init=-5.0,
+-        measure_gate_max=0.10,
+-    )
++    return TargetConditionedScoreModel(**_small_model_config(tau_min, tau_max))
+ 
+ 
+ def test_forward_loss_and_training_smoke() -> None:
+@@ -323,7 +331,70 @@ def test_sampling_and_latent_priors_smoke() -> None:
+     assert np.array_equal(y_wgan, np.asarray([0, 1]))
+ 
+ 
++
++def test_checkpoint_round_trip_smoke() -> None:
++    torch.manual_seed(6)
++    masses, positions, labels = _toy_contours(num_samples=4, num_points=12)
++    sigma_levels, tau_levels = make_sigma_tau_schedule(num_points=12, num_levels=2, sigma_max=0.06, sigma_min=0.03)
++    model_config = _small_model_config(float(np.min(tau_levels)), float(np.max(tau_levels)))
++    model = TargetConditionedScoreModel(**model_config)
++
++    calibration = fit_score_calibration_against_mixture_oracle(
++        model,
++        masses,
++        positions,
++        labels,
++        tau_levels=tau_levels,
++        query_modes=("uniform",),
++        max_samples=2,
++        batch_size=2,
++        device="cpu",
++    )
++
++    with tempfile.TemporaryDirectory() as tmpdir:
++        path = f"{tmpdir}/experiment8b_checkpoint.pt"
++        saved_path = save_target_conditioned_experiment_checkpoint(
++            path,
++            model,
++            model_config=model_config,
++            score_history={"train_loss": [1.0]},
++            sigma_levels=sigma_levels,
++            tau_levels=tau_levels,
++            score_calibration=calibration,
++            score_norm_clip=calibration.physical_norm_clip,
++            metadata={"stage": "smoke"},
++        )
++        loaded = load_target_conditioned_experiment_checkpoint(saved_path, device="cpu")
++        assert loaded["model_config"] == model_config
++        assert loaded["score_history"]["train_loss"] == [1.0]
++        assert np.allclose(loaded["tau_levels"], tau_levels)
++        assert loaded["score_calibration"] is not None
++
++        batch_masses = torch.tensor(masses[:2], dtype=torch.float32)
++        clean = torch.tensor(positions[:2], dtype=torch.float32)
++        batch_labels = torch.tensor(labels[:2], dtype=torch.long)
++        tau = torch.full((2,), float(tau_levels[0]), dtype=torch.float32)
++        pred_before = model.predict_scaled_score(
++            batch_masses,
++            clean,
++            tau,
++            target_positions=clean,
++            target_masses=batch_masses,
++            labels=batch_labels,
++        )
++        pred_after = loaded["model"].predict_scaled_score(
++            batch_masses,
++            clean,
++            tau,
++            target_positions=clean,
++            target_masses=batch_masses,
++            labels=batch_labels,
++        )
++        assert torch.allclose(pred_before, pred_after, atol=1e-6)
++
++
+ if __name__ == "__main__":
+     test_forward_loss_and_training_smoke()
+     test_sampling_and_latent_priors_smoke()
++    test_checkpoint_round_trip_smoke()
+     print("All target-conditioned MNIST-CP score smoke tests passed.")

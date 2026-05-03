@@ -29,6 +29,7 @@ finite-dimensional SDE drift ``2 S_theta``.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 import copy
@@ -77,6 +78,10 @@ class ScoreCalibration:
 
 __all__ = [
     "ScoreCalibration",
+    "score_calibration_to_dict",
+    "score_calibration_from_dict",
+    "save_target_conditioned_experiment_checkpoint",
+    "load_target_conditioned_experiment_checkpoint",
     "TargetConditionedScoreModel",
     "TargetPointCloudEncoder",
     "NoisySetEquivariantEncoder",
@@ -2283,6 +2288,147 @@ def reconstruct_target_conditioned_from_latents(
         num_points=num_points,
         **kwargs,
     )
+
+
+# ---------------------------------------------------------------------------
+# Experiment checkpoint helpers
+# ---------------------------------------------------------------------------
+
+
+def score_calibration_to_dict(calibration: Optional[ScoreCalibration]) -> Optional[dict[str, Any]]:
+    """Convert a :class:`ScoreCalibration` object to a torch-saveable dict."""
+    if calibration is None:
+        return None
+    if not isinstance(calibration, ScoreCalibration):
+        raise TypeError("calibration must be a ScoreCalibration or None")
+    return {
+        "tau_levels": np.asarray(calibration.tau_levels, dtype=np.float64),
+        "physical_score_scale": np.asarray(calibration.physical_score_scale, dtype=np.float64),
+        "physical_norm_clip": (
+            None
+            if calibration.physical_norm_clip is None
+            else np.asarray(calibration.physical_norm_clip, dtype=np.float64)
+        ),
+        "metadata": copy.deepcopy(calibration.metadata),
+    }
+
+
+def score_calibration_from_dict(payload: Optional[Mapping[str, Any] | ScoreCalibration]) -> Optional[ScoreCalibration]:
+    """Restore a :class:`ScoreCalibration` object from a checkpoint payload."""
+    if payload is None:
+        return None
+    if isinstance(payload, ScoreCalibration):
+        return payload
+    if not isinstance(payload, Mapping):
+        raise TypeError("calibration payload must be a mapping, ScoreCalibration, or None")
+    return ScoreCalibration(
+        tau_levels=np.asarray(payload["tau_levels"], dtype=np.float64),
+        physical_score_scale=np.asarray(payload["physical_score_scale"], dtype=np.float64),
+        physical_norm_clip=(
+            None
+            if payload.get("physical_norm_clip") is None
+            else np.asarray(payload["physical_norm_clip"], dtype=np.float64)
+        ),
+        metadata=copy.deepcopy(payload.get("metadata")),
+    )
+
+
+def _state_dict_to_cpu(state_dict: Mapping[str, Tensor]) -> dict[str, Tensor]:
+    """Clone a model state dict onto CPU before checkpointing."""
+    return {
+        key: value.detach().cpu().clone() if torch.is_tensor(value) else copy.deepcopy(value)
+        for key, value in state_dict.items()
+    }
+
+
+def save_target_conditioned_experiment_checkpoint(
+    path: str | Path,
+    model: TargetConditionedScoreModel,
+    *,
+    model_config: Mapping[str, Any],
+    score_history: Optional[Mapping[str, Sequence[float]]] = None,
+    sigma_levels: Optional[Sequence[float] | np.ndarray] = None,
+    tau_levels: Optional[Sequence[float] | np.ndarray] = None,
+    score_calibration: Optional[ScoreCalibration] = None,
+    score_norm_clip: Optional[Sequence[float] | np.ndarray] = None,
+    metadata: Optional[Mapping[str, Any]] = None,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> Path:
+    r"""Save the trained Experiment 8b score model and sampler metadata.
+
+    The checkpoint stores CPU copies of the model weights plus the architecture
+    kwargs needed to reconstruct ``TargetConditionedScoreModel``.  It also stores
+    the multi-scale schedule and optional calibration/clipping arrays, so the
+    notebook can resume from the reconstruction and latent-prior sections without
+    rerunning score training.
+    """
+    checkpoint_path = Path(path)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload: dict[str, Any] = {
+        "format_version": 1,
+        "model_class": "TargetConditionedScoreModel",
+        "model_config": copy.deepcopy(dict(model_config)),
+        "model_state_dict": _state_dict_to_cpu(model.state_dict()),
+        "score_history": copy.deepcopy(dict(score_history or {})),
+        "sigma_levels": None if sigma_levels is None else np.asarray(sigma_levels, dtype=np.float64),
+        "tau_levels": None if tau_levels is None else np.asarray(tau_levels, dtype=np.float64),
+        "score_calibration": score_calibration_to_dict(score_calibration),
+        "score_norm_clip": None if score_norm_clip is None else np.asarray(score_norm_clip, dtype=np.float64),
+        "metadata": copy.deepcopy(dict(metadata or {})),
+    }
+    if extra is not None:
+        payload["extra"] = copy.deepcopy(dict(extra))
+    torch.save(payload, checkpoint_path)
+    return checkpoint_path
+
+
+def load_target_conditioned_experiment_checkpoint(
+    path: str | Path,
+    *,
+    device: Optional[str | torch.device] = None,
+    strict: bool = True,
+) -> dict[str, Any]:
+    r"""Load an Experiment 8b checkpoint and reconstruct the score model.
+
+    Returns the raw payload with two normalized entries added/replaced:
+    ``payload["model"]`` is the loaded model on ``device`` and
+    ``payload["score_calibration"]`` is a :class:`ScoreCalibration` object or
+    ``None``.
+    """
+    checkpoint_path = Path(path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(checkpoint_path)
+    resolved_device = _resolve_device(device)
+
+    try:
+        payload = torch.load(checkpoint_path, map_location=resolved_device, weights_only=False)
+    except TypeError:
+        # Older PyTorch versions do not expose the weights_only argument.
+        payload = torch.load(checkpoint_path, map_location=resolved_device)
+
+    if not isinstance(payload, Mapping):
+        raise TypeError("checkpoint payload must be a mapping")
+    if payload.get("model_class", "TargetConditionedScoreModel") != "TargetConditionedScoreModel":
+        raise ValueError(f"unsupported model_class={payload.get('model_class')!r}")
+    if "model_config" not in payload or "model_state_dict" not in payload:
+        raise KeyError("checkpoint must contain model_config and model_state_dict")
+
+    model = TargetConditionedScoreModel(**dict(payload["model_config"]))
+    model.load_state_dict(payload["model_state_dict"], strict=strict)
+    model.to(resolved_device)
+    model.eval()
+
+    restored = dict(payload)
+    restored["model"] = model
+    restored["score_calibration"] = score_calibration_from_dict(payload.get("score_calibration"))
+    if restored.get("score_norm_clip") is not None:
+        restored["score_norm_clip"] = np.asarray(restored["score_norm_clip"], dtype=np.float64)
+    if restored.get("sigma_levels") is not None:
+        restored["sigma_levels"] = np.asarray(restored["sigma_levels"], dtype=np.float64)
+    if restored.get("tau_levels") is not None:
+        restored["tau_levels"] = np.asarray(restored["tau_levels"], dtype=np.float64)
+    return restored
 
 
 # ---------------------------------------------------------------------------
