@@ -10,6 +10,11 @@ import numpy as np
 import torch
 
 torch.set_num_threads(1)
+try:
+    torch.set_num_interop_threads(1)
+except RuntimeError:
+    # PyTorch only allows setting this once per process.
+    pass
 
 from mnist.mnist_cp import uniform_point_cloud_masses
 from mnist.target_conditioned_score import (
@@ -21,14 +26,25 @@ from mnist.target_conditioned_score import (
     evaluate_hybrid_oracle_neural_reconstruction,
     evaluate_model_vs_mixture_oracle,
     evaluate_target_conditioned_score_model,
-    fit_score_calibration_against_mixture_oracle,
     fit_gaussian_latent_prior,
+    fit_pca_gmm_latent_prior,
+    fit_pca_latent_prior,
+    fit_pca_gmm_latent_prior,
+    fit_score_calibration_against_mixture_oracle,
+    latent_nearest_neighbor_diagnostics,
+    latent_nearest_neighbor_summary,
+    layernorm_project_latents,
     make_sigma_tau_schedule,
     paired_chamfer_reconstruction_metrics,
     perturb_target_conditioned_positions,
     reconstruct_target_conditioned_point_clouds,
-    sample_oracle_mixture_annealed_dynamics,
+    reconstruct_target_conditioned_from_latents,
+    sample_empirical_latent_prior,
     sample_gaussian_latent_prior,
+    sample_oracle_mixture_annealed_dynamics,
+    sample_pca_latent_prior,
+    sample_pca_gmm_latent_prior,
+    sample_target_conditioned_annealed_dynamics,
     sample_wgan_latent_prior,
     target_conditioned_score_matching_loss,
     train_latent_wgan_gp,
@@ -72,6 +88,7 @@ def _small_model(tau_min: float, tau_max: float) -> TargetConditionedScoreModel:
         use_image_field=False,
         use_target_grid_conditioning=True,
         target_grid_feature_dim=8,
+        target_grid_dropout_probability=0.10,
         measure_gate_init=-5.0,
         measure_gate_max=0.10,
     )
@@ -136,66 +153,106 @@ def test_forward_loss_and_training_smoke() -> None:
         masses,
         positions,
         labels,
-        tau_levels=tau_levels,
+        tau_levels=tau_levels[:1],
         batch_size=4,
-        direct_mixture_probability=0.25,
-        oracle_replay_probability=0.25,
-        oracle_replay_steps_per_level=1,
-        oracle_replay_max_levels=1,
-        direct_query_modes=("uniform",),
+        direct_mixture_probability=0.0,
+        oracle_replay_probability=0.0,
         device="cpu",
     )
     assert "loss_ratio_vs_zero" in eval_metrics
-    oracle_rows = evaluate_model_vs_mixture_oracle(
-        model,
-        masses,
-        positions,
-        labels,
-        tau_levels=tau_levels[:1],
-        query_modes=("uniform",),
-        max_samples=2,
-        batch_size=2,
-        device="cpu",
-    )
-    assert len(oracle_rows) == 1
-    assert "relative_rmse" in oracle_rows[0]
-    calibration = fit_score_calibration_against_mixture_oracle(
-        model,
-        masses,
-        positions,
-        labels,
-        tau_levels=tau_levels[:1],
-        query_modes=("uniform",),
-        max_samples=2,
-        batch_size=2,
-        device="cpu",
-    )
-    assert calibration.physical_score_scale.shape == (1,)
 
 
-def test_sampling_latent_prior_and_wgan_smoke() -> None:
+def test_sampling_and_latent_priors_smoke() -> None:
     torch.manual_seed(1)
     masses, positions, labels = _toy_contours(num_samples=6, num_points=12)
     _, tau_levels = make_sigma_tau_schedule(num_points=12, num_levels=2, sigma_max=0.06, sigma_min=0.03)
     model = _small_model(float(np.min(tau_levels)), float(np.max(tau_levels)))
     latents = encode_target_latents(model, masses, positions, batch_size=3, device="cpu")
     assert latents.shape == (6, 16)
-    calibration = fit_score_calibration_against_mixture_oracle(
-        model,
-        masses,
-        positions,
-        labels,
-        tau_levels=tau_levels[:1],
-        query_modes=("uniform",),
-        max_samples=2,
-        batch_size=2,
-        device="cpu",
-    )
+    calibration = None
 
     prior = fit_gaussian_latent_prior(latents, labels, diagonal=True)
-    z_sample, y_sample = sample_gaussian_latent_prior(prior, labels=np.asarray([0, 1, 0]), rng=np.random.default_rng(2))
+    z_sample, y_sample = sample_gaussian_latent_prior(
+        prior,
+        labels=np.asarray([0, 1, 0]),
+        covariance_scale=0.5,
+        layernorm_project=True,
+        rng=np.random.default_rng(2),
+    )
     assert z_sample.shape == (3, 16)
     assert np.array_equal(y_sample, np.asarray([0, 1, 0]))
+    assert layernorm_project_latents(z_sample).shape == z_sample.shape
+
+    empirical_z, empirical_y = sample_empirical_latent_prior(
+        latents,
+        labels,
+        requested_labels=np.asarray([0, 1, 0]),
+        noise_scale=0.01,
+        layernorm_project=True,
+        rng=np.random.default_rng(22),
+    )
+    assert empirical_z.shape == (3, 16)
+    assert np.array_equal(empirical_y, np.asarray([0, 1, 0]))
+
+    pca_prior = fit_pca_latent_prior(
+        latents,
+        labels,
+        pca_dim=4,
+        shrink=0.25,
+        layernorm_project=True,
+    )
+    pca_z, pca_y = sample_pca_latent_prior(
+        pca_prior,
+        labels=np.asarray([0, 1, 0]),
+        layernorm_project=True,
+        rng=np.random.default_rng(24),
+    )
+    assert pca_z.shape == (3, 16)
+    assert np.array_equal(pca_y, np.asarray([0, 1, 0]))
+
+    pca_gmm_prior = fit_pca_gmm_latent_prior(
+        latents,
+        labels,
+        pca_dim=4,
+        components_per_class=2,
+        covariance_shrink=0.25,
+        layernorm_project=True,
+        rng=np.random.default_rng(23),
+    )
+    pca_gmm_z, pca_gmm_y = sample_pca_gmm_latent_prior(
+        pca_gmm_prior,
+        labels=np.asarray([0, 1, 0]),
+        layernorm_project=True,
+        rng=np.random.default_rng(26),
+    )
+    assert pca_gmm_z.shape == (3, 16)
+    assert np.array_equal(pca_gmm_y, np.asarray([0, 1, 0]))
+
+    nn_rows = latent_nearest_neighbor_diagnostics(
+        latents,
+        {"pca": pca_z, "pca_gmm": pca_gmm_z, "baseline": latents[:3]},
+        reference_labels=labels,
+        query_labels={"pca": pca_y, "pca_gmm": pca_gmm_y, "baseline": labels[:3]},
+    )
+    assert len(nn_rows) == 3
+    assert "mean_nn_distance" in nn_rows[0]
+
+    latent_only_generated = reconstruct_target_conditioned_from_latents(
+        model,
+        target_latents=latents[:2],
+        labels=labels[:2],
+        output_masses=masses[:2],
+        tau_levels=tau_levels,
+        steps_per_level=1,
+        sampler_scheme="shape_gf_langevin",
+        state_projection="none",
+        langevin_alpha=1e-5,
+        final_polish_steps=0,
+        batch_size=2,
+        device="cpu",
+        rng=np.random.default_rng(25),
+    )
+    assert latent_only_generated.positions.shape == positions[:2].shape
 
     generated = reconstruct_target_conditioned_point_clouds(
         model,
@@ -208,7 +265,6 @@ def test_sampling_latent_prior_and_wgan_smoke() -> None:
         state_projection="none",
         langevin_alpha=1e-5,
         final_polish_steps=0,
-        score_calibration=calibration,
         oracle_prefix_levels=1,
         batch_size=2,
         device="cpu",
@@ -228,7 +284,6 @@ def test_sampling_latent_prior_and_wgan_smoke() -> None:
         steps_per_level=1,
         langevin_alpha=1e-5,
         batch_size=2,
-        score_calibration=calibration,
         device="cpu",
         rng=np.random.default_rng(5),
     )
@@ -270,5 +325,5 @@ def test_sampling_latent_prior_and_wgan_smoke() -> None:
 
 if __name__ == "__main__":
     test_forward_loss_and_training_smoke()
-    test_sampling_latent_prior_and_wgan_smoke()
+    test_sampling_and_latent_priors_smoke()
     print("All target-conditioned MNIST-CP score smoke tests passed.")

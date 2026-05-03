@@ -29,7 +29,7 @@ finite-dimensional SDE drift ``2 S_theta``.
 """
 
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import copy
 import math
@@ -81,6 +81,9 @@ __all__ = [
     "TargetPointCloudEncoder",
     "NoisySetEquivariantEncoder",
     "GaussianLatentPrior",
+    "EmpiricalLatentPrior",
+    "PCALatentPrior",
+    "PCAGMMLatentPrior",
     "LatentGenerator",
     "LatentCritic",
     "make_sigma_tau_schedule",
@@ -108,6 +111,15 @@ __all__ = [
     "reconstruct_target_conditioned_point_clouds",
     "fit_gaussian_latent_prior",
     "sample_gaussian_latent_prior",
+    "layernorm_project_latents",
+    "sample_empirical_latent_prior",
+    "latent_nearest_neighbor_summary",
+    "latent_nearest_neighbor_diagnostics",
+    "fit_pca_latent_prior",
+    "sample_pca_latent_prior",
+    "fit_pca_gmm_latent_prior",
+    "sample_pca_gmm_latent_prior",
+    "reconstruct_target_conditioned_from_latents",
     "train_latent_wgan_gp",
     "sample_wgan_latent_prior",
     "paired_chamfer_reconstruction_metrics",
@@ -500,6 +512,7 @@ class TargetConditionedScoreModel(nn.Module):
         use_measure_residual: bool = True,
         use_target_grid_conditioning: bool = False,
         target_grid_feature_dim: Optional[int] = None,
+        target_grid_dropout_probability: float = 0.0,
         measure_gate_init: float = -3.0,
         measure_gate_max: float = 1.0,
     ) -> None:
@@ -514,6 +527,8 @@ class TargetConditionedScoreModel(nn.Module):
             raise ValueError("num_classes must be at least 2")
         if measure_gate_max <= 0.0:
             raise ValueError("measure_gate_max must be positive")
+        if not (0.0 <= float(target_grid_dropout_probability) < 1.0):
+            raise ValueError("target_grid_dropout_probability must be in [0, 1)")
 
         self.latent_dim = int(latent_dim)
         self.grid_size = int(grid_size)
@@ -528,6 +543,7 @@ class TargetConditionedScoreModel(nn.Module):
         self.use_image_field = bool(use_image_field)
         self.use_measure_residual = bool(use_measure_residual)
         self.use_target_grid_conditioning = bool(use_target_grid_conditioning)
+        self.target_grid_dropout_probability = float(target_grid_dropout_probability)
         self.measure_gate_max = float(measure_gate_max)
         self.measure_residual_active = True
 
@@ -735,6 +751,12 @@ class TargetConditionedScoreModel(nn.Module):
                 context_grid = context[:, :, None, None].expand(batch_size, context.shape[1], self.grid_size, self.grid_size)
                 target_feature_grid = self.target_feature_unet(torch.cat([target_raster, context_grid], dim=1))
                 target_local_features = _sample_feature_grid_at_positions(target_feature_grid, positions, periodic=False)
+                if self.training and self.target_grid_dropout_probability > 0.0:
+                    keep = (
+                        torch.rand(batch_size, 1, 1, device=positions.device, dtype=positions.dtype)
+                        >= self.target_grid_dropout_probability
+                    )
+                    target_local_features = target_local_features * keep
             else:
                 target_local_features = positions.new_zeros((batch_size, num_points, self.target_grid_feature_dim))
             base_point_features.append(target_local_features)
@@ -2236,6 +2258,33 @@ def reconstruct_target_conditioned_point_clouds(
     )
 
 
+@torch.no_grad()
+def reconstruct_target_conditioned_from_latents(
+    model: TargetConditionedScoreModel,
+    target_latents: np.ndarray,
+    *,
+    labels: Optional[np.ndarray] = None,
+    output_masses: Optional[np.ndarray] = None,
+    num_points: Optional[int] = None,
+    **kwargs: Any,
+) -> GeneratedPointCloudSet:
+    r"""Reconstruct/sample using only encoded target latents.
+
+    This diagnostic intentionally does not pass ``target_positions`` to the
+    sampler.  If target-grid conditioning is enabled, the target-grid branch is
+    zeroed and the sampler must rely on the global latent code plus the current
+    empirical measure.
+    """
+    return sample_target_conditioned_annealed_dynamics(
+        model,
+        target_latents=target_latents,
+        labels=labels,
+        output_masses=output_masses,
+        num_points=num_points,
+        **kwargs,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Latent priors
 # ---------------------------------------------------------------------------
@@ -2260,6 +2309,614 @@ class GaussianLatentPrior:
         return int(self.means.shape[0])
 
 
+@dataclass(frozen=True)
+class EmpiricalLatentPrior:
+    """Empirical distribution over encoded training latents."""
+
+    latents: FloatArray
+    labels: Optional[IntArray]
+
+    @property
+    def latent_dim(self) -> int:
+        return int(self.latents.shape[1])
+
+    @property
+    def num_samples(self) -> int:
+        return int(self.latents.shape[0])
+
+
+@dataclass(frozen=True)
+class LatentStandardizer:
+    """Affine standardizer for encoded shape latents."""
+
+    mean: FloatArray
+    scale: FloatArray
+    eps: float = 1e-6
+
+
+@dataclass(frozen=True)
+class PCALatentPrior:
+    """Class-conditional PCA-shrink Gaussian prior over encoded latents."""
+
+    means: FloatArray
+    components: FloatArray
+    variances: FloatArray
+    labels: Optional[IntArray]
+    pca_dim: int
+    shrink: float
+    eps: float
+    layernorm_project: bool = False
+
+    @property
+    def latent_dim(self) -> int:
+        return int(self.means.shape[-1])
+
+    @property
+    def num_components(self) -> int:
+        return int(self.means.shape[0])
+
+    @property
+    def component_labels(self) -> Optional[IntArray]:
+        return self.labels
+
+    @property
+    def shrinkage(self) -> float:
+        return float(self.shrink)
+
+
+@dataclass(frozen=True)
+class PCAGMMLatentPrior:
+    """Class-conditional diagonal GMM in per-class PCA coordinates."""
+
+    class_means: FloatArray
+    components: FloatArray
+    mixture_weights: FloatArray
+    mixture_means: FloatArray
+    mixture_variances: FloatArray
+    labels: Optional[IntArray]
+    pca_dim: int
+    components_per_class: int
+    covariance_shrink: float
+    eps: float
+    layernorm_project: bool = False
+
+    @property
+    def latent_dim(self) -> int:
+        return int(self.class_means.shape[-1])
+
+    @property
+    def num_components(self) -> int:
+        return int(self.class_means.shape[0])
+
+
+def _validate_latent_matrix(latents: np.ndarray, *, name: str = "latents") -> np.ndarray:
+    z = np.asarray(latents, dtype=np.float64)
+    if z.ndim != 2 or z.shape[0] == 0 or z.shape[1] == 0:
+        raise ValueError(f"{name} must have shape (N, D) with N,D > 0")
+    if not np.all(np.isfinite(z)):
+        raise ValueError(f"{name} contains non-finite values")
+    return z
+
+
+def _resolve_latent_labels(latents: np.ndarray, labels: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    if labels is None:
+        return None
+    labels_arr = np.asarray(labels, dtype=np.int64).reshape(-1)
+    if labels_arr.shape != (latents.shape[0],):
+        raise ValueError("labels must have shape (N,)")
+    return labels_arr
+
+
+def _latent_groups(latents: np.ndarray, labels: Optional[np.ndarray]) -> tuple[Optional[np.ndarray], list[np.ndarray]]:
+    labels_arr = _resolve_latent_labels(latents, labels)
+    if labels_arr is None:
+        return None, [np.arange(latents.shape[0])]
+    component_labels = np.unique(labels_arr).astype(np.int64)
+    return component_labels, [np.flatnonzero(labels_arr == label) for label in component_labels]
+
+
+def _component_indices_for_requested_labels(
+    prior_labels: Optional[np.ndarray],
+    requested_labels: Optional[np.ndarray],
+    *,
+    num_samples: Optional[int],
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    if requested_labels is None:
+        if num_samples is None:
+            raise ValueError("num_samples is required when labels are not provided")
+        if prior_labels is None:
+            return np.zeros(int(num_samples), dtype=np.int64), np.zeros(int(num_samples), dtype=np.int64)
+        component_idx = rng.integers(0, len(prior_labels), size=int(num_samples), endpoint=False)
+        return component_idx, np.asarray(prior_labels, dtype=np.int64)[component_idx]
+
+    out_labels = np.asarray(requested_labels, dtype=np.int64).reshape(-1)
+    if prior_labels is None:
+        return np.zeros(len(out_labels), dtype=np.int64), out_labels
+    label_to_component = {int(label): i for i, label in enumerate(np.asarray(prior_labels, dtype=np.int64))}
+    component_idx = np.empty(len(out_labels), dtype=np.int64)
+    for i, label in enumerate(out_labels):
+        if int(label) not in label_to_component:
+            raise ValueError(f"label {int(label)} is not available in the latent prior")
+        component_idx[i] = label_to_component[int(label)]
+    return component_idx, out_labels
+
+
+def fit_latent_standardizer(latents: np.ndarray, *, eps: float = 1e-6) -> LatentStandardizer:
+    """Fit an elementwise affine standardizer for latent-code diagnostics."""
+    z = _validate_latent_matrix(latents)
+    if eps <= 0.0:
+        raise ValueError("eps must be positive")
+    mean = np.mean(z, axis=0)
+    scale = np.std(z, axis=0)
+    scale = np.where(scale > float(eps), scale, 1.0)
+    return LatentStandardizer(mean=mean.astype(np.float64), scale=scale.astype(np.float64), eps=float(eps))
+
+
+def transform_latents(latents: np.ndarray, standardizer: LatentStandardizer) -> np.ndarray:
+    """Apply a fitted ``LatentStandardizer``."""
+    z = np.asarray(latents, dtype=np.float64)
+    return (z - standardizer.mean[None, :]) / standardizer.scale[None, :]
+
+
+def inverse_transform_latents(latents: np.ndarray, standardizer: LatentStandardizer) -> np.ndarray:
+    """Undo ``transform_latents``."""
+    z = np.asarray(latents, dtype=np.float64)
+    return z * standardizer.scale[None, :] + standardizer.mean[None, :]
+
+
+def layernorm_project_latents(
+    latents: np.ndarray,
+    *,
+    eps: float = 1e-6,
+    target_mean: float = 0.0,
+    target_std: float = 1.0,
+) -> np.ndarray:
+    """Project latent codes back to a per-sample LayerNorm-like shell."""
+    z = _validate_latent_matrix(latents)
+    centered = z - np.mean(z, axis=1, keepdims=True)
+    scale = np.std(centered, axis=1, keepdims=True)
+    return float(target_mean) + float(target_std) * centered / (scale + float(eps))
+
+
+def sample_empirical_latent_prior(
+    latents: np.ndarray,
+    labels: Optional[np.ndarray] = None,
+    *,
+    requested_labels: Optional[np.ndarray] = None,
+    labels_requested: Optional[np.ndarray] = None,
+    sample_labels: Optional[np.ndarray] = None,
+    num_samples: Optional[int] = None,
+    noise_scale: float = 0.0,
+    noise_mode: str = "component_std",
+    per_dim_noise: bool = True,
+    layernorm_project: bool = False,
+    project_layernorm: Optional[bool] = None,
+    rng: Optional[np.random.Generator] = None,
+    return_indices: bool = False,
+) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Sample encoded training latents, optionally adding small local noise.
+
+    ``requested_labels`` is the preferred argument.  ``labels_requested`` and
+    ``sample_labels`` are accepted for compatibility with earlier notebook cells.
+    """
+    if noise_scale < 0.0:
+        raise ValueError("noise_scale must be non-negative")
+    if noise_mode not in {"component_std", "global_std", "none"}:
+        raise ValueError("noise_mode must be one of {'component_std', 'global_std', 'none'}")
+    if requested_labels is None:
+        requested_labels = labels_requested
+    if requested_labels is None:
+        requested_labels = sample_labels
+    if project_layernorm is not None:
+        layernorm_project = bool(project_layernorm)
+    z = _validate_latent_matrix(latents)
+    labels_arr = _resolve_latent_labels(z, labels)
+    rng = np.random.default_rng() if rng is None else rng
+    if requested_labels is None:
+        if num_samples is None:
+            raise ValueError("num_samples is required when requested_labels is not provided")
+        if labels_arr is None:
+            requested = np.zeros(int(num_samples), dtype=np.int64)
+            sample_indices = rng.integers(0, z.shape[0], size=int(num_samples), endpoint=False)
+        else:
+            label_values = np.unique(labels_arr).astype(np.int64)
+            requested = label_values[rng.integers(0, len(label_values), size=int(num_samples), endpoint=False)]
+            sample_indices = np.empty(int(num_samples), dtype=np.int64)
+            for i, label in enumerate(requested):
+                idx = np.flatnonzero(labels_arr == int(label))
+                sample_indices[i] = int(rng.choice(idx))
+    else:
+        requested = np.asarray(requested_labels, dtype=np.int64).reshape(-1)
+        sample_indices = np.empty(len(requested), dtype=np.int64)
+        if labels_arr is None:
+            sample_indices[:] = rng.integers(0, z.shape[0], size=len(requested), endpoint=False)
+        else:
+            for i, label in enumerate(requested):
+                idx = np.flatnonzero(labels_arr == int(label))
+                if len(idx) == 0:
+                    raise ValueError(f"label {int(label)} is not available in the latent bank")
+                sample_indices[i] = int(rng.choice(idx))
+    samples = z[sample_indices].copy()
+    if noise_scale > 0.0 and noise_mode != "none":
+        if noise_mode == "global_std" or labels_arr is None:
+            scale = np.std(z, axis=0 if per_dim_noise else None) + 1e-12
+            samples += float(noise_scale) * rng.normal(size=samples.shape) * scale
+        else:
+            for label in np.unique(requested):
+                mask = requested == int(label)
+                idx = np.flatnonzero(labels_arr == int(label))
+                scale = np.std(z[idx], axis=0 if per_dim_noise else None) + 1e-12
+                samples[mask] += float(noise_scale) * rng.normal(size=samples[mask].shape) * scale
+    if layernorm_project:
+        samples = layernorm_project_latents(samples)
+    if return_indices:
+        return samples.astype(np.float64), requested.astype(np.int64), sample_indices.astype(np.int64)
+    return samples.astype(np.float64), requested.astype(np.int64)
+
+
+def sample_empirical_latents(*args: Any, **kwargs: Any) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Alias for :func:`sample_empirical_latent_prior`."""
+    return sample_empirical_latent_prior(*args, **kwargs)
+
+
+def latent_nearest_neighbor_summary(
+    query_latents: np.ndarray,
+    reference_latents: np.ndarray,
+    *,
+    query_labels: Optional[np.ndarray] = None,
+    reference_labels: Optional[np.ndarray] = None,
+    same_label: bool = True,
+    baseline_latents: Optional[np.ndarray] = None,
+    max_reference: Optional[int] = None,
+    max_query: Optional[int] = None,
+    chunk_size: int = 256,
+    rng: Optional[np.random.Generator] = None,
+) -> dict[str, Any]:
+    """Summarize nearest-neighbor distances from query latent codes to a reference bank."""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    query = _validate_latent_matrix(query_latents, name="query_latents")
+    reference = _validate_latent_matrix(reference_latents, name="reference_latents")
+    if query.shape[1] != reference.shape[1]:
+        raise ValueError("query and reference latent dimensions must match")
+    q_labels = _resolve_latent_labels(query, query_labels)
+    r_labels = _resolve_latent_labels(reference, reference_labels)
+    rng = np.random.default_rng() if rng is None else rng
+    if max_query is not None and query.shape[0] > int(max_query):
+        idx = rng.choice(query.shape[0], size=int(max_query), replace=False)
+        query = query[idx]
+        q_labels = None if q_labels is None else q_labels[idx]
+    if max_reference is not None and reference.shape[0] > int(max_reference):
+        idx = rng.choice(reference.shape[0], size=int(max_reference), replace=False)
+        reference = reference[idx]
+        r_labels = None if r_labels is None else r_labels[idx]
+    if same_label and (q_labels is None or r_labels is None):
+        same_label = False
+
+    distances = np.empty(query.shape[0], dtype=np.float64)
+    indices = np.empty(query.shape[0], dtype=np.int64)
+    all_ref_idx = np.arange(reference.shape[0])
+    for i, q in enumerate(query):
+        if same_label:
+            ref_idx = np.flatnonzero(r_labels == q_labels[i])
+            if len(ref_idx) == 0:
+                ref_idx = all_ref_idx
+        else:
+            ref_idx = all_ref_idx
+        ref = reference[ref_idx]
+        d2 = np.sum((ref - q[None, :]) ** 2, axis=1)
+        j = int(np.argmin(d2))
+        distances[i] = float(math.sqrt(float(max(d2[j], 0.0))))
+        indices[i] = int(ref_idx[j])
+    summary: dict[str, Any] = {
+        "num_queries": int(query.shape[0]),
+        "mean_nn_distance": float(np.mean(distances)),
+        "median_nn_distance": float(np.median(distances)),
+        "q90_nn_distance": float(np.quantile(distances, 0.90)),
+        "q95_nn_distance": float(np.quantile(distances, 0.95)),
+        "p95_nn_distance": float(np.quantile(distances, 0.95)),
+        "max_nn_distance": float(np.max(distances)),
+        "mean": float(np.mean(distances)),
+        "median": float(np.median(distances)),
+        "q95": float(np.quantile(distances, 0.95)),
+        "same_label": bool(same_label),
+        "nearest_indices": indices,
+    }
+    if baseline_latents is not None:
+        base = latent_nearest_neighbor_summary(
+            baseline_latents,
+            reference,
+            reference_labels=r_labels,
+            same_label=False,
+            chunk_size=chunk_size,
+            rng=rng,
+        )
+        summary["baseline_mean_nn_distance"] = float(base["mean_nn_distance"])
+        summary["baseline_median_nn_distance"] = float(base["median_nn_distance"])
+        summary["mean_distance_ratio_to_baseline"] = float(summary["mean_nn_distance"] / max(float(base["mean_nn_distance"]), 1e-12))
+        summary["median_distance_ratio_to_baseline"] = float(summary["median_nn_distance"] / max(float(base["median_nn_distance"]), 1e-12))
+    if q_labels is not None:
+        per_label: dict[int, dict[str, float | int]] = {}
+        for label in np.unique(q_labels):
+            mask = q_labels == int(label)
+            per_label[int(label)] = {
+                "count": int(np.sum(mask)),
+                "mean_nn_distance": float(np.mean(distances[mask])),
+                "median_nn_distance": float(np.median(distances[mask])),
+                "q95_nn_distance": float(np.quantile(distances[mask], 0.95)),
+            }
+        summary["per_label"] = per_label
+    return summary
+
+
+def latent_nearest_neighbor_diagnostics(
+    reference_latents: np.ndarray,
+    queries: Mapping[str, np.ndarray] | np.ndarray,
+    *,
+    reference_labels: Optional[np.ndarray] = None,
+    query_labels: Optional[Mapping[str, np.ndarray] | np.ndarray] = None,
+    baseline_latents: Optional[np.ndarray] = None,
+    same_label: bool = True,
+    max_reference: Optional[int] = None,
+    max_query: Optional[int] = None,
+    rng: Optional[np.random.Generator] = None,
+) -> list[dict[str, Any]] | dict[str, Any]:
+    """Return nearest-neighbor summaries for one or several latent-prior samples."""
+    if isinstance(queries, Mapping):
+        rows: list[dict[str, Any]] = []
+        for name, z in queries.items():
+            labels_for_query = None
+            if isinstance(query_labels, Mapping):
+                labels_for_query = query_labels.get(name)
+            summary = latent_nearest_neighbor_summary(
+                z,
+                reference_latents,
+                query_labels=labels_for_query,
+                reference_labels=reference_labels,
+                same_label=same_label,
+                max_reference=max_reference,
+                max_query=max_query,
+                rng=rng,
+            )
+            row = {k: v for k, v in summary.items() if k not in {"nearest_indices", "per_label"}}
+            row["name"] = str(name)
+            rows.append(row)
+        return rows
+    return latent_nearest_neighbor_summary(
+        queries,
+        reference_latents,
+        query_labels=query_labels if not isinstance(query_labels, Mapping) else None,
+        reference_labels=reference_labels,
+        same_label=same_label,
+        baseline_latents=baseline_latents,
+        max_reference=max_reference,
+        max_query=max_query,
+        rng=rng,
+    )
+
+
+def _fit_group_pca(group: np.ndarray, pca_dim: int, eps: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    mean = np.mean(group, axis=0)
+    centered = group - mean
+    latent_dim = group.shape[1]
+    components = np.zeros((pca_dim, latent_dim), dtype=np.float64)
+    variances = np.full((pca_dim,), float(eps), dtype=np.float64)
+    if group.shape[0] > 1:
+        _, singular_values, vt = np.linalg.svd(centered, full_matrices=False)
+        p = min(int(pca_dim), int(vt.shape[0]))
+        components[:p] = vt[:p]
+        variances[:p] = singular_values[:p] ** 2 / max(group.shape[0] - 1, 1) + float(eps)
+    return mean, components, variances
+
+
+def fit_pca_latent_prior(
+    latents: np.ndarray,
+    labels: Optional[np.ndarray] = None,
+    *,
+    pca_dim: int = 32,
+    shrink: Optional[float] = None,
+    shrinkage: Optional[float] = None,
+    components_per_class: int = 1,
+    eps: float = 1e-4,
+    layernorm_project: bool = False,
+    project_layernorm: Optional[bool] = None,
+    rng: Optional[np.random.Generator] = None,
+    **_: Any,
+) -> PCALatentPrior:
+    """Fit a class-conditional PCA-shrink Gaussian latent prior."""
+    del components_per_class, rng  # accepted for compatibility with older cells
+    z = _validate_latent_matrix(latents)
+    p = min(int(pca_dim), int(z.shape[1]))
+    if p <= 0 or eps <= 0.0:
+        raise ValueError("pca_dim and eps must be positive")
+    shrink_value = 0.5 if shrink is None and shrinkage is None else (float(shrink) if shrink is not None else float(shrinkage))
+    if shrink_value < 0.0:
+        raise ValueError("shrink must be non-negative")
+    if project_layernorm is not None:
+        layernorm_project = bool(project_layernorm)
+    component_labels, groups = _latent_groups(z, labels)
+    means = []
+    components = []
+    variances = []
+    for idx in groups:
+        mean, comp, var = _fit_group_pca(z[idx], p, float(eps))
+        means.append(mean)
+        components.append(comp)
+        variances.append(var)
+    return PCALatentPrior(
+        means=np.asarray(means, dtype=np.float64),
+        components=np.asarray(components, dtype=np.float64),
+        variances=np.asarray(variances, dtype=np.float64),
+        labels=component_labels,
+        pca_dim=p,
+        shrink=float(shrink_value),
+        eps=float(eps),
+        layernorm_project=bool(layernorm_project),
+    )
+
+
+def sample_pca_latent_prior(
+    prior: PCALatentPrior,
+    *,
+    labels: Optional[np.ndarray] = None,
+    num_samples: Optional[int] = None,
+    shrink: Optional[float] = None,
+    shrinkage: Optional[float] = None,
+    layernorm_project: Optional[bool] = None,
+    project_layernorm: Optional[bool] = None,
+    rng: Optional[np.random.Generator] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample latent codes from a PCA-shrink Gaussian prior."""
+    rng = np.random.default_rng() if rng is None else rng
+    component_idx, out_labels = _component_indices_for_requested_labels(prior.labels, labels, num_samples=num_samples, rng=rng)
+    shrink_value = prior.shrink if shrink is None and shrinkage is None else (float(shrink) if shrink is not None else float(shrinkage))
+    if shrink_value < 0.0:
+        raise ValueError("shrink must be non-negative")
+    samples = np.empty((len(out_labels), prior.latent_dim), dtype=np.float64)
+    for i, comp_idx in enumerate(component_idx):
+        c = int(comp_idx)
+        coeff = np.sqrt(np.maximum(prior.variances[c], 0.0) * shrink_value) * rng.normal(size=prior.pca_dim)
+        samples[i] = prior.means[c] + coeff @ prior.components[c]
+    project = prior.layernorm_project if layernorm_project is None else bool(layernorm_project)
+    if project_layernorm is not None:
+        project = bool(project_layernorm)
+    if project:
+        samples = layernorm_project_latents(samples)
+    return samples.astype(np.float64), out_labels.astype(np.int64, copy=False)
+
+
+def _simple_kmeans(x: np.ndarray, num_clusters: int, *, max_iter: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    if x.ndim != 2 or x.shape[0] == 0:
+        raise ValueError("x must have shape (N, D) with N > 0")
+    k = max(1, min(int(num_clusters), int(x.shape[0])))
+    centers = x[rng.choice(x.shape[0], size=k, replace=False)].copy()
+    assignments = np.zeros(x.shape[0], dtype=np.int64)
+    for _ in range(max(1, int(max_iter))):
+        d2 = np.sum((x[:, None, :] - centers[None, :, :]) ** 2, axis=2)
+        new_assignments = np.argmin(d2, axis=1).astype(np.int64)
+        if np.array_equal(new_assignments, assignments):
+            assignments = new_assignments
+            break
+        assignments = new_assignments
+        for j in range(k):
+            mask = assignments == j
+            centers[j] = np.mean(x[mask], axis=0) if np.any(mask) else x[int(rng.integers(0, x.shape[0]))]
+    return centers, assignments
+
+
+def fit_pca_gmm_latent_prior(
+    latents: np.ndarray,
+    labels: Optional[np.ndarray] = None,
+    *,
+    pca_dim: int = 32,
+    components_per_class: int = 8,
+    covariance_shrink: float = 0.5,
+    covariance_shrinkage: Optional[float] = None,
+    shrinkage: Optional[float] = None,
+    eps: float = 1e-4,
+    max_iter: int = 50,
+    layernorm_project: bool = False,
+    project_layernorm: Optional[bool] = None,
+    rng: Optional[np.random.Generator] = None,
+) -> PCAGMMLatentPrior:
+    """Fit a class-conditional diagonal GMM after per-class PCA projection."""
+    z = _validate_latent_matrix(latents)
+    if covariance_shrinkage is not None:
+        covariance_shrink = float(covariance_shrinkage)
+    if shrinkage is not None:
+        covariance_shrink = float(shrinkage)
+    if project_layernorm is not None:
+        layernorm_project = bool(project_layernorm)
+    if pca_dim <= 0 or components_per_class <= 0 or covariance_shrink < 0.0 or eps <= 0.0:
+        raise ValueError("pca_dim/components_per_class/eps must be positive and covariance_shrink non-negative")
+    rng = np.random.default_rng() if rng is None else rng
+    component_labels, groups = _latent_groups(z, labels)
+    p = min(int(pca_dim), int(z.shape[1]))
+    m = int(components_per_class)
+    class_means = []
+    class_components = []
+    mixture_weights = []
+    mixture_means = []
+    mixture_variances = []
+    for idx in groups:
+        group = z[idx]
+        mean, comp, _ = _fit_group_pca(group, p, float(eps))
+        scores = (group - mean) @ comp.T
+        centers, assignments = _simple_kmeans(scores, m, max_iter=max_iter, rng=rng)
+        weights = np.zeros(m, dtype=np.float64)
+        means = np.zeros((m, p), dtype=np.float64)
+        variances = np.full((m, p), float(eps), dtype=np.float64)
+        for j in range(m):
+            mask = assignments == j
+            if np.any(mask):
+                local = scores[mask]
+                weights[j] = float(local.shape[0])
+                means[j] = np.mean(local, axis=0)
+                variances[j] = np.var(local, axis=0, ddof=0) + float(eps)
+            else:
+                weights[j] = 0.0
+                means[j] = centers[min(j, centers.shape[0] - 1)]
+        weights = np.ones(m, dtype=np.float64) / float(m) if float(np.sum(weights)) <= 0.0 else weights / float(np.sum(weights))
+        class_means.append(mean)
+        class_components.append(comp)
+        mixture_weights.append(weights)
+        mixture_means.append(means)
+        mixture_variances.append(variances)
+    return PCAGMMLatentPrior(
+        class_means=np.asarray(class_means, dtype=np.float64),
+        components=np.asarray(class_components, dtype=np.float64),
+        mixture_weights=np.asarray(mixture_weights, dtype=np.float64),
+        mixture_means=np.asarray(mixture_means, dtype=np.float64),
+        mixture_variances=np.asarray(mixture_variances, dtype=np.float64),
+        labels=component_labels,
+        pca_dim=p,
+        components_per_class=m,
+        covariance_shrink=float(covariance_shrink),
+        eps=float(eps),
+        layernorm_project=bool(layernorm_project),
+    )
+
+
+def sample_pca_gmm_latent_prior(
+    prior: PCAGMMLatentPrior,
+    *,
+    labels: Optional[np.ndarray] = None,
+    num_samples: Optional[int] = None,
+    covariance_shrink: Optional[float] = None,
+    covariance_shrinkage: Optional[float] = None,
+    shrinkage: Optional[float] = None,
+    layernorm_project: Optional[bool] = None,
+    project_layernorm: Optional[bool] = None,
+    rng: Optional[np.random.Generator] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample latent codes from a class-conditional PCA-space diagonal GMM."""
+    rng = np.random.default_rng() if rng is None else rng
+    component_idx, out_labels = _component_indices_for_requested_labels(prior.labels, labels, num_samples=num_samples, rng=rng)
+    shrink_value = prior.covariance_shrink
+    if covariance_shrink is not None:
+        shrink_value = float(covariance_shrink)
+    if covariance_shrinkage is not None:
+        shrink_value = float(covariance_shrinkage)
+    if shrinkage is not None:
+        shrink_value = float(shrinkage)
+    if shrink_value < 0.0:
+        raise ValueError("covariance_shrink must be non-negative")
+    samples = np.empty((len(out_labels), prior.latent_dim), dtype=np.float64)
+    for i, class_idx in enumerate(component_idx):
+        c = int(class_idx)
+        weights = prior.mixture_weights[c] / max(float(np.sum(prior.mixture_weights[c])), 1e-12)
+        j = int(rng.choice(prior.components_per_class, p=weights))
+        coords = prior.mixture_means[c, j] + np.sqrt(np.maximum(prior.mixture_variances[c, j], 0.0) * shrink_value) * rng.normal(size=prior.pca_dim)
+        samples[i] = prior.class_means[c] + coords @ prior.components[c]
+    project = prior.layernorm_project if layernorm_project is None else bool(layernorm_project)
+    if project_layernorm is not None:
+        project = bool(project_layernorm)
+    if project:
+        samples = layernorm_project_latents(samples)
+    return samples.astype(np.float64), out_labels.astype(np.int64, copy=False)
+
+
 def fit_gaussian_latent_prior(
     latents: np.ndarray,
     labels: Optional[np.ndarray] = None,
@@ -2268,37 +2925,20 @@ def fit_gaussian_latent_prior(
     eps: float = 1e-4,
 ) -> GaussianLatentPrior:
     """Fit a simple latent prior.  With labels, one Gaussian is fit per class."""
-    z = np.asarray(latents, dtype=np.float64)
-    if z.ndim != 2 or z.shape[0] == 0:
-        raise ValueError("latents must have shape (N, D) with N > 0")
+    z = _validate_latent_matrix(latents)
     if eps <= 0.0:
         raise ValueError("eps must be positive")
-    if labels is None:
-        component_labels = None
-        groups = [np.arange(z.shape[0])]
-    else:
-        labels_arr = np.asarray(labels, dtype=np.int64).reshape(-1)
-        if labels_arr.shape != (z.shape[0],):
-            raise ValueError("labels must have shape (N,)")
-        component_labels = np.unique(labels_arr).astype(np.int64)
-        groups = [np.flatnonzero(labels_arr == label) for label in component_labels]
-
+    component_labels, groups = _latent_groups(z, labels)
     means = []
     covariances = []
     for idx in groups:
-        if len(idx) == 0:
-            raise ValueError("empty latent-prior component")
         group = z[idx]
         means.append(np.mean(group, axis=0))
         centered = group - means[-1]
         if diagonal:
-            var = np.var(centered, axis=0) + float(eps)
-            covariances.append(var)
+            covariances.append(np.var(centered, axis=0) + float(eps))
         else:
-            if len(group) <= 1:
-                cov = np.eye(z.shape[1], dtype=np.float64) * float(eps)
-            else:
-                cov = np.cov(group, rowvar=False) + np.eye(z.shape[1], dtype=np.float64) * float(eps)
+            cov = np.eye(z.shape[1], dtype=np.float64) * float(eps) if len(group) <= 1 else np.cov(group, rowvar=False) + np.eye(z.shape[1], dtype=np.float64) * float(eps)
             covariances.append(cov)
     return GaussianLatentPrior(
         means=np.asarray(means, dtype=np.float64),
@@ -2314,40 +2954,35 @@ def sample_gaussian_latent_prior(
     *,
     labels: Optional[np.ndarray] = None,
     num_samples: Optional[int] = None,
+    covariance_scale: Optional[float] = None,
+    covariance_shrinkage: Optional[float] = None,
+    layernorm_project: bool = False,
+    project_layernorm: Optional[bool] = None,
     rng: Optional[np.random.Generator] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Sample latent codes and their labels/components from a Gaussian prior."""
+    """Sample latent codes and labels/components from a Gaussian prior."""
     rng = np.random.default_rng() if rng is None else rng
-    if labels is None:
-        if num_samples is None:
-            raise ValueError("num_samples is required when labels are not provided")
-        if prior.labels is None:
-            component_idx = np.zeros(int(num_samples), dtype=np.int64)
-            out_labels = np.zeros(int(num_samples), dtype=np.int64)
-        else:
-            component_idx = rng.integers(0, prior.num_components, size=int(num_samples), endpoint=False)
-            out_labels = prior.labels[component_idx]
-    else:
-        out_labels = np.asarray(labels, dtype=np.int64).reshape(-1)
-        component_idx = np.zeros(len(out_labels), dtype=np.int64)
-        if prior.labels is not None:
-            label_to_component = {int(label): i for i, label in enumerate(prior.labels)}
-            for i, label in enumerate(out_labels):
-                if int(label) not in label_to_component:
-                    raise ValueError(f"label {int(label)} is not available in the latent prior")
-                component_idx[i] = label_to_component[int(label)]
-        elif prior.num_components != 1:
-            raise ValueError("unlabeled prior must have exactly one component")
+    scale = 1.0
+    if covariance_scale is not None:
+        scale = float(covariance_scale)
+    if covariance_shrinkage is not None:
+        scale = float(covariance_shrinkage)
+    if project_layernorm is not None:
+        layernorm_project = bool(project_layernorm)
+    if scale < 0.0:
+        raise ValueError("covariance scale must be non-negative")
+    component_idx, out_labels = _component_indices_for_requested_labels(prior.labels, labels, num_samples=num_samples, rng=rng)
     samples = np.empty((len(out_labels), prior.latent_dim), dtype=np.float64)
     for i, comp in enumerate(component_idx):
         mean = prior.means[int(comp)]
         cov = prior.covariances[int(comp)]
         if prior.diagonal:
-            samples[i] = mean + np.sqrt(cov) * rng.normal(size=prior.latent_dim)
+            samples[i] = mean + np.sqrt(np.maximum(cov, 0.0) * scale) * rng.normal(size=prior.latent_dim)
         else:
-            samples[i] = rng.multivariate_normal(mean, cov)
-    return samples, out_labels.astype(np.int64, copy=False)
-
+            samples[i] = rng.multivariate_normal(mean, cov * scale)
+    if layernorm_project:
+        samples = layernorm_project_latents(samples)
+    return samples.astype(np.float64), out_labels.astype(np.int64, copy=False)
 
 class LatentGenerator(nn.Module):
     """Small MLP generator for a WGAN-GP latent prior."""
