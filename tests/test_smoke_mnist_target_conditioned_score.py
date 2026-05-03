@@ -17,12 +17,15 @@ from mnist.target_conditioned_score import (
     LatentGenerator,
     TargetConditionedScoreModel,
     encode_target_latents,
+    empirical_mixture_scaled_score_target,
+    evaluate_model_vs_mixture_oracle,
     evaluate_target_conditioned_score_model,
     fit_gaussian_latent_prior,
     make_sigma_tau_schedule,
     paired_chamfer_reconstruction_metrics,
     perturb_target_conditioned_positions,
     reconstruct_target_conditioned_point_clouds,
+    sample_oracle_mixture_annealed_dynamics,
     sample_gaussian_latent_prior,
     sample_wgan_latent_prior,
     target_conditioned_score_matching_loss,
@@ -82,6 +85,8 @@ def test_forward_loss_and_training_smoke() -> None:
     assert noisy.shape == clean.shape
     assert target_scaled.shape == clean.shape
     assert target_score.shape == clean.shape
+    mixture_scaled = empirical_mixture_scaled_score_target(noisy, clean, batch_masses, tau)
+    assert mixture_scaled.shape == clean.shape
 
     pred_scaled = model.predict_scaled_score(
         batch_masses,
@@ -107,6 +112,8 @@ def test_forward_loss_and_training_smoke() -> None:
         epochs=1,
         batch_size=4,
         lr=1e-3,
+        direct_mixture_probability=0.5,
+        direct_query_modes=("noised_target", "uniform"),
         device="cpu",
         verbose=False,
     )
@@ -118,9 +125,24 @@ def test_forward_loss_and_training_smoke() -> None:
         labels,
         tau_levels=tau_levels,
         batch_size=4,
+        direct_mixture_probability=0.5,
+        direct_query_modes=("uniform",),
         device="cpu",
     )
     assert "loss_ratio_vs_zero" in eval_metrics
+    oracle_rows = evaluate_model_vs_mixture_oracle(
+        model,
+        masses,
+        positions,
+        labels,
+        tau_levels=tau_levels[:1],
+        query_modes=("uniform",),
+        max_samples=2,
+        batch_size=2,
+        device="cpu",
+    )
+    assert len(oracle_rows) == 1
+    assert "relative_rmse" in oracle_rows[0]
 
 
 def test_sampling_latent_prior_and_wgan_smoke() -> None:
@@ -143,6 +165,9 @@ def test_sampling_latent_prior_and_wgan_smoke() -> None:
         labels[:2],
         tau_levels=tau_levels,
         steps_per_level=1,
+        sampler_scheme="shape_gf_langevin",
+        state_projection="none",
+        langevin_alpha=1e-5,
         final_polish_steps=0,
         batch_size=2,
         device="cpu",
@@ -151,6 +176,21 @@ def test_sampling_latent_prior_and_wgan_smoke() -> None:
     assert generated.positions.shape == positions[:2].shape
     metrics = paired_chamfer_reconstruction_metrics(generated.positions, positions[:2], labels[:2])
     assert "mean_chamfer" in metrics
+
+    oracle_generated = sample_oracle_mixture_annealed_dynamics(
+        target_masses=masses[:2],
+        target_positions=positions[:2],
+        labels=labels[:2],
+        tau_levels=tau_levels,
+        steps_per_level=1,
+        final_polish_steps=0,
+        state_projection="none",
+        langevin_alpha=1e-5,
+        batch_size=2,
+        device="cpu",
+        rng=np.random.default_rng(4),
+    )
+    assert oracle_generated.positions.shape == positions[:2].shape
 
     generator = LatentGenerator(noise_dim=8, latent_dim=16, hidden_dims=(16,), conditional=True)
     critic = LatentCritic(latent_dim=16, hidden_dims=(16,), conditional=True)
