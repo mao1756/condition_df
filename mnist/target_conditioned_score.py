@@ -59,7 +59,24 @@ from mnist.score_matching import (
 FloatArray = NDArray[np.float64]
 IntArray = NDArray[np.int64]
 
+
+@dataclass(frozen=True)
+class ScoreCalibration:
+    r"""Per-noise calibration for learned physical scores.
+
+    ``physical_score_scale[j]`` rescales ``s_i S_theta`` at ``tau_levels[j]``.
+    ``physical_norm_clip[j]`` optionally clips per-particle physical-score norms
+    to an oracle percentile.  The sampler chooses the nearest level in log-tau.
+    """
+
+    tau_levels: FloatArray
+    physical_score_scale: FloatArray
+    physical_norm_clip: Optional[FloatArray] = None
+    metadata: Optional[dict[str, Any]] = None
+
+
 __all__ = [
+    "ScoreCalibration",
     "TargetConditionedScoreModel",
     "TargetPointCloudEncoder",
     "NoisySetEquivariantEncoder",
@@ -74,17 +91,20 @@ __all__ = [
     "empirical_gaussian_mixture_scaled_score",
     "empirical_gaussian_mixture_score_target",
     "sample_direct_mixture_queries",
+    "sample_oracle_replay_queries",
     "target_conditioned_score_matching_loss",
     "evaluate_target_conditioned_score_model",
     "evaluate_model_against_empirical_mixture_score",
     "evaluate_model_against_mixture_oracle",
     "evaluate_model_vs_mixture_oracle",
+    "fit_score_calibration_against_mixture_oracle",
     "train_target_conditioned_score_model",
     "encode_target_latents",
     "sample_target_conditioned_annealed_dynamics",
     "sample_empirical_mixture_oracle_annealed_dynamics",
     "sample_empirical_mixture_oracle_dynamics",
     "sample_oracle_mixture_annealed_dynamics",
+    "evaluate_hybrid_oracle_neural_reconstruction",
     "reconstruct_target_conditioned_point_clouds",
     "fit_gaussian_latent_prior",
     "sample_gaussian_latent_prior",
@@ -156,6 +176,93 @@ def _weighted_mean_and_std(h: Tensor, masses: Tensor) -> tuple[Tensor, Tensor]:
 
 def _uniform_masses(num_samples: int, num_points: int, *, dtype: np.dtype | type = np.float64) -> np.ndarray:
     return np.full((int(num_samples), int(num_points)), 1.0 / float(num_points), dtype=dtype)
+
+
+def _clip_vectors_by_norm(vectors: Tensor, max_norm: Optional[float | Tensor]) -> Tensor:
+    """Clip the final-dimension norm of ``vectors`` without changing directions."""
+    if max_norm is None:
+        return vectors
+    if isinstance(max_norm, Tensor):
+        max_norm_tensor = max_norm.to(device=vectors.device, dtype=vectors.dtype)
+        if max_norm_tensor.numel() == 1:
+            max_norm_tensor = max_norm_tensor.reshape(1, 1, 1)
+        elif max_norm_tensor.ndim == 1:
+            max_norm_tensor = max_norm_tensor[:, None, None]
+        elif max_norm_tensor.ndim == 2:
+            max_norm_tensor = max_norm_tensor[:, :, None]
+    else:
+        if float(max_norm) <= 0.0:
+            return vectors
+        max_norm_tensor = torch.tensor(float(max_norm), device=vectors.device, dtype=vectors.dtype).reshape(1, 1, 1)
+    norm = torch.linalg.norm(vectors, dim=-1, keepdim=True).clamp_min(1e-12)
+    return vectors * torch.clamp(max_norm_tensor / norm, max=1.0)
+
+
+def _as_score_calibration_dict(calibration: ScoreCalibration | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(calibration, ScoreCalibration):
+        return {
+            "tau_levels": calibration.tau_levels,
+            "physical_score_scale": calibration.physical_score_scale,
+            "physical_norm_clip": calibration.physical_norm_clip,
+            "metadata": calibration.metadata,
+        }
+    return dict(calibration)
+
+
+def _score_calibration_for_tau(
+    calibration: Optional[ScoreCalibration | dict[str, Any]],
+    tau_value: float,
+) -> tuple[float, Optional[float]]:
+    """Return nearest-neighbor physical-score scale/clip for a tau value."""
+    if calibration is None:
+        return 1.0, None
+    data = _as_score_calibration_dict(calibration)
+    levels = np.asarray(data.get("tau_levels"), dtype=np.float64).reshape(-1)
+    if levels.size == 0:
+        return 1.0, None
+    scale_arr = np.asarray(data.get("physical_score_scale", data.get("scale", np.ones_like(levels))), dtype=np.float64).reshape(-1)
+    if scale_arr.size == 1 and levels.size > 1:
+        scale_arr = np.repeat(scale_arr, levels.size)
+    if scale_arr.size != levels.size:
+        raise ValueError("calibration physical_score_scale must match tau_levels")
+    idx = int(np.argmin(np.abs(np.log(levels) - math.log(float(tau_value)))))
+    scale = float(scale_arr[idx])
+    clip_value: Optional[float] = None
+    clip_arr_raw = data.get("physical_norm_clip", None)
+    if clip_arr_raw is not None:
+        clip_arr = np.asarray(clip_arr_raw, dtype=np.float64).reshape(-1)
+        if clip_arr.size == 1 and levels.size > 1:
+            clip_arr = np.repeat(clip_arr, levels.size)
+        if clip_arr.size != levels.size:
+            raise ValueError("calibration physical_norm_clip must match tau_levels")
+        clip_candidate = float(clip_arr[idx])
+        if math.isfinite(clip_candidate) and clip_candidate > 0.0:
+            clip_value = clip_candidate
+    if not math.isfinite(scale):
+        scale = 1.0
+    return scale, clip_value
+
+
+def _explicit_clip_for_level(
+    score_norm_clip: Optional[float | Sequence[float] | np.ndarray],
+    level_index: int,
+    num_levels: int,
+) -> Optional[float]:
+    if score_norm_clip is None:
+        return None
+    if isinstance(score_norm_clip, (float, int)):
+        value = float(score_norm_clip)
+        return value if value > 0.0 else None
+    arr = np.asarray(score_norm_clip, dtype=np.float64).reshape(-1)
+    if arr.size == 0:
+        return None
+    if arr.size == 1:
+        value = float(arr[0])
+    elif arr.size == num_levels:
+        value = float(arr[int(level_index)])
+    else:
+        raise ValueError("score_norm_clip must be scalar or have one entry per tau level")
+    return value if math.isfinite(value) and value > 0.0 else None
 
 
 def tau_levels_from_sigma_levels(
@@ -391,7 +498,10 @@ class TargetConditionedScoreModel(nn.Module):
         include_occupancy_channel: bool = True,
         use_image_field: bool = True,
         use_measure_residual: bool = True,
+        use_target_grid_conditioning: bool = False,
+        target_grid_feature_dim: Optional[int] = None,
         measure_gate_init: float = -3.0,
+        measure_gate_max: float = 1.0,
     ) -> None:
         super().__init__()
         if tau_min <= 0.0 or tau_max <= 0.0 or tau_min > tau_max:
@@ -402,6 +512,8 @@ class TargetConditionedScoreModel(nn.Module):
             raise ValueError("context, time and latent dimensions must be positive")
         if num_classes <= 1:
             raise ValueError("num_classes must be at least 2")
+        if measure_gate_max <= 0.0:
+            raise ValueError("measure_gate_max must be positive")
 
         self.latent_dim = int(latent_dim)
         self.grid_size = int(grid_size)
@@ -415,6 +527,9 @@ class TargetConditionedScoreModel(nn.Module):
         self.include_occupancy_channel = bool(include_occupancy_channel)
         self.use_image_field = bool(use_image_field)
         self.use_measure_residual = bool(use_measure_residual)
+        self.use_target_grid_conditioning = bool(use_target_grid_conditioning)
+        self.measure_gate_max = float(measure_gate_max)
+        self.measure_residual_active = True
 
         self.target_encoder = TargetPointCloudEncoder(
             latent_dim=latent_dim,
@@ -457,6 +572,21 @@ class TargetConditionedScoreModel(nn.Module):
         else:
             self.feature_unet = None
             local_feature_dim = 0
+        if self.use_target_grid_conditioning:
+            target_grid_dim = int(grid_feature_dim if target_grid_feature_dim is None else target_grid_feature_dim)
+            if target_grid_dim <= 0:
+                raise ValueError("target_grid_feature_dim must be positive")
+            self.target_feature_unet = _SmallUNet2d(
+                in_channels=raster_channels + context_dim,
+                out_channels=target_grid_dim,
+                base_channels=base_channels,
+                padding_mode="zeros",
+            )
+            target_local_feature_dim = target_grid_dim
+        else:
+            self.target_feature_unet = None
+            target_local_feature_dim = 0
+        self.target_grid_feature_dim = int(target_local_feature_dim)
         self.set_encoder = NoisySetEquivariantEncoder(
             hidden_dim=set_hidden_dim,
             output_dim=set_feature_dim,
@@ -467,8 +597,8 @@ class TargetConditionedScoreModel(nn.Module):
         )
 
         position_dim = 6 if self.use_fourier_features else 2
-        self.point_score_input_dim = position_dim + 2 + context_dim
-        self.measure_score_input_dim = position_dim + 2 + local_feature_dim + set_feature_dim + context_dim
+        self.point_score_input_dim = position_dim + 2 + target_local_feature_dim + context_dim
+        self.measure_score_input_dim = position_dim + 2 + target_local_feature_dim + local_feature_dim + set_feature_dim + context_dim
 
         def _make_score_head(input_dim: int) -> nn.Sequential:
             score_layers: list[nn.Module] = [nn.Linear(input_dim, score_hidden_dim), nn.GELU()]
@@ -493,11 +623,23 @@ class TargetConditionedScoreModel(nn.Module):
             self.measure_gate_logit = None
             self.score_head = _make_score_head(self.measure_score_input_dim)
 
+    def _measure_residual_gate_tensor(self) -> Tensor:
+        if self.measure_gate_logit is None:
+            return torch.tensor(1.0)
+        gate = torch.sigmoid(self.measure_gate_logit) * float(self.measure_gate_max)
+        if not self.measure_residual_active:
+            gate = gate * 0.0
+        return gate
+
     def measure_residual_gate(self) -> float:
         """Return the current scalar residual gate for logging."""
         if self.measure_gate_logit is None:
             return 1.0
-        return float(torch.sigmoid(self.measure_gate_logit.detach()).cpu().item())
+        return float(self._measure_residual_gate_tensor().detach().cpu().item())
+
+    def set_measure_residual_active(self, enabled: bool) -> None:
+        """Temporarily enable/disable the full-measure residual branch."""
+        self.measure_residual_active = bool(enabled)
 
     def encode_target(self, target_masses: Tensor, target_positions: Tensor) -> Tensor:
         return self.target_encoder(target_masses, target_positions)
@@ -555,18 +697,48 @@ class TargetConditionedScoreModel(nn.Module):
         _validate_positions_tensor(positions, masses)
         batch_size, num_points = masses.shape
         tau_tensor = _prepare_tau_tensor(tau, batch_size, device=positions.device, dtype=positions.dtype)
+        target_positions_tensor = target_positions.to(device=masses.device, dtype=masses.dtype) if target_positions is not None else None
+        target_masses_tensor = target_masses.to(device=masses.device, dtype=masses.dtype) if target_masses is not None else None
         latents = self._resolve_latents(
             masses,
-            target_positions,
-            target_masses=target_masses,
+            target_positions_tensor,
+            target_masses=target_masses_tensor,
             target_latents=target_latents,
         )
         context = self._prepare_context(tau_tensor, latents, labels)
+        context_points = context[:, None, :].expand(batch_size, num_points, context.shape[1])
 
         base_point_features = [
             _position_features(positions, use_fourier=self.use_fourier_features),
             _mass_features(masses),
         ]
+        if self.use_target_grid_conditioning:
+            if self.target_feature_unet is None:
+                raise RuntimeError("target_feature_unet is unexpectedly missing")
+            if target_positions_tensor is not None:
+                if target_positions_tensor.ndim != 3 or target_positions_tensor.shape[0] != batch_size or target_positions_tensor.shape[2] != 2:
+                    raise ValueError("target_positions must have shape (B,M,2)")
+                if target_masses_tensor is None:
+                    target_num_points = int(target_positions_tensor.shape[1])
+                    target_masses_for_grid = masses.new_full((batch_size, target_num_points), 1.0 / max(target_num_points, 1))
+                else:
+                    target_masses_for_grid = target_masses_tensor
+                _validate_probability_masses(target_masses_for_grid, name="target_masses")
+                _validate_positions_tensor(target_positions_tensor, target_masses_for_grid, name="target_positions")
+                target_raster = _rasterize_weighted_point_clouds_torch(
+                    target_masses_for_grid,
+                    target_positions_tensor,
+                    grid_size=self.grid_size,
+                    periodic=False,
+                    include_occupancy=self.include_occupancy_channel,
+                )
+                context_grid = context[:, :, None, None].expand(batch_size, context.shape[1], self.grid_size, self.grid_size)
+                target_feature_grid = self.target_feature_unet(torch.cat([target_raster, context_grid], dim=1))
+                target_local_features = _sample_feature_grid_at_positions(target_feature_grid, positions, periodic=False)
+            else:
+                target_local_features = positions.new_zeros((batch_size, num_points, self.target_grid_feature_dim))
+            base_point_features.append(target_local_features)
+
         feature_pieces = list(base_point_features)
         if self.use_image_field:
             if self.feature_unet is None:
@@ -582,7 +754,6 @@ class TargetConditionedScoreModel(nn.Module):
             feature_grid = self.feature_unet(torch.cat([raster, context_grid], dim=1))
             feature_pieces.append(_sample_feature_grid_at_positions(feature_grid, positions, periodic=False))
         set_features = self.set_encoder(masses, positions, context)
-        context_points = context[:, None, :].expand(batch_size, num_points, context.shape[1])
         feature_pieces.extend([set_features, context_points])
         measure_inputs = torch.cat(feature_pieces, dim=-1)
         if self.use_measure_residual:
@@ -591,7 +762,7 @@ class TargetConditionedScoreModel(nn.Module):
             point_inputs = torch.cat([*base_point_features, context_points], dim=-1)
             point_score = self.point_score_head(point_inputs)
             residual_score = self.measure_score_head(measure_inputs)
-            return point_score + torch.sigmoid(self.measure_gate_logit) * residual_score
+            return point_score + self._measure_residual_gate_tensor().to(device=point_score.device, dtype=point_score.dtype) * residual_score
         if self.score_head is None:
             raise RuntimeError("score_head is unexpectedly missing")
         return self.score_head(measure_inputs)
@@ -856,6 +1027,85 @@ def sample_direct_mixture_queries(
     )
 
 
+@torch.no_grad()
+def sample_oracle_replay_queries(
+    target_positions: Tensor,
+    masses: Tensor,
+    tau_levels: Sequence[float] | np.ndarray | Tensor,
+    *,
+    target_masses: Optional[Tensor] = None,
+    steps_per_level: int = 2,
+    max_levels: Optional[int] = None,
+    initial_query_modes: Sequence[str] = ("uniform", "center_gaussian", "fixed_center"),
+    coordinate_range: tuple[float, float] = (0.0, 1.0),
+    center_std: float = 0.35,
+    projection: str = "none",
+    langevin_alpha: float = 5e-5,
+    diffusion_temperature: float = 1.0,
+    score_scale: float = 1.0,
+    mixture_chunk_size: Optional[int] = 256,
+) -> tuple[Tensor, Tensor, int]:
+    r"""Sample query states from successful empirical-mixture oracle trajectories.
+
+    This supplies training points from the actual annealed-sampler path
+    (uniform/blob -> coarse contour -> fine contour), rather than only from
+    independent DSM perturbations around the target contour.
+    """
+    _validate_probability_masses(masses)
+    if target_positions.ndim != 3 or target_positions.shape[0] != masses.shape[0] or target_positions.shape[2] != 2:
+        raise ValueError("target_positions must have shape (B,M,2) and match masses batch")
+    if steps_per_level <= 0:
+        raise ValueError("steps_per_level must be positive")
+    if langevin_alpha <= 0.0 or diffusion_temperature < 0.0 or score_scale <= 0.0:
+        raise ValueError("invalid replay sampler scale/temperature parameters")
+    device, dtype = target_positions.device, target_positions.dtype
+    if isinstance(tau_levels, Tensor):
+        levels = tau_levels.to(device=device, dtype=dtype).reshape(-1)
+    else:
+        levels = torch.as_tensor(np.asarray(tau_levels, dtype=np.float64).copy(), device=device, dtype=dtype).reshape(-1)
+    if levels.numel() <= 0 or bool(torch.any(levels <= 0.0)):
+        raise ValueError("tau_levels must be positive and non-empty")
+    levels = torch.sort(levels, descending=True).values
+    replay_count = int(levels.numel()) if max_levels is None else min(int(max_levels), int(levels.numel()))
+    replay_count = max(replay_count, 1)
+    level_index = int(torch.randint(0, replay_count, (), device=device).item())
+    tau0 = levels[0].expand(masses.shape[0])
+    positions = _sample_direct_mixture_query_positions(
+        target_positions,
+        masses,
+        tau0,
+        query_modes=initial_query_modes,
+        coordinate_range=coordinate_range,
+        center_std=center_std,
+        projection=projection,
+    )
+    tau_min = levels[-1].clamp_min(torch.finfo(dtype).eps)
+    target_masses_resolved = target_masses.to(device=device, dtype=dtype) if target_masses is not None else masses
+    for current_level_index in range(level_index + 1):
+        tau_level = levels[current_level_index]
+        tau_batch = tau_level.expand(masses.shape[0])
+        sigma = torch.sqrt((2.0 * tau_level) / masses).clamp_min(1e-12)
+        sigma_min = torch.sqrt((2.0 * tau_min) / masses).clamp_min(1e-12)
+        ratio = (sigma / sigma_min).unsqueeze(-1)
+        for _ in range(int(steps_per_level)):
+            if diffusion_temperature > 0.0:
+                positions = positions + float(diffusion_temperature) * math.sqrt(float(langevin_alpha)) * ratio * torch.randn_like(positions)
+                positions = project_positions(positions, mode=projection)
+            _, oracle_physical, _ = empirical_mixture_scaled_score_target(
+                positions,
+                target_positions,
+                masses,
+                tau_batch,
+                target_masses=target_masses_resolved,
+                chunk_size=mixture_chunk_size,
+                return_physical_score=True,
+            )
+            positions = positions + 0.5 * float(langevin_alpha) * ratio.square() * float(score_scale) * oracle_physical
+            positions = project_positions(positions, mode=projection)
+    tau_replay = levels[level_index].expand(masses.shape[0])
+    return positions.detach(), tau_replay.detach(), level_index
+
+
 def target_conditioned_score_matching_loss(
     predicted_scaled_score: Tensor,
     target_scaled_score: Tensor,
@@ -939,18 +1189,57 @@ def _build_score_training_query_and_target(
     tau: Tensor,
     *,
     projection: str,
+    tau_levels: Optional[Sequence[float] | np.ndarray] = None,
     direct_mixture_probability: float,
+    oracle_replay_probability: float = 0.0,
     direct_query_modes: Sequence[str],
     direct_query_center_std: float,
     mixture_chunk_size: Optional[int],
-) -> tuple[Tensor, Tensor, str]:
-    """Return a query cloud and scaled-score target for one training batch."""
-    if direct_mixture_probability < 0.0 or direct_mixture_probability > 1.0:
-        raise ValueError("direct_mixture_probability must be in [0, 1]")
-    use_direct = direct_mixture_probability > 0.0 and bool(
-        torch.rand((), device=batch_positions.device) < float(direct_mixture_probability)
-    )
-    if use_direct:
+    mixture_target_norm_clip: Optional[float] = None,
+    oracle_replay_steps_per_level: int = 2,
+    oracle_replay_max_levels: Optional[int] = None,
+    oracle_replay_initial_modes: Sequence[str] = ("uniform", "center_gaussian", "fixed_center"),
+    oracle_replay_langevin_alpha: float = 5e-5,
+    oracle_replay_diffusion_temperature: float = 1.0,
+    oracle_replay_score_scale: float = 1.0,
+) -> tuple[Tensor, Tensor, Tensor, str]:
+    """Return a query cloud, tau tensor and scaled-score target for one batch."""
+    if direct_mixture_probability < 0.0 or oracle_replay_probability < 0.0:
+        raise ValueError("training objective probabilities must be non-negative")
+    if direct_mixture_probability + oracle_replay_probability > 1.0 + 1e-12:
+        raise ValueError("direct_mixture_probability + oracle_replay_probability must be <= 1")
+    draw = float(torch.rand((), device=batch_positions.device).item())
+    if oracle_replay_probability > 0.0 and draw < float(oracle_replay_probability):
+        if tau_levels is None:
+            raise ValueError("tau_levels are required when oracle_replay_probability > 0")
+        query, replay_tau, _ = sample_oracle_replay_queries(
+            batch_positions,
+            batch_masses,
+            tau_levels,
+            target_masses=batch_masses,
+            steps_per_level=oracle_replay_steps_per_level,
+            max_levels=oracle_replay_max_levels,
+            initial_query_modes=oracle_replay_initial_modes,
+            center_std=direct_query_center_std,
+            projection=projection,
+            langevin_alpha=oracle_replay_langevin_alpha,
+            diffusion_temperature=oracle_replay_diffusion_temperature,
+            score_scale=oracle_replay_score_scale,
+            mixture_chunk_size=mixture_chunk_size,
+        )
+        target_scaled = empirical_mixture_scaled_score_target(
+            query,
+            batch_positions,
+            batch_masses,
+            replay_tau,
+            target_masses=batch_masses,
+            chunk_size=mixture_chunk_size,
+            return_physical_score=False,
+            target_norm_clip=mixture_target_norm_clip,
+        )
+        return query, target_scaled, replay_tau, "oracle_replay"
+
+    if direct_mixture_probability > 0.0 and draw < float(oracle_replay_probability + direct_mixture_probability):
         query = _sample_direct_mixture_query_positions(
             batch_positions,
             batch_masses,
@@ -967,8 +1256,9 @@ def _build_score_training_query_and_target(
             target_masses=batch_masses,
             chunk_size=mixture_chunk_size,
             return_physical_score=False,
+            target_norm_clip=mixture_target_norm_clip,
         )
-        return query, target_scaled, "direct_mixture"
+        return query, target_scaled, tau, "direct_mixture"
 
     noisy, target_scaled, _ = perturb_target_conditioned_positions(
         batch_masses,
@@ -976,7 +1266,7 @@ def _build_score_training_query_and_target(
         tau,
         projection=projection,
     )
-    return noisy, target_scaled, "paired_dsm"
+    return noisy, target_scaled, tau, "paired_dsm"
 
 
 @torch.no_grad()
@@ -1071,6 +1361,122 @@ def evaluate_model_vs_mixture_oracle(
 
 
 @torch.no_grad()
+def fit_score_calibration_against_mixture_oracle(
+    model: TargetConditionedScoreModel,
+    masses: np.ndarray,
+    target_positions: np.ndarray,
+    labels: Optional[np.ndarray] = None,
+    *,
+    tau_levels: Sequence[float] | np.ndarray,
+    query_modes: Sequence[str] = ("uniform", "center_gaussian", "noised_target"),
+    max_samples: int = 128,
+    batch_size: int = 32,
+    mixture_chunk_size: Optional[int] = 256,
+    projection: str = "none",
+    clip_quantile: Optional[float] = 0.99,
+    min_scale: float = 0.0,
+    max_scale: float = 10.0,
+    device: Optional[str | torch.device] = None,
+) -> ScoreCalibration:
+    r"""Fit per-tau scalar calibration against the empirical-mixture oracle.
+
+    The sampler uses the physical score ``s_i S_theta``.  This function fits
+    one scalar per tau level by least squares against the exact empirical
+    mixture physical score and optionally stores oracle norm percentiles for
+    score clipping.
+    """
+    if batch_size <= 0 or max_samples <= 0:
+        raise ValueError("batch_size and max_samples must be positive")
+    if clip_quantile is not None and not (0.0 < float(clip_quantile) <= 1.0):
+        raise ValueError("clip_quantile must be in (0, 1]")
+    tau_levels_arr = np.asarray(tau_levels, dtype=np.float64).reshape(-1)
+    if tau_levels_arr.size == 0 or not np.all(np.isfinite(tau_levels_arr)) or np.any(tau_levels_arr <= 0.0):
+        raise ValueError("tau_levels must be positive and finite")
+    tau_levels_arr = np.sort(tau_levels_arr)[::-1].astype(np.float64, copy=False)
+    masses_arr = np.asarray(masses, dtype=np.float32)
+    positions_arr = np.asarray(target_positions, dtype=np.float32)
+    if masses_arr.ndim != 2 or positions_arr.shape != (*masses_arr.shape, 2):
+        raise ValueError("masses and target_positions must have shapes (N,K), (N,K,2)")
+    labels_arr = np.zeros((masses_arr.shape[0],), dtype=np.int64) if labels is None else np.asarray(labels, dtype=np.int64).reshape(-1)
+    if labels_arr.shape != (masses_arr.shape[0],):
+        raise ValueError("labels must have shape (N,)")
+    n = min(int(max_samples), int(masses_arr.shape[0]))
+    model_device = _resolve_device(device)
+    was_training = model.training
+    model = model.to(model_device)
+    model.eval()
+
+    scales: list[float] = []
+    clips: list[float] = []
+    mode_tuple = tuple(str(mode) for mode in query_modes)
+    for tau_value in tau_levels_arr:
+        numerator = denominator = 0.0
+        norm_values: list[np.ndarray] = []
+        for query_mode in mode_tuple:
+            for start in range(0, n, batch_size):
+                stop = min(start + batch_size, n)
+                batch_masses = torch.from_numpy(masses_arr[start:stop]).to(model_device)
+                batch_target = torch.from_numpy(positions_arr[start:stop]).to(model_device)
+                batch_labels = torch.from_numpy(labels_arr[start:stop]).to(model_device)
+                tau = torch.full((stop - start,), float(tau_value), device=model_device, dtype=batch_target.dtype)
+                query = _sample_direct_mixture_query_positions(
+                    batch_target,
+                    batch_masses,
+                    tau,
+                    query_modes=(query_mode,),
+                    projection=projection,
+                )
+                _, oracle_physical, _ = empirical_mixture_scaled_score_target(
+                    query,
+                    batch_target,
+                    batch_masses,
+                    tau,
+                    target_masses=batch_masses,
+                    chunk_size=mixture_chunk_size,
+                    return_physical_score=True,
+                )
+                model_wasserstein = model(
+                    batch_masses,
+                    query,
+                    tau,
+                    target_positions=batch_target,
+                    target_masses=batch_masses,
+                    labels=batch_labels,
+                )
+                model_physical = batch_masses.unsqueeze(-1) * model_wasserstein
+                weights = batch_masses.unsqueeze(-1)
+                numerator += float(torch.sum(weights * model_physical * oracle_physical).item())
+                denominator += float(torch.sum(weights * model_physical.square()).item())
+                if clip_quantile is not None:
+                    norm_values.append(torch.linalg.norm(oracle_physical, dim=-1).detach().cpu().numpy().reshape(-1))
+        scale = numerator / max(denominator, 1e-12)
+        scale = float(np.clip(scale, float(min_scale), float(max_scale)))
+        scales.append(scale if math.isfinite(scale) else 1.0)
+        if clip_quantile is not None and norm_values:
+            clips.append(float(np.quantile(np.concatenate(norm_values), float(clip_quantile))))
+        else:
+            clips.append(float("nan"))
+    if was_training:
+        model.train()
+    clip_arr: Optional[np.ndarray]
+    if clip_quantile is None:
+        clip_arr = None
+    else:
+        clip_arr = np.asarray(clips, dtype=np.float64)
+    return ScoreCalibration(
+        tau_levels=tau_levels_arr.astype(np.float64),
+        physical_score_scale=np.asarray(scales, dtype=np.float64),
+        physical_norm_clip=clip_arr,
+        metadata={
+            "query_modes": mode_tuple,
+            "max_samples": int(n),
+            "clip_quantile": None if clip_quantile is None else float(clip_quantile),
+            "projection": projection,
+        },
+    )
+
+
+@torch.no_grad()
 def evaluate_target_conditioned_score_model(
     model: TargetConditionedScoreModel,
     masses: np.ndarray,
@@ -1082,16 +1488,26 @@ def evaluate_target_conditioned_score_model(
     projection: str = "none",
     time_weighting: str = "none",
     direct_mixture_probability: float = 0.0,
+    oracle_replay_probability: float = 0.0,
     direct_query_modes: Sequence[str] = ("noised_target", "uniform", "center_gaussian"),
     direct_query_center_std: float = 0.35,
     mixture_chunk_size: Optional[int] = 256,
+    mixture_target_norm_clip: Optional[float] = None,
+    oracle_replay_steps_per_level: int = 2,
+    oracle_replay_max_levels: Optional[int] = None,
+    oracle_replay_initial_modes: Sequence[str] = ("uniform", "center_gaussian", "fixed_center"),
+    oracle_replay_langevin_alpha: float = 5e-5,
+    oracle_replay_diffusion_temperature: float = 1.0,
+    oracle_replay_score_scale: float = 1.0,
     device: Optional[str | torch.device] = None,
 ) -> dict[str, float]:
     """Estimate validation scaled-score loss for paired or mixed training."""
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
-    if direct_mixture_probability < 0.0 or direct_mixture_probability > 1.0:
-        raise ValueError("direct_mixture_probability must be in [0, 1]")
+    if direct_mixture_probability < 0.0 or oracle_replay_probability < 0.0:
+        raise ValueError("training objective probabilities must be non-negative")
+    if direct_mixture_probability + oracle_replay_probability > 1.0 + 1e-12:
+        raise ValueError("direct_mixture_probability + oracle_replay_probability must be <= 1")
     tau_levels_arr = np.asarray(tau_levels, dtype=np.float64).reshape(-1)
     if tau_levels_arr.size == 0:
         raise ValueError("tau_levels must be non-empty")
@@ -1102,39 +1518,49 @@ def evaluate_target_conditioned_score_model(
     loader = _make_tensor_loader(masses, positions, labels, batch_size=batch_size, shuffle=False)
 
     total_loss = total_sample_loss = total_zero_loss = 0.0
-    total_items = direct_items = 0
+    total_items = direct_items = replay_items = 0
     tau_means: list[float] = []
     for batch_masses, batch_positions, batch_labels in loader:
         batch_masses = batch_masses.to(model_device)
         batch_positions = batch_positions.to(model_device)
         batch_labels = batch_labels.to(model_device)
         tau = _sample_tau_from_levels(int(batch_masses.shape[0]), tau_levels_arr, device=model_device, dtype=batch_positions.dtype)
-        query, target_scaled, target_kind = _build_score_training_query_and_target(
+        query, target_scaled, tau_used, target_kind = _build_score_training_query_and_target(
             batch_masses,
             batch_positions,
             tau,
             projection=projection,
+            tau_levels=tau_levels_arr,
             direct_mixture_probability=direct_mixture_probability,
+            oracle_replay_probability=oracle_replay_probability,
             direct_query_modes=direct_query_modes,
             direct_query_center_std=direct_query_center_std,
             mixture_chunk_size=mixture_chunk_size,
+            mixture_target_norm_clip=mixture_target_norm_clip,
+            oracle_replay_steps_per_level=oracle_replay_steps_per_level,
+            oracle_replay_max_levels=oracle_replay_max_levels,
+            oracle_replay_initial_modes=oracle_replay_initial_modes,
+            oracle_replay_langevin_alpha=oracle_replay_langevin_alpha,
+            oracle_replay_diffusion_temperature=oracle_replay_diffusion_temperature,
+            oracle_replay_score_scale=oracle_replay_score_scale,
         )
         pred_scaled = model.predict_scaled_score(
             batch_masses,
             query,
-            tau,
+            tau_used,
             target_positions=batch_positions,
             target_masses=batch_masses,
             labels=batch_labels,
         )
-        loss, metrics = target_conditioned_score_matching_loss(pred_scaled, target_scaled, batch_masses, tau, time_weighting=time_weighting)
-        zero_loss, _ = target_conditioned_score_matching_loss(torch.zeros_like(target_scaled), target_scaled, batch_masses, tau, time_weighting=time_weighting)
+        loss, metrics = target_conditioned_score_matching_loss(pred_scaled, target_scaled, batch_masses, tau_used, time_weighting=time_weighting)
+        zero_loss, _ = target_conditioned_score_matching_loss(torch.zeros_like(target_scaled), target_scaled, batch_masses, tau_used, time_weighting=time_weighting)
         bsz = int(batch_masses.shape[0])
         total_loss += float(loss.item()) * bsz
         total_sample_loss += float(metrics["sample_loss"]) * bsz
         total_zero_loss += float(zero_loss.item()) * bsz
         total_items += bsz
         direct_items += bsz if target_kind == "direct_mixture" else 0
+        replay_items += bsz if target_kind == "oracle_replay" else 0
         tau_means.append(float(metrics["mean_tau"]))
     if was_training:
         model.train()
@@ -1145,6 +1571,7 @@ def evaluate_target_conditioned_score_model(
         "loss_ratio_vs_zero": total_loss / max(total_zero_loss, 1e-12),
         "mean_tau": float(np.mean(tau_means)) if tau_means else float("nan"),
         "direct_fraction": float(direct_items / max(total_items, 1)),
+        "replay_fraction": float(replay_items / max(total_items, 1)),
     }
 
 
@@ -1166,9 +1593,20 @@ def train_target_conditioned_score_model(
     projection: str = "none",
     time_weighting: str = "none",
     direct_mixture_probability: float = 0.0,
+    oracle_replay_probability: float = 0.0,
+    oracle_replay_weight: float = 1.0,
     direct_query_modes: Sequence[str] = ("noised_target", "uniform", "center_gaussian"),
     direct_query_center_std: float = 0.35,
     mixture_chunk_size: Optional[int] = 256,
+    mixture_target_norm_clip: Optional[float] = None,
+    oracle_replay_steps_per_level: int = 2,
+    oracle_replay_max_levels: Optional[int] = None,
+    oracle_replay_initial_modes: Sequence[str] = ("uniform", "center_gaussian", "fixed_center"),
+    oracle_replay_langevin_alpha: float = 5e-5,
+    oracle_replay_diffusion_temperature: float = 1.0,
+    oracle_replay_score_scale: float = 1.0,
+    measure_gate_regularization: float = 0.0,
+    freeze_measure_branch_epochs: int = 0,
     early_stopping_patience: Optional[int] = None,
     lr_scheduler_patience: Optional[int] = 10,
     lr_scheduler_factor: float = 0.5,
@@ -1178,13 +1616,24 @@ def train_target_conditioned_score_model(
     device: Optional[str | torch.device] = None,
     verbose: bool = True,
 ) -> dict[str, list[float]]:
-    """Train ``f_phi`` and ``S_theta`` by target-conditioned mixed score matching."""
+    """Train ``f_phi`` and ``S_theta`` by target-conditioned mixed score matching.
+
+    The optional oracle-replay component distills the empirical-mixture score on
+    states generated by the successful oracle sampler, reducing the mismatch
+    between local one-step DSM and global reconstruction from a prior.
+    """
     if epochs <= 0 or batch_size <= 0:
         raise ValueError("epochs and batch_size must be positive")
     if lr <= 0.0:
         raise ValueError("lr must be positive")
-    if direct_mixture_probability < 0.0 or direct_mixture_probability > 1.0:
-        raise ValueError("direct_mixture_probability must be in [0, 1]")
+    if direct_mixture_probability < 0.0 or oracle_replay_probability < 0.0:
+        raise ValueError("training objective probabilities must be non-negative")
+    if direct_mixture_probability + oracle_replay_probability > 1.0 + 1e-12:
+        raise ValueError("direct_mixture_probability + oracle_replay_probability must be <= 1")
+    if oracle_replay_weight <= 0.0:
+        raise ValueError("oracle_replay_weight must be positive")
+    if measure_gate_regularization < 0.0:
+        raise ValueError("measure_gate_regularization must be non-negative")
     tau_levels_arr = np.asarray(tau_levels, dtype=np.float64).reshape(-1)
     if tau_levels_arr.size == 0 or not np.all(np.isfinite(tau_levels_arr)) or np.any(tau_levels_arr <= 0.0):
         raise ValueError("tau_levels must be positive and finite")
@@ -1213,9 +1662,11 @@ def train_target_conditioned_score_model(
         "train_loss": [],
         "train_sample_loss": [],
         "train_direct_fraction": [],
+        "train_replay_fraction": [],
         "val_loss": [],
         "val_loss_ratio_vs_zero": [],
         "val_direct_fraction": [],
+        "val_replay_fraction": [],
         "lr": [],
         "measure_gate": [],
     }
@@ -1225,46 +1676,64 @@ def train_target_conditioned_score_model(
     stale_epochs = 0
 
     for epoch in range(int(epochs)):
+        if hasattr(model, "set_measure_residual_active"):
+            model.set_measure_residual_active(epoch >= int(freeze_measure_branch_epochs))
+        model.train()
         total_loss = total_sample_loss = 0.0
-        total_items = direct_items = 0
+        total_items = direct_items = replay_items = 0
         for batch_masses, batch_positions, batch_labels in loader:
             batch_masses = batch_masses.to(model_device)
             batch_positions = batch_positions.to(model_device)
             batch_labels = batch_labels.to(model_device)
             tau = _sample_tau_from_levels(int(batch_masses.shape[0]), tau_levels_arr, device=model_device, dtype=batch_positions.dtype)
-            query, target_scaled, target_kind = _build_score_training_query_and_target(
+            query, target_scaled, tau_used, target_kind = _build_score_training_query_and_target(
                 batch_masses,
                 batch_positions,
                 tau,
                 projection=projection,
+                tau_levels=tau_levels_arr,
                 direct_mixture_probability=direct_mixture_probability,
+                oracle_replay_probability=oracle_replay_probability,
                 direct_query_modes=direct_query_modes,
                 direct_query_center_std=direct_query_center_std,
                 mixture_chunk_size=mixture_chunk_size,
+                mixture_target_norm_clip=mixture_target_norm_clip,
+                oracle_replay_steps_per_level=oracle_replay_steps_per_level,
+                oracle_replay_max_levels=oracle_replay_max_levels,
+                oracle_replay_initial_modes=oracle_replay_initial_modes,
+                oracle_replay_langevin_alpha=oracle_replay_langevin_alpha,
+                oracle_replay_diffusion_temperature=oracle_replay_diffusion_temperature,
+                oracle_replay_score_scale=oracle_replay_score_scale,
             )
             pred_scaled = model.predict_scaled_score(
                 batch_masses,
                 query,
-                tau,
+                tau_used,
                 target_positions=batch_positions,
                 target_masses=batch_masses,
                 labels=batch_labels,
             )
-            loss, metrics = target_conditioned_score_matching_loss(pred_scaled, target_scaled, batch_masses, tau, time_weighting=time_weighting)
+            loss, metrics = target_conditioned_score_matching_loss(pred_scaled, target_scaled, batch_masses, tau_used, time_weighting=time_weighting)
+            objective_loss = loss * (float(oracle_replay_weight) if target_kind == "oracle_replay" else 1.0)
+            if measure_gate_regularization > 0.0 and getattr(model, "measure_gate_logit", None) is not None:
+                gate = model._measure_residual_gate_tensor().to(device=objective_loss.device, dtype=objective_loss.dtype)
+                objective_loss = objective_loss + float(measure_gate_regularization) * gate.square()
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            objective_loss.backward()
             if max_grad_norm is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(max_grad_norm))
             optimizer.step()
             bsz = int(batch_masses.shape[0])
-            total_loss += float(loss.item()) * bsz
+            total_loss += float(objective_loss.detach().item()) * bsz
             total_sample_loss += float(metrics["sample_loss"]) * bsz
             total_items += bsz
             direct_items += bsz if target_kind == "direct_mixture" else 0
+            replay_items += bsz if target_kind == "oracle_replay" else 0
         train_loss = total_loss / max(total_items, 1)
         history["train_loss"].append(train_loss)
         history["train_sample_loss"].append(total_sample_loss / max(total_items, 1))
         history["train_direct_fraction"].append(float(direct_items / max(total_items, 1)))
+        history["train_replay_fraction"].append(float(replay_items / max(total_items, 1)))
 
         if val_masses is not None and val_positions is not None:
             val_metrics = evaluate_target_conditioned_score_model(
@@ -1277,21 +1746,32 @@ def train_target_conditioned_score_model(
                 projection=projection,
                 time_weighting=time_weighting,
                 direct_mixture_probability=direct_mixture_probability,
+                oracle_replay_probability=oracle_replay_probability,
                 direct_query_modes=direct_query_modes,
                 direct_query_center_std=direct_query_center_std,
                 mixture_chunk_size=mixture_chunk_size,
+                mixture_target_norm_clip=mixture_target_norm_clip,
+                oracle_replay_steps_per_level=oracle_replay_steps_per_level,
+                oracle_replay_max_levels=oracle_replay_max_levels,
+                oracle_replay_initial_modes=oracle_replay_initial_modes,
+                oracle_replay_langevin_alpha=oracle_replay_langevin_alpha,
+                oracle_replay_diffusion_temperature=oracle_replay_diffusion_temperature,
+                oracle_replay_score_scale=oracle_replay_score_scale,
                 device=model_device,
             )
             val_loss = float(val_metrics["loss"])
             val_ratio = float(val_metrics["loss_ratio_vs_zero"])
             val_direct_fraction = float(val_metrics["direct_fraction"])
+            val_replay_fraction = float(val_metrics["replay_fraction"])
         else:
             val_loss = float("nan")
             val_ratio = float("nan")
             val_direct_fraction = float("nan")
+            val_replay_fraction = float("nan")
         history["val_loss"].append(val_loss)
         history["val_loss_ratio_vs_zero"].append(val_ratio)
         history["val_direct_fraction"].append(val_direct_fraction)
+        history["val_replay_fraction"].append(val_replay_fraction)
         current_lr = float(min(group["lr"] for group in optimizer.param_groups))
         history["lr"].append(current_lr)
         history["measure_gate"].append(model.measure_residual_gate())
@@ -1313,6 +1793,7 @@ def train_target_conditioned_score_model(
                 f"epoch {epoch + 1:04d}/{epochs}: train_loss={train_loss:.6g} "
                 f"val_loss={val_loss:.6g} val/zero={val_ratio:.4f} "
                 f"direct={history['train_direct_fraction'][-1]:.2f} "
+                f"replay={history['train_replay_fraction'][-1]:.2f} "
                 f"gate={history['measure_gate'][-1]:.3f} lr={current_lr:.2e}"
             )
         if early_stopping_patience is not None and int(early_stopping_patience) >= 0:
@@ -1322,6 +1803,8 @@ def train_target_conditioned_score_model(
                 break
     if restore_best and best_state is not None:
         model.load_state_dict(best_state)
+    if hasattr(model, "set_measure_residual_active"):
+        model.set_measure_residual_active(True)
     history["best_epoch"] = [float(best_epoch + 1)]
     history["best_monitor"] = [float(best_monitor)]
     return history
@@ -1411,6 +1894,10 @@ def sample_target_conditioned_annealed_dynamics(
     diffusion_temperature: float = 1.0,
     final_polish_steps: int = 0,
     langevin_alpha: float = 5e-5,
+    score_calibration: Optional[ScoreCalibration | dict[str, Any]] = None,
+    score_norm_clip: Optional[float | Sequence[float] | np.ndarray] = None,
+    oracle_prefix_levels: int = 0,
+    oracle_suffix_levels: int = 0,
     batch_size: int = 64,
     rasterize: bool = False,
     image_size: int = 28,
@@ -1423,8 +1910,8 @@ def sample_target_conditioned_annealed_dynamics(
     ``shape_gf_langevin`` follows ShapeGF's noise-then-gradient update.  The
     model still returns the Wasserstein score ``S_i``; the practical point-cloud
     Langevin step uses the corresponding physical score ``s_i S_i``.  The
-    ``oracle_shape_gf_langevin`` mode replaces the neural score with the exact
-    empirical Gaussian-mixture field for diagnostic purposes.
+    ``oracle_prefix_levels``/``oracle_suffix_levels`` switches make hybrid
+    bisection diagnostics possible without changing the schedule.
     """
     if steps_per_level <= 0:
         raise ValueError("steps_per_level must be positive")
@@ -1434,13 +1921,16 @@ def sample_target_conditioned_annealed_dynamics(
         raise ValueError("score_scale must be positive and diffusion_temperature must be non-negative")
     if langevin_alpha <= 0.0:
         raise ValueError("langevin_alpha must be positive")
+    if oracle_prefix_levels < 0 or oracle_suffix_levels < 0:
+        raise ValueError("oracle prefix/suffix levels must be non-negative")
     allowed_schemes = {"theory_euler", "bridge", "langevin", "shape_gf_langevin", "oracle_shape_gf_langevin"}
     if sampler_scheme not in allowed_schemes:
         raise ValueError(f"sampler_scheme must be one of {sorted(allowed_schemes)}")
     rng = np.random.default_rng() if rng is None else rng
-    uses_oracle = sampler_scheme == "oracle_shape_gf_langevin"
-    if uses_oracle and target_positions is None:
-        raise ValueError("oracle_shape_gf_langevin requires target_positions")
+    pure_oracle = sampler_scheme == "oracle_shape_gf_langevin"
+    uses_any_oracle = pure_oracle or oracle_prefix_levels > 0 or oracle_suffix_levels > 0
+    if uses_any_oracle and target_positions is None:
+        raise ValueError("oracle or hybrid sampling requires target_positions")
 
     if target_latents is not None:
         latents_arr = np.asarray(target_latents, dtype=np.float32)
@@ -1510,25 +2000,60 @@ def sample_target_conditioned_annealed_dynamics(
     else:
         raise RuntimeError("unreachable latent resolution state")
 
-    def _score_batch(batch_masses: Tensor, batch_positions: Tensor, tau: Tensor, start_idx: int, stop: int, *, oracle: bool) -> Tensor:
+    def _target_slice(start_idx: int, stop: int) -> tuple[Optional[Tensor], Optional[Tensor]]:
+        return (
+            target_positions_tensor[start_idx:stop] if target_positions_tensor is not None else None,
+            target_masses_tensor[start_idx:stop] if target_masses_tensor is not None else None,
+        )
+
+    def _score_batch(
+        batch_masses: Tensor,
+        batch_positions: Tensor,
+        tau: Tensor,
+        start_idx: int,
+        stop: int,
+        *,
+        oracle: bool,
+        tau_value: float,
+        level_index: int,
+    ) -> Tensor:
+        batch_target_positions, batch_target_masses = _target_slice(start_idx, stop)
         if oracle:
-            if target_positions_tensor is None:
+            if batch_target_positions is None:
                 raise RuntimeError("oracle score requested without target_positions")
             _, oracle_wasserstein, _ = empirical_gaussian_mixture_scaled_score(
                 batch_masses,
                 batch_positions,
-                target_positions_tensor[start_idx:stop],
+                batch_target_positions,
                 tau,
-                target_masses=(target_masses_tensor[start_idx:stop] if target_masses_tensor is not None else None),
+                target_masses=batch_target_masses,
             )
             return oracle_wasserstein
-        return model(
+        model_wasserstein = model(
             batch_masses,
             batch_positions,
             tau,
+            target_positions=batch_target_positions,
+            target_masses=batch_target_masses,
             target_latents=latents[start_idx:stop],
             labels=label_tensor[start_idx:stop],
         )
+        physical_score = batch_masses.unsqueeze(-1) * model_wasserstein
+        calibration_scale, calibration_clip = _score_calibration_for_tau(score_calibration, tau_value)
+        physical_score = physical_score * float(calibration_scale)
+        explicit_clip = _explicit_clip_for_level(score_norm_clip, level_index, len(levels))
+        clip_value = explicit_clip if explicit_clip is not None else calibration_clip
+        physical_score = _clip_vectors_by_norm(physical_score, clip_value)
+        return physical_score / batch_masses.unsqueeze(-1).clamp_min(1e-12)
+
+    def _use_oracle_for_level(level_index: int) -> bool:
+        if pure_oracle:
+            return True
+        if oracle_prefix_levels > 0 and level_index < int(oracle_prefix_levels):
+            return True
+        if oracle_suffix_levels > 0 and level_index >= len(levels) - int(oracle_suffix_levels):
+            return True
+        return False
 
     trajectory_snapshots: list[np.ndarray] = []
     if return_trajectories:
@@ -1536,13 +2061,14 @@ def sample_target_conditioned_annealed_dynamics(
 
     if sampler_scheme == "bridge":
         update_pairs = [(float(levels[i]), float(levels[i + 1]) if i + 1 < len(levels) else 0.0) for i in range(len(levels))]
-        for tau_value, tau_next in update_pairs:
+        for level_id, (tau_value, tau_next) in enumerate(update_pairs):
+            level_oracle = _use_oracle_for_level(level_id)
             for start_idx in range(0, num_samples, batch_size):
                 stop = min(start_idx + batch_size, num_samples)
                 batch_masses = masses[start_idx:stop]
                 batch_positions = positions[start_idx:stop]
                 tau = torch.full((stop - start_idx,), tau_value, device=model_device, dtype=batch_positions.dtype)
-                score = _score_batch(batch_masses, batch_positions, tau, start_idx, stop, oracle=False)
+                score = _score_batch(batch_masses, batch_positions, tau, start_idx, stop, oracle=level_oracle, tau_value=tau_value, level_index=level_id)
                 clean_estimate = batch_positions + 2.0 * float(score_scale) * tau[:, None, None] * score
                 if tau_next > 0.0 and diffusion_temperature > 0.0:
                     noise_scale = torch.sqrt((2.0 * tau_next * diffusion_temperature) / batch_masses).unsqueeze(-1)
@@ -1554,9 +2080,9 @@ def sample_target_conditioned_annealed_dynamics(
             if return_trajectories:
                 trajectory_snapshots.append(positions.detach().cpu().numpy().astype(np.float64))
     elif sampler_scheme in {"shape_gf_langevin", "oracle_shape_gf_langevin"}:
-        oracle = sampler_scheme == "oracle_shape_gf_langevin"
         tau_min = float(levels[-1])
-        for tau_level in levels:
+        for level_id, tau_level in enumerate(levels):
+            level_oracle = _use_oracle_for_level(level_id)
             for _ in range(int(steps_per_level)):
                 for start_idx in range(0, num_samples, batch_size):
                     stop = min(start_idx + batch_size, num_samples)
@@ -1569,7 +2095,7 @@ def sample_target_conditioned_annealed_dynamics(
                     if diffusion_temperature > 0.0:
                         batch_positions = batch_positions + float(diffusion_temperature) * math.sqrt(float(langevin_alpha)) * ratio * torch.randn_like(batch_positions)
                         batch_positions = project_positions(batch_positions, mode=state_projection)
-                    score = _score_batch(batch_masses, batch_positions, tau, start_idx, stop, oracle=oracle)
+                    score = _score_batch(batch_masses, batch_positions, tau, start_idx, stop, oracle=level_oracle, tau_value=float(tau_level), level_index=level_id)
                     physical_score = batch_masses.unsqueeze(-1) * score
                     batch_positions = batch_positions + 0.5 * float(langevin_alpha) * ratio.square() * float(score_scale) * physical_score
                     batch_positions = project_positions(batch_positions, mode=state_projection)
@@ -1579,6 +2105,7 @@ def sample_target_conditioned_annealed_dynamics(
     else:
         # Legacy theory-Euler or SDE-scaled Langevin sampler.
         for level_id, tau_level in enumerate(levels):
+            level_oracle = _use_oracle_for_level(level_id)
             tau_next_level = float(levels[level_id + 1]) if level_id + 1 < len(levels) else 0.0
             dt = max((float(tau_level) - tau_next_level) / float(steps_per_level), float(tau_level) * 1e-4) if sampler_scheme == "theory_euler" else max(0.02 * float(tau_level), 1e-12)
             for inner in range(int(steps_per_level)):
@@ -1588,7 +2115,7 @@ def sample_target_conditioned_annealed_dynamics(
                     batch_masses = masses[start_idx:stop]
                     batch_positions = positions[start_idx:stop]
                     tau = torch.full((stop - start_idx,), tau_value, device=model_device, dtype=batch_positions.dtype)
-                    score = _score_batch(batch_masses, batch_positions, tau, start_idx, stop, oracle=False)
+                    score = _score_batch(batch_masses, batch_positions, tau, start_idx, stop, oracle=level_oracle, tau_value=tau_value, level_index=level_id)
                     noise_scale = torch.sqrt((2.0 * diffusion_temperature * dt) / batch_masses).unsqueeze(-1)
                     batch_positions = batch_positions + 2.0 * float(score_scale) * dt * score + noise_scale * torch.randn_like(batch_positions)
                     batch_positions = project_positions(batch_positions, mode=state_projection)
@@ -1596,15 +2123,16 @@ def sample_target_conditioned_annealed_dynamics(
             if return_trajectories:
                 trajectory_snapshots.append(positions.detach().cpu().numpy().astype(np.float64))
 
-    if final_polish_steps > 0 and not uses_oracle:
+    if final_polish_steps > 0 and not pure_oracle:
         tau_value = float(levels[-1])
+        level_id = len(levels) - 1
         for _ in range(int(final_polish_steps)):
             for start_idx in range(0, num_samples, batch_size):
                 stop = min(start_idx + batch_size, num_samples)
                 batch_masses = masses[start_idx:stop]
                 batch_positions = positions[start_idx:stop]
                 tau = torch.full((stop - start_idx,), tau_value, device=model_device, dtype=batch_positions.dtype)
-                score = _score_batch(batch_masses, batch_positions, tau, start_idx, stop, oracle=False)
+                score = _score_batch(batch_masses, batch_positions, tau, start_idx, stop, oracle=_use_oracle_for_level(level_id), tau_value=tau_value, level_index=level_id)
                 if sampler_scheme == "shape_gf_langevin":
                     physical_score = batch_masses.unsqueeze(-1) * score
                     batch_positions = batch_positions + 0.5 * float(langevin_alpha) * float(score_scale) * physical_score
@@ -2091,6 +2619,104 @@ def paired_chamfer_reconstruction_metrics(
             }
         out["per_label"] = per_label
     return out
+
+
+@torch.no_grad()
+def evaluate_hybrid_oracle_neural_reconstruction(
+    model: TargetConditionedScoreModel,
+    target_masses: np.ndarray,
+    target_positions: np.ndarray,
+    labels: Optional[np.ndarray] = None,
+    *,
+    tau_levels: Sequence[float] | np.ndarray,
+    prefix_levels: Sequence[int] = (0, 1, 2, 3, 5),
+    suffix_levels: Sequence[int] = (),
+    max_samples: int = 32,
+    steps_per_level: int = 10,
+    sampler_scheme: str = "shape_gf_langevin",
+    initial_position_mode: str = "uniform",
+    state_projection: str = "none",
+    score_scale: float = 1.0,
+    diffusion_temperature: float = 1.0,
+    langevin_alpha: float = 5e-5,
+    score_calibration: Optional[ScoreCalibration | dict[str, Any]] = None,
+    score_norm_clip: Optional[float | Sequence[float] | np.ndarray] = None,
+    batch_size: int = 64,
+    device: Optional[str | torch.device] = None,
+    rng: Optional[np.random.Generator] = None,
+    squared_chamfer: bool = True,
+) -> list[dict[str, float | int | str]]:
+    """Run oracle/neural hybrid reconstructions to localize sampler failure.
+
+    ``prefix_levels=m`` uses the oracle for the first ``m`` high-noise levels and
+    the neural score afterwards.  ``suffix_levels=m`` does the reverse: neural
+    first, oracle for the last ``m`` low-noise levels.
+    """
+    if max_samples <= 0:
+        raise ValueError("max_samples must be positive")
+    masses_arr = np.asarray(target_masses, dtype=np.float64)
+    positions_arr = np.asarray(target_positions, dtype=np.float64)
+    if masses_arr.ndim != 2 or positions_arr.shape != (*masses_arr.shape, 2):
+        raise ValueError("target_masses and target_positions must have shapes (N,K), (N,K,2)")
+    n = min(int(max_samples), int(masses_arr.shape[0]))
+    labels_arr = None if labels is None else np.asarray(labels, dtype=np.int64).reshape(-1)[:n]
+    levels = np.asarray(tau_levels, dtype=np.float64).reshape(-1)
+    if levels.size == 0:
+        raise ValueError("tau_levels must be non-empty")
+    levels = np.sort(levels)[::-1]
+    rows: list[dict[str, float | int | str]] = []
+    base_rng = np.random.default_rng() if rng is None else rng
+
+    def _run(mode: str, count: int) -> None:
+        count_clamped = max(0, min(int(count), len(levels)))
+        child_rng = np.random.default_rng(int(base_rng.integers(0, 2**32 - 1)))
+        kwargs: dict[str, Any] = {
+            "target_masses": masses_arr[:n],
+            "target_positions": positions_arr[:n],
+            "labels": labels_arr,
+            "tau_levels": levels,
+            "steps_per_level": steps_per_level,
+            "sampler_scheme": sampler_scheme,
+            "initial_position_mode": initial_position_mode,
+            "state_projection": state_projection,
+            "score_scale": score_scale,
+            "diffusion_temperature": diffusion_temperature,
+            "langevin_alpha": langevin_alpha,
+            "score_calibration": score_calibration,
+            "score_norm_clip": score_norm_clip,
+            "batch_size": batch_size,
+            "device": device,
+            "rng": child_rng,
+        }
+        if mode == "oracle_prefix":
+            kwargs["oracle_prefix_levels"] = count_clamped
+        elif mode == "oracle_suffix":
+            kwargs["oracle_suffix_levels"] = count_clamped
+        else:
+            raise ValueError("unknown hybrid mode")
+        recon = reconstruct_target_conditioned_point_clouds(model, **kwargs)
+        metrics = paired_chamfer_reconstruction_metrics(
+            recon.positions,
+            positions_arr[:n],
+            labels_arr,
+            squared=squared_chamfer,
+        )
+        rows.append(
+            {
+                "mode": mode,
+                "oracle_levels": int(count_clamped),
+                "mean_chamfer": float(metrics["mean_chamfer"]),
+                "median_chamfer": float(metrics["median_chamfer"]),
+                "std_chamfer": float(metrics["std_chamfer"]),
+                "num_samples": int(n),
+            }
+        )
+
+    for count in prefix_levels:
+        _run("oracle_prefix", int(count))
+    for count in suffix_levels:
+        _run("oracle_suffix", int(count))
+    return rows
 
 
 # Backward-compatible aliases used by the Experiment 8b notebook/tests.

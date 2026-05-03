@@ -18,8 +18,10 @@ from mnist.target_conditioned_score import (
     TargetConditionedScoreModel,
     encode_target_latents,
     empirical_mixture_scaled_score_target,
+    evaluate_hybrid_oracle_neural_reconstruction,
     evaluate_model_vs_mixture_oracle,
     evaluate_target_conditioned_score_model,
+    fit_score_calibration_against_mixture_oracle,
     fit_gaussian_latent_prior,
     make_sigma_tau_schedule,
     paired_chamfer_reconstruction_metrics,
@@ -68,6 +70,10 @@ def _small_model(tau_min: float, tau_max: float) -> TargetConditionedScoreModel:
         tau_max=tau_max,
         dropout=0.0,
         use_image_field=False,
+        use_target_grid_conditioning=True,
+        target_grid_feature_dim=8,
+        measure_gate_init=-5.0,
+        measure_gate_max=0.10,
     )
 
 
@@ -112,12 +118,19 @@ def test_forward_loss_and_training_smoke() -> None:
         epochs=1,
         batch_size=4,
         lr=1e-3,
-        direct_mixture_probability=0.5,
+        direct_mixture_probability=0.25,
+        oracle_replay_probability=0.25,
+        oracle_replay_weight=1.2,
+        oracle_replay_steps_per_level=1,
+        oracle_replay_max_levels=1,
         direct_query_modes=("noised_target", "uniform"),
+        freeze_measure_branch_epochs=0,
+        measure_gate_regularization=1e-3,
         device="cpu",
         verbose=False,
     )
     assert len(history["train_loss"]) == 1
+    assert "train_replay_fraction" in history
     eval_metrics = evaluate_target_conditioned_score_model(
         model,
         masses,
@@ -125,7 +138,10 @@ def test_forward_loss_and_training_smoke() -> None:
         labels,
         tau_levels=tau_levels,
         batch_size=4,
-        direct_mixture_probability=0.5,
+        direct_mixture_probability=0.25,
+        oracle_replay_probability=0.25,
+        oracle_replay_steps_per_level=1,
+        oracle_replay_max_levels=1,
         direct_query_modes=("uniform",),
         device="cpu",
     )
@@ -143,6 +159,18 @@ def test_forward_loss_and_training_smoke() -> None:
     )
     assert len(oracle_rows) == 1
     assert "relative_rmse" in oracle_rows[0]
+    calibration = fit_score_calibration_against_mixture_oracle(
+        model,
+        masses,
+        positions,
+        labels,
+        tau_levels=tau_levels[:1],
+        query_modes=("uniform",),
+        max_samples=2,
+        batch_size=2,
+        device="cpu",
+    )
+    assert calibration.physical_score_scale.shape == (1,)
 
 
 def test_sampling_latent_prior_and_wgan_smoke() -> None:
@@ -152,6 +180,17 @@ def test_sampling_latent_prior_and_wgan_smoke() -> None:
     model = _small_model(float(np.min(tau_levels)), float(np.max(tau_levels)))
     latents = encode_target_latents(model, masses, positions, batch_size=3, device="cpu")
     assert latents.shape == (6, 16)
+    calibration = fit_score_calibration_against_mixture_oracle(
+        model,
+        masses,
+        positions,
+        labels,
+        tau_levels=tau_levels[:1],
+        query_modes=("uniform",),
+        max_samples=2,
+        batch_size=2,
+        device="cpu",
+    )
 
     prior = fit_gaussian_latent_prior(latents, labels, diagonal=True)
     z_sample, y_sample = sample_gaussian_latent_prior(prior, labels=np.asarray([0, 1, 0]), rng=np.random.default_rng(2))
@@ -169,6 +208,8 @@ def test_sampling_latent_prior_and_wgan_smoke() -> None:
         state_projection="none",
         langevin_alpha=1e-5,
         final_polish_steps=0,
+        score_calibration=calibration,
+        oracle_prefix_levels=1,
         batch_size=2,
         device="cpu",
         rng=np.random.default_rng(3),
@@ -176,6 +217,22 @@ def test_sampling_latent_prior_and_wgan_smoke() -> None:
     assert generated.positions.shape == positions[:2].shape
     metrics = paired_chamfer_reconstruction_metrics(generated.positions, positions[:2], labels[:2])
     assert "mean_chamfer" in metrics
+    hybrid_rows = evaluate_hybrid_oracle_neural_reconstruction(
+        model,
+        masses[:2],
+        positions[:2],
+        labels[:2],
+        tau_levels=tau_levels,
+        prefix_levels=(0, 1),
+        max_samples=2,
+        steps_per_level=1,
+        langevin_alpha=1e-5,
+        batch_size=2,
+        score_calibration=calibration,
+        device="cpu",
+        rng=np.random.default_rng(5),
+    )
+    assert len(hybrid_rows) == 2
 
     oracle_generated = sample_oracle_mixture_annealed_dynamics(
         target_masses=masses[:2],
