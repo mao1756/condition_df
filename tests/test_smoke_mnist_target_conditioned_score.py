@@ -52,7 +52,9 @@ from mnist.target_conditioned_score import (
     sample_wgan_latent_prior,
     target_conditioned_score_matching_loss,
     train_latent_wgan_gp,
+    train_latent_only_student_from_teacher,
     train_target_conditioned_score_model,
+    evaluate_latent_sensitivity,
 )
 
 
@@ -93,6 +95,8 @@ def _small_model_config(tau_min: float, tau_max: float) -> dict[str, object]:
         "use_target_grid_conditioning": True,
         "target_grid_feature_dim": 8,
         "target_grid_dropout_probability": 0.10,
+        "use_latent_raster_decoder": True,
+        "latent_raster_hidden_dim": 32,
         "measure_gate_init": -5.0,
         "measure_gate_max": 0.10,
     }
@@ -151,6 +155,7 @@ def test_forward_loss_and_training_smoke() -> None:
         direct_query_modes=("noised_target", "uniform"),
         freeze_measure_branch_epochs=0,
         measure_gate_regularization=1e-3,
+        latent_raster_loss_weight=0.1,
         device="cpu",
         verbose=False,
     )
@@ -168,6 +173,36 @@ def test_forward_loss_and_training_smoke() -> None:
         device="cpu",
     )
     assert "loss_ratio_vs_zero" in eval_metrics
+    z = model.encode_target(batch_masses, clean)
+    raster = model.predict_target_raster_from_latent(z)
+    assert raster.shape[0] == 2 and raster.ndim == 4
+    raster_loss, raster_metrics = model.latent_raster_reconstruction_loss(z, batch_masses, clean)
+    assert torch.isfinite(raster_loss)
+    assert "latent_raster_loss" in raster_metrics
+
+    student = TargetConditionedScoreModel(**_small_model_config(float(np.min(tau_levels)), float(np.max(tau_levels))))
+    student_history = train_latent_only_student_from_teacher(
+        model,
+        student,
+        masses,
+        positions,
+        labels,
+        val_masses=masses,
+        val_positions=positions,
+        val_labels=labels,
+        tau_levels=tau_levels[:1],
+        epochs=1,
+        batch_size=4,
+        latent_raster_loss_weight=0.1,
+        query_modes=("uniform",),
+        device="cpu",
+        verbose=False,
+    )
+    assert len(student_history["train_loss"]) == 1
+    sensitivity = evaluate_latent_sensitivity(
+        student, masses, positions, labels, tau_levels=tau_levels[:1], max_samples=4, batch_size=2, device="cpu"
+    )
+    assert "wrong_latent_relative_change" in sensitivity
 
 
 def test_sampling_and_latent_priors_smoke() -> None:

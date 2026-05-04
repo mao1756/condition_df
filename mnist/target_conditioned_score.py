@@ -84,6 +84,7 @@ __all__ = [
     "load_target_conditioned_experiment_checkpoint",
     "TargetConditionedScoreModel",
     "TargetPointCloudEncoder",
+    "LatentRasterDecoder",
     "NoisySetEquivariantEncoder",
     "GaussianLatentPrior",
     "EmpiricalLatentPrior",
@@ -107,6 +108,8 @@ __all__ = [
     "evaluate_model_vs_mixture_oracle",
     "fit_score_calibration_against_mixture_oracle",
     "train_target_conditioned_score_model",
+    "train_latent_only_student_from_teacher",
+    "evaluate_latent_sensitivity",
     "encode_target_latents",
     "sample_target_conditioned_annealed_dynamics",
     "sample_empirical_mixture_oracle_annealed_dynamics",
@@ -481,6 +484,56 @@ class NoisySetEquivariantEncoder(nn.Module):
         return self.output_projection(h)
 
 
+class LatentRasterDecoder(nn.Module):
+    """Decode a global target latent into a rasterized target-contour feature image.
+
+    This is a lightweight bridge between the successful target-grid reconstruction
+    path and true latent-only generation: at generation time we no longer have
+    ``target_positions``, so the model can synthesize an approximate target raster
+    from ``z`` and feed it through the same target-grid feature branch.
+    """
+
+    def __init__(
+        self,
+        *,
+        latent_dim: int,
+        grid_size: int,
+        out_channels: int = 2,
+        hidden_dim: int = 256,
+        label_dim: int = 0,
+    ) -> None:
+        super().__init__()
+        if latent_dim <= 0 or grid_size <= 0 or out_channels <= 0 or hidden_dim <= 0:
+            raise ValueError("latent_dim, grid_size, out_channels and hidden_dim must be positive")
+        self.latent_dim = int(latent_dim)
+        self.grid_size = int(grid_size)
+        self.out_channels = int(out_channels)
+        self.hidden_dim = int(hidden_dim)
+        self.label_dim = int(label_dim)
+        self.net = nn.Sequential(
+            nn.Linear(self.latent_dim + self.label_dim, self.hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.hidden_dim, self.out_channels * self.grid_size * self.grid_size),
+        )
+
+    def forward(self, latents: Tensor, label_features: Optional[Tensor] = None) -> Tensor:
+        if latents.ndim != 2 or latents.shape[1] != self.latent_dim:
+            raise ValueError(f"latents must have shape (B, {self.latent_dim})")
+        if self.label_dim > 0:
+            if label_features is None:
+                raise ValueError("label_features are required for this latent raster decoder")
+            if label_features.ndim != 2 or label_features.shape != (latents.shape[0], self.label_dim):
+                raise ValueError(f"label_features must have shape (B, {self.label_dim})")
+            inputs = torch.cat([latents, label_features.to(device=latents.device, dtype=latents.dtype)], dim=1)
+        else:
+            inputs = latents
+        raster_logits = self.net(inputs)
+        raster = torch.sigmoid(raster_logits.reshape(latents.shape[0], self.out_channels, self.grid_size, self.grid_size))
+        return raster
+
+
 class TargetConditionedScoreModel(nn.Module):
     r"""Measure-aware target-conditioned score model.
 
@@ -518,6 +571,8 @@ class TargetConditionedScoreModel(nn.Module):
         use_target_grid_conditioning: bool = False,
         target_grid_feature_dim: Optional[int] = None,
         target_grid_dropout_probability: float = 0.0,
+        use_latent_raster_decoder: bool = False,
+        latent_raster_hidden_dim: int = 256,
         measure_gate_init: float = -3.0,
         measure_gate_max: float = 1.0,
     ) -> None:
@@ -549,6 +604,7 @@ class TargetConditionedScoreModel(nn.Module):
         self.use_measure_residual = bool(use_measure_residual)
         self.use_target_grid_conditioning = bool(use_target_grid_conditioning)
         self.target_grid_dropout_probability = float(target_grid_dropout_probability)
+        self.use_latent_raster_decoder = bool(use_latent_raster_decoder)
         self.measure_gate_max = float(measure_gate_max)
         self.measure_residual_active = True
 
@@ -603,9 +659,20 @@ class TargetConditionedScoreModel(nn.Module):
                 base_channels=base_channels,
                 padding_mode="zeros",
             )
+            if self.use_latent_raster_decoder:
+                self.latent_raster_decoder = LatentRasterDecoder(
+                    latent_dim=latent_dim,
+                    grid_size=grid_size,
+                    out_channels=raster_channels,
+                    hidden_dim=latent_raster_hidden_dim,
+                    label_dim=0,
+                )
+            else:
+                self.latent_raster_decoder = None
             target_local_feature_dim = target_grid_dim
         else:
             self.target_feature_unet = None
+            self.latent_raster_decoder = None
             target_local_feature_dim = 0
         self.target_grid_feature_dim = int(target_local_feature_dim)
         self.set_encoder = NoisySetEquivariantEncoder(
@@ -664,6 +731,48 @@ class TargetConditionedScoreModel(nn.Module):
 
     def encode_target(self, target_masses: Tensor, target_positions: Tensor) -> Tensor:
         return self.target_encoder(target_masses, target_positions)
+
+    def _rasterize_target_measure(self, target_masses: Tensor, target_positions: Tensor) -> Tensor:
+        _validate_probability_masses(target_masses, name="target_masses")
+        _validate_positions_tensor(target_positions, target_masses, name="target_positions")
+        return _rasterize_weighted_point_clouds_torch(
+            target_masses,
+            target_positions,
+            grid_size=self.grid_size,
+            periodic=False,
+            include_occupancy=self.include_occupancy_channel,
+        )
+
+    def predict_target_raster_from_latent(self, target_latents: Tensor) -> Tensor:
+        """Decode a target raster from ``z`` when no target positions are available."""
+        if self.latent_raster_decoder is None:
+            raise RuntimeError("latent_raster_decoder is not enabled")
+        return self.latent_raster_decoder(target_latents)
+
+    def latent_raster_reconstruction_loss(
+        self,
+        target_latents: Tensor,
+        target_masses: Tensor,
+        target_positions: Tensor,
+        *,
+        loss: str = "mse",
+    ) -> tuple[Tensor, dict[str, float]]:
+        """Auxiliary loss that forces the global latent to encode target geometry."""
+        if self.latent_raster_decoder is None:
+            zero = target_positions.new_tensor(0.0)
+            return zero, {"latent_raster_loss": 0.0}
+        true_raster = self._rasterize_target_measure(
+            target_masses.to(device=target_positions.device, dtype=target_positions.dtype),
+            target_positions,
+        ).detach()
+        pred_raster = self.predict_target_raster_from_latent(target_latents)
+        if loss == "mse":
+            value = F.mse_loss(pred_raster, true_raster)
+        elif loss == "bce":
+            value = F.binary_cross_entropy(pred_raster.clamp(1e-6, 1.0 - 1e-6), true_raster.clamp(0.0, 1.0))
+        else:
+            raise ValueError("loss must be 'mse' or 'bce'")
+        return value, {"latent_raster_loss": float(value.detach().item())}
 
     def _prepare_context(
         self,
@@ -744,15 +853,13 @@ class TargetConditionedScoreModel(nn.Module):
                     target_masses_for_grid = masses.new_full((batch_size, target_num_points), 1.0 / max(target_num_points, 1))
                 else:
                     target_masses_for_grid = target_masses_tensor
-                _validate_probability_masses(target_masses_for_grid, name="target_masses")
-                _validate_positions_tensor(target_positions_tensor, target_masses_for_grid, name="target_positions")
-                target_raster = _rasterize_weighted_point_clouds_torch(
-                    target_masses_for_grid,
-                    target_positions_tensor,
-                    grid_size=self.grid_size,
-                    periodic=False,
-                    include_occupancy=self.include_occupancy_channel,
-                )
+                target_raster = self._rasterize_target_measure(target_masses_for_grid, target_positions_tensor)
+            elif self.latent_raster_decoder is not None:
+                target_raster = self.predict_target_raster_from_latent(latents)
+            else:
+                target_raster = None
+
+            if target_raster is not None:
                 context_grid = context[:, :, None, None].expand(batch_size, context.shape[1], self.grid_size, self.grid_size)
                 target_feature_grid = self.target_feature_unet(torch.cat([target_raster, context_grid], dim=1))
                 target_local_features = _sample_feature_grid_at_positions(target_feature_grid, positions, periodic=False)
@@ -1633,6 +1740,7 @@ def train_target_conditioned_score_model(
     oracle_replay_diffusion_temperature: float = 1.0,
     oracle_replay_score_scale: float = 1.0,
     measure_gate_regularization: float = 0.0,
+    latent_raster_loss_weight: float = 0.0,
     freeze_measure_branch_epochs: int = 0,
     early_stopping_patience: Optional[int] = None,
     lr_scheduler_patience: Optional[int] = 10,
@@ -1661,6 +1769,8 @@ def train_target_conditioned_score_model(
         raise ValueError("oracle_replay_weight must be positive")
     if measure_gate_regularization < 0.0:
         raise ValueError("measure_gate_regularization must be non-negative")
+    if latent_raster_loss_weight < 0.0:
+        raise ValueError("latent_raster_loss_weight must be non-negative")
     tau_levels_arr = np.asarray(tau_levels, dtype=np.float64).reshape(-1)
     if tau_levels_arr.size == 0 or not np.all(np.isfinite(tau_levels_arr)) or np.any(tau_levels_arr <= 0.0):
         raise ValueError("tau_levels must be positive and finite")
@@ -1696,6 +1806,7 @@ def train_target_conditioned_score_model(
         "val_replay_fraction": [],
         "lr": [],
         "measure_gate": [],
+        "latent_raster_loss": [],
     }
     best_monitor = float("inf")
     best_state: Optional[dict[str, Tensor]] = None
@@ -1706,7 +1817,7 @@ def train_target_conditioned_score_model(
         if hasattr(model, "set_measure_residual_active"):
             model.set_measure_residual_active(epoch >= int(freeze_measure_branch_epochs))
         model.train()
-        total_loss = total_sample_loss = 0.0
+        total_loss = total_sample_loss = total_latent_raster_loss = 0.0
         total_items = direct_items = replay_items = 0
         for batch_masses, batch_positions, batch_labels in loader:
             batch_masses = batch_masses.to(model_device)
@@ -1742,6 +1853,15 @@ def train_target_conditioned_score_model(
             )
             loss, metrics = target_conditioned_score_matching_loss(pred_scaled, target_scaled, batch_masses, tau_used, time_weighting=time_weighting)
             objective_loss = loss * (float(oracle_replay_weight) if target_kind == "oracle_replay" else 1.0)
+            latent_raster_loss_value = batch_positions.new_tensor(0.0)
+            if latent_raster_loss_weight > 0.0 and getattr(model, "latent_raster_decoder", None) is not None:
+                target_latents_for_raster = model.encode_target(batch_masses, batch_positions)
+                latent_raster_loss_value, _ = model.latent_raster_reconstruction_loss(
+                    target_latents_for_raster,
+                    batch_masses,
+                    batch_positions,
+                )
+                objective_loss = objective_loss + float(latent_raster_loss_weight) * latent_raster_loss_value
             if measure_gate_regularization > 0.0 and getattr(model, "measure_gate_logit", None) is not None:
                 gate = model._measure_residual_gate_tensor().to(device=objective_loss.device, dtype=objective_loss.dtype)
                 objective_loss = objective_loss + float(measure_gate_regularization) * gate.square()
@@ -1753,6 +1873,7 @@ def train_target_conditioned_score_model(
             bsz = int(batch_masses.shape[0])
             total_loss += float(objective_loss.detach().item()) * bsz
             total_sample_loss += float(metrics["sample_loss"]) * bsz
+            total_latent_raster_loss += float(latent_raster_loss_value.detach().item()) * bsz
             total_items += bsz
             direct_items += bsz if target_kind == "direct_mixture" else 0
             replay_items += bsz if target_kind == "oracle_replay" else 0
@@ -1761,6 +1882,7 @@ def train_target_conditioned_score_model(
         history["train_sample_loss"].append(total_sample_loss / max(total_items, 1))
         history["train_direct_fraction"].append(float(direct_items / max(total_items, 1)))
         history["train_replay_fraction"].append(float(replay_items / max(total_items, 1)))
+        history["latent_raster_loss"].append(float(total_latent_raster_loss / max(total_items, 1)))
 
         if val_masses is not None and val_positions is not None:
             val_metrics = evaluate_target_conditioned_score_model(
@@ -1834,6 +1956,230 @@ def train_target_conditioned_score_model(
         model.set_measure_residual_active(True)
     history["best_epoch"] = [float(best_epoch + 1)]
     history["best_monitor"] = [float(best_monitor)]
+    return history
+
+
+
+def _weighted_sample_loss(pred_scaled: Tensor, target_scaled: Tensor, masses: Tensor) -> Tensor:
+    return torch.mean(torch.sum(masses * torch.sum((pred_scaled - target_scaled).square(), dim=-1), dim=1))
+
+
+@torch.no_grad()
+def evaluate_latent_sensitivity(
+    model: TargetConditionedScoreModel,
+    masses: np.ndarray,
+    positions: np.ndarray,
+    labels: Optional[np.ndarray],
+    *,
+    tau_levels: Sequence[float] | np.ndarray,
+    max_samples: int = 64,
+    batch_size: int = 32,
+    query_mode: str = "uniform",
+    device: Optional[str | torch.device] = None,
+) -> dict[str, float]:
+    """Measure how much the score changes when target latents are permuted/zeroed."""
+    masses_arr = np.asarray(masses, dtype=np.float32)[:max_samples]
+    positions_arr = np.asarray(positions, dtype=np.float32)[:max_samples]
+    if labels is None:
+        labels_arr = np.zeros((len(masses_arr),), dtype=np.int64)
+    else:
+        labels_arr = np.asarray(labels, dtype=np.int64).reshape(-1)[:max_samples]
+    tau_arr = np.asarray(tau_levels, dtype=np.float64).reshape(-1)
+    if len(tau_arr) == 0:
+        raise ValueError("tau_levels must not be empty")
+    model_device = _resolve_device(device)
+    was_training = model.training
+    model = model.to(model_device)
+    model.eval()
+    loader = _make_tensor_loader(masses_arr, positions_arr, labels_arr, batch_size=batch_size, shuffle=False)
+    true_norm = wrong_diff = zero_diff = 0.0
+    total = 0
+    for batch_masses, batch_positions, batch_labels in loader:
+        batch_masses = batch_masses.to(model_device)
+        batch_positions = batch_positions.to(model_device)
+        batch_labels = batch_labels.to(model_device)
+        tau = _sample_tau_from_levels(int(batch_masses.shape[0]), tau_arr, device=model_device, dtype=batch_positions.dtype)
+        if query_mode == "noised_target":
+            query, _, _ = perturb_target_conditioned_positions(batch_masses, batch_positions, tau, projection="none")
+        elif query_mode == "center_gaussian":
+            query = 0.5 + 0.25 * torch.randn_like(batch_positions)
+        elif query_mode == "fixed_center":
+            query = torch.full_like(batch_positions, 0.5)
+        elif query_mode == "uniform":
+            query = torch.rand_like(batch_positions)
+        else:
+            raise ValueError("query_mode must be one of {'uniform','center_gaussian','fixed_center','noised_target'}")
+        z_true = model.encode_target(batch_masses, batch_positions)
+        perm = torch.roll(torch.arange(z_true.shape[0], device=model_device), shifts=1)
+        z_wrong = z_true[perm]
+        z_zero = torch.zeros_like(z_true)
+        s_true = model.predict_scaled_score(batch_masses, query, tau, target_latents=z_true, labels=batch_labels)
+        s_wrong = model.predict_scaled_score(batch_masses, query, tau, target_latents=z_wrong, labels=batch_labels)
+        s_zero = model.predict_scaled_score(batch_masses, query, tau, target_latents=z_zero, labels=batch_labels)
+        weights = batch_masses.unsqueeze(-1)
+        norm = torch.sqrt(torch.sum(weights * s_true.square(), dim=(1, 2)).clamp_min(1e-12))
+        wrong = torch.sqrt(torch.sum(weights * (s_true - s_wrong).square(), dim=(1, 2)).clamp_min(0.0))
+        zero = torch.sqrt(torch.sum(weights * (s_true - s_zero).square(), dim=(1, 2)).clamp_min(0.0))
+        n = int(batch_masses.shape[0])
+        true_norm += float(torch.sum(norm).item())
+        wrong_diff += float(torch.sum(wrong / norm).item())
+        zero_diff += float(torch.sum(zero / norm).item())
+        total += n
+    if was_training:
+        model.train()
+    return {
+        "mean_scaled_score_norm": true_norm / max(total, 1),
+        "wrong_latent_relative_change": wrong_diff / max(total, 1),
+        "zero_latent_relative_change": zero_diff / max(total, 1),
+        "num_samples": float(total),
+    }
+
+
+def train_latent_only_student_from_teacher(
+    teacher: TargetConditionedScoreModel,
+    student: TargetConditionedScoreModel,
+    masses: np.ndarray,
+    positions: np.ndarray,
+    labels: Optional[np.ndarray] = None,
+    *,
+    val_masses: Optional[np.ndarray] = None,
+    val_positions: Optional[np.ndarray] = None,
+    val_labels: Optional[np.ndarray] = None,
+    tau_levels: Sequence[float] | np.ndarray,
+    epochs: int = 40,
+    batch_size: int = 64,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-4,
+    query_modes: Sequence[str] = ("uniform", "center_gaussian", "noised_target"),
+    direct_query_center_std: float = 0.35,
+    latent_raster_loss_weight: float = 1.0,
+    teacher_temperature: float = 1.0,
+    max_grad_norm: Optional[float] = 5.0,
+    device: Optional[str | torch.device] = None,
+    verbose: bool = True,
+) -> dict[str, list[float]]:
+    """Distill a latent-only student from a successful target-grid teacher.
+
+    The teacher receives ``target_positions`` and can use target-grid features.
+    The student encodes the same target into ``z`` but is called with
+    ``target_latents`` only.  If the student has ``use_latent_raster_decoder``,
+    its generated target raster is used during latent-only sampling.
+    """
+    if epochs <= 0 or batch_size <= 0:
+        raise ValueError("epochs and batch_size must be positive")
+    if lr <= 0.0 or weight_decay < 0.0 or latent_raster_loss_weight < 0.0:
+        raise ValueError("lr must be positive and regularization weights non-negative")
+    tau_arr = np.asarray(tau_levels, dtype=np.float64).reshape(-1)
+    if tau_arr.size == 0 or not np.all(np.isfinite(tau_arr)) or np.any(tau_arr <= 0.0):
+        raise ValueError("tau_levels must be positive and finite")
+    model_device = _resolve_device(device)
+    teacher = teacher.to(model_device)
+    student = student.to(model_device)
+    teacher.eval()
+    student.train()
+    loader = _make_tensor_loader(masses, positions, labels, batch_size=batch_size, shuffle=True)
+    optimizer = torch.optim.Adam(student.parameters(), lr=lr, weight_decay=weight_decay)
+    history: dict[str, list[float]] = {"train_loss": [], "train_distill_loss": [], "latent_raster_loss": [], "val_distill_loss": []}
+
+    def _batch_query(batch_masses: Tensor, batch_positions: Tensor, tau: Tensor) -> Tensor:
+        mode = str(query_modes[int(torch.randint(0, len(query_modes), ()).item())])
+        if mode == "noised_target":
+            q, _, _ = perturb_target_conditioned_positions(batch_masses, batch_positions, tau, projection="none")
+            return q
+        if mode == "uniform":
+            return torch.rand_like(batch_positions)
+        if mode == "fixed_center":
+            return torch.full_like(batch_positions, 0.5)
+        if mode == "center_gaussian":
+            return 0.5 + float(direct_query_center_std) * torch.randn_like(batch_positions)
+        raise ValueError(f"unknown query mode {mode!r}")
+
+    for epoch in range(int(epochs)):
+        student.train()
+        total = total_distill = total_raster = 0.0
+        total_items = 0
+        for batch_masses, batch_positions, batch_labels in loader:
+            batch_masses = batch_masses.to(model_device)
+            batch_positions = batch_positions.to(model_device)
+            batch_labels = batch_labels.to(model_device)
+            tau = _sample_tau_from_levels(int(batch_masses.shape[0]), tau_arr, device=model_device, dtype=batch_positions.dtype)
+            query = _batch_query(batch_masses, batch_positions, tau)
+            with torch.no_grad():
+                teacher_scaled = teacher.predict_scaled_score(
+                    batch_masses,
+                    query,
+                    tau,
+                    target_positions=batch_positions,
+                    target_masses=batch_masses,
+                    labels=batch_labels,
+                )
+                if teacher_temperature != 1.0:
+                    teacher_scaled = float(teacher_temperature) * teacher_scaled
+            student_latents = student.encode_target(batch_masses, batch_positions)
+            student_scaled = student.predict_scaled_score(
+                batch_masses,
+                query,
+                tau,
+                target_latents=student_latents,
+                labels=batch_labels,
+            )
+            distill_loss = _weighted_sample_loss(student_scaled, teacher_scaled, batch_masses)
+            raster_loss = batch_positions.new_tensor(0.0)
+            if latent_raster_loss_weight > 0.0 and getattr(student, "latent_raster_decoder", None) is not None:
+                raster_loss, _ = student.latent_raster_reconstruction_loss(student_latents, batch_masses, batch_positions)
+            loss = distill_loss + float(latent_raster_loss_weight) * raster_loss
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            if max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(student.parameters(), float(max_grad_norm))
+            optimizer.step()
+            bsz = int(batch_masses.shape[0])
+            total += float(loss.detach().item()) * bsz
+            total_distill += float(distill_loss.detach().item()) * bsz
+            total_raster += float(raster_loss.detach().item()) * bsz
+            total_items += bsz
+        history["train_loss"].append(total / max(total_items, 1))
+        history["train_distill_loss"].append(total_distill / max(total_items, 1))
+        history["latent_raster_loss"].append(total_raster / max(total_items, 1))
+
+        if val_masses is not None and val_positions is not None:
+            val_loader = _make_tensor_loader(val_masses, val_positions, val_labels, batch_size=batch_size, shuffle=False)
+            val_loss = 0.0
+            val_items = 0
+            student.eval()
+            with torch.no_grad():
+                for batch_masses, batch_positions, batch_labels in val_loader:
+                    batch_masses = batch_masses.to(model_device)
+                    batch_positions = batch_positions.to(model_device)
+                    batch_labels = batch_labels.to(model_device)
+                    tau = _sample_tau_from_levels(int(batch_masses.shape[0]), tau_arr, device=model_device, dtype=batch_positions.dtype)
+                    query = _batch_query(batch_masses, batch_positions, tau)
+                    teacher_scaled = teacher.predict_scaled_score(
+                        batch_masses,
+                        query,
+                        tau,
+                        target_positions=batch_positions,
+                        target_masses=batch_masses,
+                        labels=batch_labels,
+                    )
+                    z = student.encode_target(batch_masses, batch_positions)
+                    pred = student.predict_scaled_score(batch_masses, query, tau, target_latents=z, labels=batch_labels)
+                    batch_loss = _weighted_sample_loss(pred, teacher_scaled, batch_masses)
+                    bsz = int(batch_masses.shape[0])
+                    val_loss += float(batch_loss.item()) * bsz
+                    val_items += bsz
+            history["val_distill_loss"].append(val_loss / max(val_items, 1))
+        else:
+            history["val_distill_loss"].append(float("nan"))
+        if verbose and (epoch == 0 or (epoch + 1) % max(1, epochs // 10) == 0 or epoch + 1 == epochs):
+            print(
+                f"[latent-student] epoch {epoch + 1:04d}/{epochs}: "
+                f"loss={history['train_loss'][-1]:.6g} "
+                f"distill={history['train_distill_loss'][-1]:.6g} "
+                f"raster={history['latent_raster_loss'][-1]:.6g} "
+                f"val={history['val_distill_loss'][-1]:.6g}"
+            )
+    student.train()
     return history
 
 
