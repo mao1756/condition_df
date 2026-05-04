@@ -55,6 +55,8 @@ from mnist.target_conditioned_score import (
     train_latent_only_student_from_teacher,
     train_target_conditioned_score_model,
     evaluate_latent_sensitivity,
+    latent_collapse_diagnostics,
+    latent_vicreg_regularization,
 )
 
 
@@ -156,8 +158,13 @@ def test_forward_loss_and_training_smoke() -> None:
         freeze_measure_branch_epochs=0,
         measure_gate_regularization=1e-3,
         latent_raster_loss_weight=0.1,
+        latent_raster_loss="bce_dice",
+        latent_variance_weight=0.1,
+        latent_covariance_weight=0.01,
+        latent_classification_weight=0.05,
         device="cpu",
         verbose=False,
+        show_progress=False,
     )
     assert len(history["train_loss"]) == 1
     assert "train_replay_fraction" in history
@@ -179,6 +186,10 @@ def test_forward_loss_and_training_smoke() -> None:
     raster_loss, raster_metrics = model.latent_raster_reconstruction_loss(z, batch_masses, clean)
     assert torch.isfinite(raster_loss)
     assert "latent_raster_loss" in raster_metrics
+    class_loss, class_metrics = model.latent_classification_loss(z, batch_labels)
+    assert torch.isfinite(class_loss) and "latent_class_accuracy" in class_metrics
+    vicreg_loss, vicreg_metrics = latent_vicreg_regularization(z, variance_weight=0.1, covariance_weight=0.01)
+    assert torch.isfinite(vicreg_loss) and "latent_mean_std" in vicreg_metrics
 
     student = TargetConditionedScoreModel(**_small_model_config(float(np.min(tau_levels)), float(np.max(tau_levels))))
     student_history = train_latent_only_student_from_teacher(
@@ -194,9 +205,14 @@ def test_forward_loss_and_training_smoke() -> None:
         epochs=1,
         batch_size=4,
         latent_raster_loss_weight=0.1,
+        latent_raster_loss="bce_dice",
+        latent_variance_weight=0.1,
+        latent_covariance_weight=0.01,
+        latent_classification_weight=0.05,
         query_modes=("uniform",),
         device="cpu",
         verbose=False,
+        show_progress=False,
     )
     assert len(student_history["train_loss"]) == 1
     sensitivity = evaluate_latent_sensitivity(
@@ -212,6 +228,8 @@ def test_sampling_and_latent_priors_smoke() -> None:
     model = _small_model(float(np.min(tau_levels)), float(np.max(tau_levels)))
     latents = encode_target_latents(model, masses, positions, batch_size=3, device="cpu")
     assert latents.shape == (6, 16)
+    collapse = latent_collapse_diagnostics(latents, labels, max_samples=6, rng=np.random.default_rng(17))
+    assert "mean_pairwise_distance" in collapse
     calibration = None
 
     prior = fit_gaussian_latent_prior(latents, labels, diagonal=True)
@@ -294,6 +312,7 @@ def test_sampling_and_latent_priors_smoke() -> None:
         batch_size=2,
         device="cpu",
         rng=np.random.default_rng(25),
+        show_progress=False,
     )
     assert latent_only_generated.positions.shape == positions[:2].shape
 
@@ -312,6 +331,7 @@ def test_sampling_and_latent_priors_smoke() -> None:
         batch_size=2,
         device="cpu",
         rng=np.random.default_rng(3),
+        show_progress=False,
     )
     assert generated.positions.shape == positions[:2].shape
     metrics = paired_chamfer_reconstruction_metrics(generated.positions, positions[:2], labels[:2])
@@ -344,6 +364,7 @@ def test_sampling_and_latent_priors_smoke() -> None:
         batch_size=2,
         device="cpu",
         rng=np.random.default_rng(4),
+        show_progress=False,
     )
     assert oracle_generated.positions.shape == positions[:2].shape
 
@@ -409,6 +430,8 @@ def test_checkpoint_round_trip_smoke() -> None:
         clean = torch.tensor(positions[:2], dtype=torch.float32)
         batch_labels = torch.tensor(labels[:2], dtype=torch.long)
         tau = torch.full((2,), float(tau_levels[0]), dtype=torch.float32)
+        model.eval()
+        loaded["model"].eval()
         pred_before = model.predict_scaled_score(
             batch_masses,
             clean,
