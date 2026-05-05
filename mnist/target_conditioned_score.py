@@ -177,6 +177,7 @@ __all__ = [
     "train_latent_wgan_gp",
     "sample_wgan_latent_prior",
     "paired_chamfer_reconstruction_metrics",
+    "contour_thickness_diagnostics",
 ]
 
 
@@ -2798,6 +2799,9 @@ def train_latent_only_student_from_teacher(
     latent_covariance_weight: float = 0.05,
     latent_classification_weight: float = 0.1,
     latent_variance_target: float = 1.0,
+    posterior_mean_loss_weight: float = 0.0,
+    posterior_mean_query_modes: Sequence[str] = ("noised_target", "center_gaussian"),
+    posterior_mean_target_norm_clip: Optional[float] = None,
     teacher_temperature: float = 1.0,
     latent_autoencoder: Optional[LatentShapeAutoencoder] = None,
     initialize_from_latent_autoencoder: bool = False,
@@ -2826,6 +2830,8 @@ def train_latent_only_student_from_teacher(
         raise ValueError("lr must be positive and regularization weights non-negative")
     if latent_variance_weight < 0.0 or latent_covariance_weight < 0.0 or latent_classification_weight < 0.0:
         raise ValueError("latent regularization weights must be non-negative")
+    if posterior_mean_loss_weight < 0.0:
+        raise ValueError("posterior_mean_loss_weight must be non-negative")
     if freeze_latent_modules_epochs < 0:
         raise ValueError("freeze_latent_modules_epochs must be non-negative")
     if validation_chamfer_every is not None and int(validation_chamfer_every) <= 0:
@@ -2856,6 +2862,7 @@ def train_latent_only_student_from_teacher(
         "latent_class_loss": [],
         "latent_class_accuracy": [],
         "latent_mean_std": [],
+        "posterior_mean_loss": [],
         "latent_modules_frozen": [],
         "val_distill_loss": [],
         "val_latent_only_chamfer": [],
@@ -2942,6 +2949,7 @@ def train_latent_only_student_from_teacher(
         _set_latent_modules_trainable(epoch >= int(freeze_latent_modules_epochs))
         total = total_distill = total_raster = 0.0
         total_var = total_cov = total_class = total_class_acc = total_std = 0.0
+        total_posterior = 0.0
         total_items = 0
         epoch_iter = _optional_tqdm(loader, enabled=show_progress, desc=f"{progress_desc} epoch {epoch + 1}/{epochs}", leave=False)
         for batch_masses, batch_positions, batch_labels in epoch_iter:
@@ -2970,6 +2978,42 @@ def train_latent_only_student_from_teacher(
                 labels=batch_labels,
             )
             distill_loss = _weighted_sample_loss(student_scaled, teacher_scaled, batch_masses)
+            posterior_loss = batch_positions.new_tensor(0.0)
+            if posterior_mean_loss_weight > 0.0:
+                if len(posterior_mean_query_modes) == 0:
+                    raise ValueError("posterior_mean_query_modes must be non-empty when posterior loss is enabled")
+                posterior_query = _batch_query(batch_masses, batch_positions, tau)
+                # Prefer modes that emphasize final contour snapping.  If the sampled
+                # query mode is not in the allowed set, resample once from the allowed set.
+                mode = str(posterior_mean_query_modes[int(torch.randint(0, len(posterior_mean_query_modes), ()).item())])
+                if mode != "same_as_training":
+                    original_modes = query_modes
+                    try:
+                        query_modes = (mode,)  # type: ignore[assignment]
+                        posterior_query = _batch_query(batch_masses, batch_positions, tau)
+                    finally:
+                        query_modes = original_modes  # type: ignore[assignment]
+                with torch.no_grad():
+                    _, _, oracle_posterior_mean = empirical_mixture_scaled_score_target(
+                        posterior_query,
+                        batch_positions,
+                        batch_masses,
+                        tau,
+                        target_masses=batch_masses,
+                        chunk_size=256,
+                        target_norm_clip=posterior_mean_target_norm_clip,
+                        return_physical_score=True,
+                    )
+                posterior_pred_scaled = student.predict_scaled_score(
+                    batch_masses,
+                    posterior_query,
+                    tau,
+                    target_latents=student_latents,
+                    labels=batch_labels,
+                )
+                sigma = torch.sqrt((2.0 * tau[:, None]) / batch_masses).clamp_min(1e-12)
+                predicted_posterior_mean = posterior_query + sigma.unsqueeze(-1) * posterior_pred_scaled
+                posterior_loss = torch.mean(torch.sum(batch_masses.unsqueeze(-1) * (predicted_posterior_mean - oracle_posterior_mean).square(), dim=(1, 2)))
             raster_loss = batch_positions.new_tensor(0.0)
             latent_var_value = batch_positions.new_tensor(0.0)
             latent_cov_value = batch_positions.new_tensor(0.0)
@@ -2986,7 +3030,7 @@ def train_latent_only_student_from_teacher(
                     dice_weight=latent_raster_dice_weight,
                     blur_steps=latent_raster_blur_steps,
                 )
-            loss = distill_loss + float(latent_raster_loss_weight) * raster_loss
+            loss = distill_loss + float(latent_raster_loss_weight) * raster_loss + float(posterior_mean_loss_weight) * posterior_loss
             if latent_variance_weight > 0.0 or latent_covariance_weight > 0.0:
                 latent_reg, latent_reg_metrics = latent_vicreg_regularization(
                     student_latents,
@@ -3011,6 +3055,7 @@ def train_latent_only_student_from_teacher(
             total += float(loss.detach().item()) * bsz
             total_distill += float(distill_loss.detach().item()) * bsz
             total_raster += float(raster_loss.detach().item()) * bsz
+            total_posterior += float(posterior_loss.detach().item()) * bsz
             total_var += float(latent_var_value.detach().item()) * bsz
             total_cov += float(latent_cov_value.detach().item()) * bsz
             total_class += float(latent_class_value.detach().item()) * bsz
@@ -3021,6 +3066,7 @@ def train_latent_only_student_from_teacher(
         history["train_loss"].append(total / max(total_items, 1))
         history["train_distill_loss"].append(total_distill / max(total_items, 1))
         history["latent_raster_loss"].append(total_raster / max(total_items, 1))
+        history["posterior_mean_loss"].append(total_posterior / max(total_items, 1))
         history["latent_var_loss"].append(total_var / max(total_items, 1))
         history["latent_cov_loss"].append(total_cov / max(total_items, 1))
         history["latent_class_loss"].append(total_class / max(total_items, 1))
@@ -3071,6 +3117,7 @@ def train_latent_only_student_from_teacher(
                 f"loss={history['train_loss'][-1]:.6g} "
                 f"distill={history['train_distill_loss'][-1]:.6g} "
                 f"raster={history['latent_raster_loss'][-1]:.6g} "
+                f"post={history['posterior_mean_loss'][-1]:.6g} "
                 f"z_std={history['latent_mean_std'][-1]:.4f} "
                 f"z_cls={history['latent_class_accuracy'][-1]:.3f} "
                 f"val={history['val_distill_loss'][-1]:.6g} "
@@ -3265,6 +3312,10 @@ def sample_target_conditioned_annealed_dynamics(
     score_scale: float = 1.0,
     diffusion_temperature: float = 1.0,
     final_polish_steps: int = 0,
+    final_polish_temperature: float = 0.0,
+    final_polish_alpha: Optional[float] = None,
+    fine_level_count: int = 0,
+    fine_level_step_multiplier: int = 1,
     langevin_alpha: float = 5e-5,
     score_calibration: Optional[ScoreCalibration | dict[str, Any]] = None,
     score_norm_clip: Optional[float | Sequence[float] | np.ndarray] = None,
@@ -3295,6 +3346,12 @@ def sample_target_conditioned_annealed_dynamics(
         raise ValueError("score_scale must be positive and diffusion_temperature must be non-negative")
     if langevin_alpha <= 0.0:
         raise ValueError("langevin_alpha must be positive")
+    if final_polish_temperature < 0.0:
+        raise ValueError("final_polish_temperature must be non-negative")
+    if final_polish_alpha is not None and final_polish_alpha <= 0.0:
+        raise ValueError("final_polish_alpha must be positive when provided")
+    if fine_level_count < 0 or fine_level_step_multiplier <= 0:
+        raise ValueError("fine_level_count must be non-negative and fine_level_step_multiplier positive")
     if oracle_prefix_levels < 0 or oracle_suffix_levels < 0:
         raise ValueError("oracle prefix/suffix levels must be non-negative")
     allowed_schemes = {"theory_euler", "bridge", "langevin", "shape_gf_langevin", "oracle_shape_gf_langevin"}
@@ -3457,7 +3514,10 @@ def sample_target_conditioned_annealed_dynamics(
         tau_min = float(levels[-1])
         for level_id, tau_level in _optional_tqdm(list(enumerate(levels)), enabled=show_progress, desc=f"{progress_desc}: sigma levels", leave=False):
             level_oracle = _use_oracle_for_level(level_id)
-            for _ in _progress_range(int(steps_per_level), enabled=show_progress, desc=f"{progress_desc}: level {level_id + 1}/{len(levels)}", leave=False):
+            level_steps = int(steps_per_level)
+            if fine_level_count > 0 and level_id >= len(levels) - int(fine_level_count):
+                level_steps *= int(fine_level_step_multiplier)
+            for _ in _progress_range(level_steps, enabled=show_progress, desc=f"{progress_desc}: level {level_id + 1}/{len(levels)}", leave=False):
                 for start_idx in range(0, num_samples, batch_size):
                     stop = min(start_idx + batch_size, num_samples)
                     batch_masses = masses[start_idx:stop]
@@ -3481,8 +3541,11 @@ def sample_target_conditioned_annealed_dynamics(
         for level_id, tau_level in _optional_tqdm(list(enumerate(levels)), enabled=show_progress, desc=f"{progress_desc}: levels", leave=False):
             level_oracle = _use_oracle_for_level(level_id)
             tau_next_level = float(levels[level_id + 1]) if level_id + 1 < len(levels) else 0.0
-            dt = max((float(tau_level) - tau_next_level) / float(steps_per_level), float(tau_level) * 1e-4) if sampler_scheme == "theory_euler" else max(0.02 * float(tau_level), 1e-12)
-            for inner in range(int(steps_per_level)):
+            level_steps = int(steps_per_level)
+            if fine_level_count > 0 and level_id >= len(levels) - int(fine_level_count):
+                level_steps *= int(fine_level_step_multiplier)
+            dt = max((float(tau_level) - tau_next_level) / float(level_steps), float(tau_level) * 1e-4) if sampler_scheme == "theory_euler" else max(0.02 * float(tau_level), 1e-12)
+            for inner in range(level_steps):
                 tau_value = max(float(tau_level) - inner * dt, max(tau_next_level, 1e-12)) if sampler_scheme == "theory_euler" else float(tau_level)
                 for start_idx in range(0, num_samples, batch_size):
                     stop = min(start_idx + batch_size, num_samples)
@@ -3507,9 +3570,16 @@ def sample_target_conditioned_annealed_dynamics(
                 batch_positions = positions[start_idx:stop]
                 tau = torch.full((stop - start_idx,), tau_value, device=model_device, dtype=batch_positions.dtype)
                 score = _score_batch(batch_masses, batch_positions, tau, start_idx, stop, oracle=_use_oracle_for_level(level_id), tau_value=tau_value, level_index=level_id)
+                polish_alpha = float(final_polish_alpha) if final_polish_alpha is not None else float(langevin_alpha)
+                if final_polish_temperature > 0.0:
+                    sigma = torch.sqrt((2.0 * tau_value) / batch_masses).clamp_min(1e-12)
+                    sigma_min = torch.sqrt((2.0 * float(levels[-1])) / batch_masses).clamp_min(1e-12)
+                    ratio = (sigma / sigma_min).unsqueeze(-1)
+                    batch_positions = batch_positions + float(final_polish_temperature) * math.sqrt(polish_alpha) * ratio * torch.randn_like(batch_positions)
+                    batch_positions = project_positions(batch_positions, mode=state_projection)
                 if sampler_scheme == "shape_gf_langevin":
                     physical_score = batch_masses.unsqueeze(-1) * score
-                    batch_positions = batch_positions + 0.5 * float(langevin_alpha) * float(score_scale) * physical_score
+                    batch_positions = batch_positions + 0.5 * polish_alpha * float(score_scale) * physical_score
                 else:
                     dt = max(tau_value / float(max(final_polish_steps, 1)), 1e-12)
                     batch_positions = batch_positions + 2.0 * float(score_scale) * dt * score
@@ -4746,6 +4816,95 @@ def paired_chamfer_reconstruction_metrics(
                 "count": int(np.sum(mask)),
             }
         out["per_label"] = per_label
+    return out
+
+
+
+def contour_thickness_diagnostics(
+    positions: np.ndarray,
+    *,
+    masses: Optional[np.ndarray] = None,
+    target_positions: Optional[np.ndarray] = None,
+    target_masses: Optional[np.ndarray] = None,
+    sigma: Optional[float] = None,
+    image_size: int = 28,
+    occupancy_threshold: float = 1e-6,
+    max_samples: Optional[int] = None,
+    seed: int = 0,
+) -> dict[str, float]:
+    """Contour-thickness diagnostics for MNIST-CP point clouds.
+
+    Chamfer distance can say a cloud is close to the target while the generated
+    particles are still too thick or fuzzy.  These diagnostics measure internal
+    spacing, raster occupancy, and optionally the oracle projection error at a
+    chosen small sigma.
+    """
+    pos = np.asarray(positions, dtype=np.float64)
+    if pos.ndim != 3 or pos.shape[2] != 2:
+        raise ValueError("positions must have shape (N,K,2)")
+    rng = np.random.default_rng(int(seed))
+    if max_samples is not None and pos.shape[0] > int(max_samples):
+        idx = rng.choice(pos.shape[0], size=int(max_samples), replace=False)
+        pos = pos[idx]
+        if masses is not None:
+            masses = np.asarray(masses, dtype=np.float64)[idx]
+        if target_positions is not None:
+            target_positions = np.asarray(target_positions, dtype=np.float64)[idx]
+        if target_masses is not None:
+            target_masses = np.asarray(target_masses, dtype=np.float64)[idx]
+    if masses is None:
+        masses_arr = _uniform_masses(pos.shape[0], pos.shape[1], dtype=np.float64)
+    else:
+        masses_arr = np.asarray(masses, dtype=np.float64)
+        if masses_arr.shape != pos.shape[:2]:
+            raise ValueError("masses must have shape (N,K)")
+
+    nearest_values: list[np.ndarray] = []
+    for cloud in pos:
+        diff = cloud[:, None, :] - cloud[None, :, :]
+        d2 = np.sum(diff * diff, axis=-1)
+        np.fill_diagonal(d2, np.inf)
+        nearest_values.append(np.sqrt(np.min(d2, axis=1)))
+    nearest = np.concatenate(nearest_values)
+    raster = rasterize_weighted_point_clouds(
+        masses_arr,
+        np.asarray(project_positions(pos, mode="clip"), dtype=np.float64),
+        image_size=int(image_size),
+    )
+    flat = raster.reshape(raster.shape[0], -1)
+    occupied = np.mean(flat > float(occupancy_threshold), axis=1)
+    out: dict[str, float] = {
+        "self_nn_mean": float(np.mean(nearest)),
+        "self_nn_std": float(np.std(nearest)),
+        "self_nn_median": float(np.median(nearest)),
+        "raster_occupied_fraction_mean": float(np.mean(occupied)),
+        "raster_occupied_fraction_std": float(np.std(occupied)),
+        "num_samples": float(pos.shape[0]),
+    }
+
+    if target_positions is not None and sigma is not None and float(sigma) > 0.0:
+        target_pos = np.asarray(target_positions, dtype=np.float64)
+        if target_pos.ndim != 3 or target_pos.shape[0] != pos.shape[0] or target_pos.shape[2] != 2:
+            raise ValueError("target_positions must have shape (N,M,2) with matching batch")
+        if target_masses is None:
+            target_masses_arr = _uniform_masses(target_pos.shape[0], target_pos.shape[1], dtype=np.float64)
+        else:
+            target_masses_arr = np.asarray(target_masses, dtype=np.float64)
+        with torch.no_grad():
+            q = torch.tensor(pos, dtype=torch.float32)
+            t = torch.tensor(target_pos, dtype=torch.float32)
+            tm = torch.tensor(target_masses_arr, dtype=torch.float32)
+            _, posterior = empirical_gaussian_mixture_physical_score(
+                q,
+                t,
+                float(sigma),
+                target_masses=tm,
+                return_posterior_mean=True,
+            )
+            posterior_np = posterior.detach().cpu().numpy().astype(np.float64)
+        projection_rmse = np.sqrt(np.mean(np.sum((posterior_np - pos) ** 2, axis=-1)))
+        out["oracle_projection_rmse"] = float(projection_rmse)
+        out["oracle_projection_mean_distance"] = float(np.mean(np.linalg.norm(posterior_np - pos, axis=-1)))
     return out
 
 

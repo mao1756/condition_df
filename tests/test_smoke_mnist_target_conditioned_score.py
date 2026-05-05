@@ -45,6 +45,7 @@ from mnist.target_conditioned_score import (
     layernorm_project_latents,
     make_sigma_tau_schedule,
     paired_chamfer_reconstruction_metrics,
+    contour_thickness_diagnostics,
     perturb_target_conditioned_positions,
     reconstruct_target_conditioned_point_clouds,
     reconstruct_target_conditioned_from_latents,
@@ -249,6 +250,8 @@ def test_forward_loss_and_training_smoke() -> None:
         latent_variance_weight=0.1,
         latent_covariance_weight=0.01,
         latent_classification_weight=0.05,
+        posterior_mean_loss_weight=0.1,
+        posterior_mean_query_modes=("noised_target",),
         latent_autoencoder=latent_ae,
         initialize_from_latent_autoencoder=True,
         freeze_latent_modules_epochs=0,
@@ -270,6 +273,7 @@ def test_forward_loss_and_training_smoke() -> None:
     )
     assert len(student_history["train_loss"]) == 1
     assert "val_latent_only_chamfer" in student_history
+    assert "posterior_mean_loss" in student_history
     sensitivity = evaluate_latent_sensitivity(
         student, masses, positions, labels, tau_levels=tau_levels[:1], max_samples=4, batch_size=2, device="cpu"
     )
@@ -405,6 +409,16 @@ def test_sampling_and_latent_priors_smoke() -> None:
         show_progress=False,
     )
     assert generated.positions.shape == positions[:2].shape
+    thickness = contour_thickness_diagnostics(
+        generated.positions,
+        masses=masses[:2],
+        target_positions=positions[:2],
+        target_masses=masses[:2],
+        sigma=0.02,
+        image_size=16,
+    )
+    assert thickness["self_nn_mean"] >= 0.0
+    assert thickness["raster_occupied_fraction_mean"] >= 0.0
     metrics = paired_chamfer_reconstruction_metrics(generated.positions, positions[:2], labels[:2])
     assert "mean_chamfer" in metrics
     hybrid_rows = evaluate_hybrid_oracle_neural_reconstruction(
