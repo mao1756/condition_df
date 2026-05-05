@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 import copy
+import hashlib
 import math
 
 import numpy as np
@@ -76,8 +77,41 @@ class ScoreCalibration:
     metadata: Optional[dict[str, Any]] = None
 
 
+@dataclass(frozen=True)
+class LatentBank:
+    """Encoded latent bank with provenance metadata.
+
+    The Experiment 8b notebook trains several models that can all encode a
+    target contour.  Keeping source/model metadata with each bank prevents stale
+    latents from a target-grid teacher being accidentally reused for latent-only
+    generation with a student model.
+    """
+
+    latents: FloatArray
+    labels: IntArray
+    source: str
+    model_hash: str
+    metadata: Optional[dict[str, Any]] = None
+
+    @property
+    def latent_dim(self) -> int:
+        return int(self.latents.shape[1])
+
+    @property
+    def num_samples(self) -> int:
+        return int(self.latents.shape[0])
+
+    def is_compatible(self, *, source: str, model_hash: Optional[str] = None) -> bool:
+        if str(source) != self.source:
+            return False
+        if model_hash is not None and str(model_hash) != self.model_hash:
+            return False
+        return True
+
+
 __all__ = [
     "ScoreCalibration",
+    "LatentBank",
     "score_calibration_to_dict",
     "score_calibration_from_dict",
     "save_target_conditioned_experiment_checkpoint",
@@ -117,6 +151,11 @@ __all__ = [
     "evaluate_latent_sensitivity",
     "latent_collapse_diagnostics",
     "latent_vicreg_regularization",
+    "model_state_hash",
+    "latent_bank_to_dict",
+    "latent_bank_from_dict",
+    "encode_latent_bank",
+    "validate_latent_bank",
     "encode_target_latents",
     "sample_target_conditioned_annealed_dynamics",
     "sample_empirical_mixture_oracle_annealed_dynamics",
@@ -2763,6 +2802,11 @@ def train_latent_only_student_from_teacher(
     latent_autoencoder: Optional[LatentShapeAutoencoder] = None,
     initialize_from_latent_autoencoder: bool = False,
     freeze_latent_modules_epochs: int = 0,
+    validation_chamfer_every: Optional[int] = None,
+    validation_chamfer_count: int = 8,
+    validation_sampler_kwargs: Optional[Mapping[str, Any]] = None,
+    validation_chamfer_seed: int = 0,
+    restore_best_chamfer: bool = True,
     max_grad_norm: Optional[float] = 5.0,
     device: Optional[str | torch.device] = None,
     verbose: bool = True,
@@ -2784,6 +2828,10 @@ def train_latent_only_student_from_teacher(
         raise ValueError("latent regularization weights must be non-negative")
     if freeze_latent_modules_epochs < 0:
         raise ValueError("freeze_latent_modules_epochs must be non-negative")
+    if validation_chamfer_every is not None and int(validation_chamfer_every) <= 0:
+        raise ValueError("validation_chamfer_every must be positive when provided")
+    if validation_chamfer_count <= 0:
+        raise ValueError("validation_chamfer_count must be positive")
     tau_arr = np.asarray(tau_levels, dtype=np.float64).reshape(-1)
     if tau_arr.size == 0 or not np.all(np.isfinite(tau_arr)) or np.any(tau_arr <= 0.0):
         raise ValueError("tau_levels must be positive and finite")
@@ -2810,7 +2858,10 @@ def train_latent_only_student_from_teacher(
         "latent_mean_std": [],
         "latent_modules_frozen": [],
         "val_distill_loss": [],
+        "val_latent_only_chamfer": [],
     }
+    best_chamfer = float("inf")
+    best_chamfer_state: Optional[dict[str, Tensor]] = None
 
     def _set_latent_modules_trainable(trainable: bool) -> None:
         modules: list[nn.Module] = [student.target_encoder, student.latent_label_head]
@@ -2832,6 +2883,59 @@ def train_latent_only_student_from_teacher(
         if mode == "center_gaussian":
             return 0.5 + float(direct_query_center_std) * torch.randn_like(batch_positions)
         raise ValueError(f"unknown query mode {mode!r}")
+
+    def _latent_only_validation_chamfer(epoch_index: int) -> float:
+        if val_masses is None or val_positions is None:
+            return float("nan")
+        val_masses_arr = np.asarray(val_masses, dtype=np.float64)
+        val_positions_arr = np.asarray(val_positions, dtype=np.float64)
+        if val_masses_arr.ndim != 2 or val_positions_arr.shape != (*val_masses_arr.shape, 2):
+            return float("nan")
+        rng = np.random.default_rng(int(validation_chamfer_seed) + int(epoch_index))
+        count = min(int(validation_chamfer_count), val_masses_arr.shape[0])
+        idx = rng.choice(val_masses_arr.shape[0], size=count, replace=False)
+        kwargs = dict(validation_sampler_kwargs or {})
+        kwargs.setdefault("tau_levels", tau_arr)
+        kwargs.setdefault("steps_per_level", 2)
+        kwargs.setdefault("sampler_scheme", "shape_gf_langevin")
+        kwargs.setdefault("initial_position_mode", "uniform")
+        kwargs.setdefault("state_projection", "none")
+        kwargs.setdefault("diffusion_temperature", 1.0)
+        kwargs.setdefault("final_polish_steps", 0)
+        kwargs.setdefault("langevin_alpha", 5e-5)
+        kwargs.setdefault("batch_size", min(int(batch_size), count))
+        kwargs.setdefault("rasterize", False)
+        kwargs.setdefault("device", model_device)
+        kwargs.setdefault("rng", rng)
+        kwargs.setdefault("show_progress", False)
+        labels_arr = None if val_labels is None else np.asarray(val_labels, dtype=np.int64).reshape(-1)[idx]
+        was_training_student = student.training
+        student.eval()
+        try:
+            validation_latents = encode_target_latents(
+                student,
+                val_masses_arr[idx],
+                val_positions_arr[idx],
+                batch_size=min(int(batch_size), count),
+                device=model_device,
+            )
+            generated = reconstruct_target_conditioned_from_latents(
+                student,
+                validation_latents,
+                labels=labels_arr,
+                output_masses=val_masses_arr[idx],
+                **kwargs,
+            )
+            metrics = paired_chamfer_reconstruction_metrics(
+                generated.positions,
+                val_positions_arr[idx],
+                labels_arr,
+                squared=True,
+            )
+            return float(metrics["mean_chamfer"])
+        finally:
+            if was_training_student:
+                student.train()
 
     for epoch in range(int(epochs)):
         student.train()
@@ -2953,6 +3057,14 @@ def train_latent_only_student_from_teacher(
             history["val_distill_loss"].append(val_loss / max(val_items, 1))
         else:
             history["val_distill_loss"].append(float("nan"))
+        val_chamfer = float("nan")
+        if validation_chamfer_every is not None and ((epoch + 1) % int(validation_chamfer_every) == 0 or epoch + 1 == int(epochs)):
+            val_chamfer = _latent_only_validation_chamfer(epoch + 1)
+            if math.isfinite(val_chamfer) and val_chamfer < best_chamfer:
+                best_chamfer = float(val_chamfer)
+                if restore_best_chamfer:
+                    best_chamfer_state = {key: value.detach().cpu().clone() for key, value in student.state_dict().items()}
+        history["val_latent_only_chamfer"].append(val_chamfer)
         if verbose and (epoch == 0 or (epoch + 1) % max(1, epochs // 10) == 0 or epoch + 1 == epochs):
             print(
                 f"[latent-student] epoch {epoch + 1:04d}/{epochs}: "
@@ -2961,11 +3073,106 @@ def train_latent_only_student_from_teacher(
                 f"raster={history['latent_raster_loss'][-1]:.6g} "
                 f"z_std={history['latent_mean_std'][-1]:.4f} "
                 f"z_cls={history['latent_class_accuracy'][-1]:.3f} "
-                f"val={history['val_distill_loss'][-1]:.6g}"
+                f"val={history['val_distill_loss'][-1]:.6g} "
+                f"val_chamfer={history['val_latent_only_chamfer'][-1]:.4g}"
             )
     _set_latent_modules_trainable(True)
+    if restore_best_chamfer and best_chamfer_state is not None:
+        student.load_state_dict(best_chamfer_state)
+        student.to(model_device)
     student.train()
     return history
+
+
+# ---------------------------------------------------------------------------
+# Latent-bank provenance helpers
+# ---------------------------------------------------------------------------
+
+
+def model_state_hash(model: nn.Module, *, max_tensors: Optional[int] = None) -> str:
+    """Return a stable short hash of a model state dict for latent-bank metadata."""
+    digest = hashlib.sha256()
+    count = 0
+    for key, value in sorted(model.state_dict().items()):
+        digest.update(str(key).encode("utf8"))
+        tensor = value.detach().cpu().contiguous()
+        digest.update(str(tuple(tensor.shape)).encode("utf8"))
+        digest.update(str(tensor.dtype).encode("utf8"))
+        digest.update(tensor.numpy().tobytes())
+        count += 1
+        if max_tensors is not None and count >= int(max_tensors):
+            break
+    return digest.hexdigest()[:16]
+
+
+def latent_bank_to_dict(bank: LatentBank) -> dict[str, Any]:
+    """Serialize a :class:`LatentBank` to a checkpoint-friendly dictionary."""
+    return {
+        "latents": np.asarray(bank.latents, dtype=np.float64),
+        "labels": np.asarray(bank.labels, dtype=np.int64),
+        "source": str(bank.source),
+        "model_hash": str(bank.model_hash),
+        "metadata": dict(bank.metadata or {}),
+    }
+
+
+def latent_bank_from_dict(payload: Mapping[str, Any]) -> LatentBank:
+    """Restore a :class:`LatentBank` from ``latent_bank_to_dict`` output."""
+    if not isinstance(payload, Mapping):
+        raise TypeError("latent bank payload must be a mapping")
+    return LatentBank(
+        latents=np.asarray(payload["latents"], dtype=np.float64),
+        labels=np.asarray(payload["labels"], dtype=np.int64),
+        source=str(payload.get("source", "unknown")),
+        model_hash=str(payload.get("model_hash", "unknown")),
+        metadata=dict(payload.get("metadata", {}) or {}),
+    )
+
+
+def validate_latent_bank(
+    bank: LatentBank,
+    *,
+    expected_source: str,
+    expected_model_hash: Optional[str] = None,
+    expected_num_samples: Optional[int] = None,
+) -> bool:
+    """Check whether a latent bank matches the current model/source request."""
+    if not bank.is_compatible(source=expected_source, model_hash=expected_model_hash):
+        return False
+    if expected_num_samples is not None and bank.num_samples != int(expected_num_samples):
+        return False
+    if bank.latents.ndim != 2 or bank.labels.shape != (bank.latents.shape[0],):
+        return False
+    return bool(np.all(np.isfinite(bank.latents)))
+
+
+@torch.no_grad()
+def encode_latent_bank(
+    model: nn.Module,
+    masses: np.ndarray,
+    positions: np.ndarray,
+    labels: Optional[np.ndarray],
+    *,
+    source: str,
+    batch_size: int = 256,
+    device: Optional[str | torch.device] = None,
+    model_hash_value: Optional[str] = None,
+    metadata: Optional[dict[str, Any]] = None,
+) -> LatentBank:
+    """Encode a dataset and attach source/model provenance metadata."""
+    latents = encode_target_latents(model, masses, positions, batch_size=batch_size, device=device)
+    labels_array = np.zeros((latents.shape[0],), dtype=np.int64) if labels is None else np.asarray(labels, dtype=np.int64).reshape(-1)
+    if labels_array.shape != (latents.shape[0],):
+        raise ValueError("labels must have shape (N,) and match encoded latents")
+    if model_hash_value is None:
+        model_hash_value = model_state_hash(model)
+    return LatentBank(
+        latents=latents.astype(np.float64, copy=False),
+        labels=labels_array.astype(np.int64, copy=False),
+        source=str(source),
+        model_hash=str(model_hash_value),
+        metadata=dict(metadata or {}),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2994,7 +3201,14 @@ def encode_target_latents(
     loader = DataLoader(TensorDataset(torch.from_numpy(masses_arr), torch.from_numpy(positions_arr)), batch_size=batch_size)
     latents: list[np.ndarray] = []
     for batch_masses, batch_positions in loader:
-        z = model.encode_target(batch_masses.to(model_device), batch_positions.to(model_device))
+        batch_masses = batch_masses.to(model_device)
+        batch_positions = batch_positions.to(model_device)
+        if hasattr(model, "encode_target"):
+            z = model.encode_target(batch_masses, batch_positions)  # type: ignore[attr-defined]
+        elif hasattr(model, "encode"):
+            z = model.encode(batch_masses, batch_positions)  # type: ignore[attr-defined]
+        else:
+            raise AttributeError("model must define encode_target(...) or encode(...)")
         latents.append(z.detach().cpu().numpy().astype(np.float64))
     if was_training:
         model.train()

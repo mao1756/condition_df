@@ -22,6 +22,12 @@ from mnist.mnist_cp import uniform_point_cloud_masses
 from mnist.target_conditioned_score import (
     LatentCritic,
     LatentGenerator,
+    LatentBank,
+    encode_latent_bank,
+    latent_bank_to_dict,
+    latent_bank_from_dict,
+    model_state_hash,
+    validate_latent_bank,
     LatentShapeAutoencoder,
     TargetConditionedScoreModel,
     load_target_conditioned_experiment_checkpoint,
@@ -246,12 +252,24 @@ def test_forward_loss_and_training_smoke() -> None:
         latent_autoencoder=latent_ae,
         initialize_from_latent_autoencoder=True,
         freeze_latent_modules_epochs=0,
+        validation_chamfer_every=1,
+        validation_chamfer_count=2,
+        validation_sampler_kwargs={
+            "tau_levels": tau_levels[:1],
+            "steps_per_level": 1,
+            "sampler_scheme": "shape_gf_langevin",
+            "state_projection": "none",
+            "langevin_alpha": 1e-5,
+            "final_polish_steps": 0,
+            "batch_size": 2,
+        },
         query_modes=("uniform",),
         device="cpu",
         verbose=False,
         show_progress=False,
     )
     assert len(student_history["train_loss"]) == 1
+    assert "val_latent_only_chamfer" in student_history
     sensitivity = evaluate_latent_sensitivity(
         student, masses, positions, labels, tau_levels=tau_levels[:1], max_samples=4, batch_size=2, device="cpu"
     )
@@ -265,6 +283,22 @@ def test_sampling_and_latent_priors_smoke() -> None:
     model = _small_model(float(np.min(tau_levels)), float(np.max(tau_levels)))
     latents = encode_target_latents(model, masses, positions, batch_size=3, device="cpu")
     assert latents.shape == (6, 16)
+    model_hash = model_state_hash(model)
+    train_bank = encode_latent_bank(
+        model,
+        masses,
+        positions,
+        labels,
+        source="student",
+        batch_size=3,
+        device="cpu",
+        model_hash_value=model_hash,
+        metadata={"split": "train"},
+    )
+    assert isinstance(train_bank, LatentBank)
+    assert validate_latent_bank(train_bank, expected_source="student", expected_model_hash=model_hash, expected_num_samples=6)
+    restored_bank = latent_bank_from_dict(latent_bank_to_dict(train_bank))
+    assert np.allclose(restored_bank.latents, train_bank.latents)
     collapse = latent_collapse_diagnostics(latents, labels, max_samples=6, rng=np.random.default_rng(17))
     assert "mean_pairwise_distance" in collapse
     calibration = None
