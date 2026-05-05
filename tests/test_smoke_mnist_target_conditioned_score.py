@@ -22,6 +22,7 @@ from mnist.mnist_cp import uniform_point_cloud_masses
 from mnist.target_conditioned_score import (
     LatentCritic,
     LatentGenerator,
+    LatentShapeAutoencoder,
     TargetConditionedScoreModel,
     load_target_conditioned_experiment_checkpoint,
     encode_target_latents,
@@ -32,7 +33,6 @@ from mnist.target_conditioned_score import (
     fit_gaussian_latent_prior,
     fit_pca_gmm_latent_prior,
     fit_pca_latent_prior,
-    fit_pca_gmm_latent_prior,
     fit_score_calibration_against_mixture_oracle,
     latent_nearest_neighbor_diagnostics,
     latent_nearest_neighbor_summary,
@@ -51,6 +51,9 @@ from mnist.target_conditioned_score import (
     save_target_conditioned_experiment_checkpoint,
     sample_wgan_latent_prior,
     target_conditioned_score_matching_loss,
+    train_latent_shape_autoencoder,
+    evaluate_latent_shape_autoencoder,
+    initialize_score_model_from_latent_autoencoder,
     train_latent_wgan_gp,
     train_latent_only_student_from_teacher,
     train_target_conditioned_score_model,
@@ -101,6 +104,7 @@ def _small_model_config(tau_min: float, tau_max: float) -> dict[str, object]:
         "latent_raster_hidden_dim": 32,
         "measure_gate_init": -5.0,
         "measure_gate_max": 0.10,
+        "score_conditioning_mode": "film",
     }
 
 
@@ -180,6 +184,36 @@ def test_forward_loss_and_training_smoke() -> None:
         device="cpu",
     )
     assert "loss_ratio_vs_zero" in eval_metrics
+
+    latent_ae = LatentShapeAutoencoder(
+        latent_dim=16,
+        encoder_hidden_dim=32,
+        grid_size=16,
+        out_channels=2,
+        decoder_hidden_dim=32,
+        num_classes=2,
+        condition_on_label=True,
+    )
+    ae_history = train_latent_shape_autoencoder(
+        latent_ae,
+        masses,
+        positions,
+        labels,
+        val_masses=masses,
+        val_positions=positions,
+        val_labels=labels,
+        epochs=1,
+        batch_size=4,
+        lr=1e-3,
+        device="cpu",
+        verbose=False,
+    )
+    assert len(ae_history["train_loss"]) == 1
+    ae_metrics = evaluate_latent_shape_autoencoder(latent_ae, masses, positions, labels, batch_size=4, device="cpu")
+    assert "latent_mean_std" in ae_metrics
+    init_report = initialize_score_model_from_latent_autoencoder(model, latent_ae)
+    assert init_report["copied"] > 0
+
     z = model.encode_target(batch_masses, clean)
     raster = model.predict_target_raster_from_latent(z)
     assert raster.shape[0] == 2 and raster.ndim == 4
@@ -209,6 +243,9 @@ def test_forward_loss_and_training_smoke() -> None:
         latent_variance_weight=0.1,
         latent_covariance_weight=0.01,
         latent_classification_weight=0.05,
+        latent_autoencoder=latent_ae,
+        initialize_from_latent_autoencoder=True,
+        freeze_latent_modules_epochs=0,
         query_modes=("uniform",),
         device="cpu",
         verbose=False,
