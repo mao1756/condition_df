@@ -177,6 +177,9 @@ __all__ = [
     "train_latent_wgan_gp",
     "sample_wgan_latent_prior",
     "paired_chamfer_reconstruction_metrics",
+    "raster_topology_summary",
+    "topology_diagnostics",
+    "component_balanced_target_masses",
     "contour_thickness_diagnostics",
 ]
 
@@ -1716,6 +1719,10 @@ def empirical_mixture_scaled_score_target(
     chunk_size: Optional[int] = 256,
     target_norm_clip: Optional[float] = None,
     return_physical_score: bool = False,
+    component_balance: bool = False,
+    component_balance_image_size: int = 64,
+    component_balance_dilation: int = 1,
+    component_balance_min_pixels: int = 4,
 ) -> Tensor | tuple[Tensor, Tensor, Tensor]:
     r"""Return scaled Wasserstein-score target from the empirical mixture oracle."""
     _validate_probability_masses(masses)
@@ -1724,11 +1731,19 @@ def empirical_mixture_scaled_score_target(
         raise ValueError("target_positions must have shape (B,M,2) and match query batch size")
     tau_tensor = _prepare_tau_tensor(tau, masses.shape[0], device=query_positions.device, dtype=query_positions.dtype)
     sigma = torch.sqrt((2.0 * tau_tensor[:, None]) / masses).clamp_min(1e-12)
+    target_masses_resolved = target_masses
+    if component_balance:
+        target_masses_resolved = _component_balanced_target_masses_torch(
+            target_positions,
+            image_size=component_balance_image_size,
+            contour_dilation=component_balance_dilation,
+            min_component_pixels=component_balance_min_pixels,
+        )
     physical_score, posterior_mean = empirical_gaussian_mixture_physical_score(
         query_positions,
         target_positions,
         sigma,
-        target_masses=target_masses,
+        target_masses=target_masses_resolved,
         chunk_size=chunk_size,
         return_posterior_mean=True,
     )
@@ -1783,10 +1798,21 @@ def _sample_direct_mixture_query_positions(
     coordinate_range: tuple[float, float] = (0.0, 1.0),
     center_std: float = 0.35,
     projection: str = "none",
+    component_balance_image_size: int = 64,
+    component_balance_dilation: int = 1,
+    component_balance_min_pixels: int = 4,
 ) -> Tensor:
     if not query_modes:
         raise ValueError("query_modes must be non-empty")
-    allowed = {"noised_target", "uniform", "center_gaussian", "fixed_center"}
+    allowed = {
+        "noised_target",
+        "uniform",
+        "center_gaussian",
+        "fixed_center",
+        "component_noised_target",
+        "component_center_gaussian",
+        "hole_region_uniform",
+    }
     modes = tuple(str(mode) for mode in query_modes)
     unknown = set(modes) - allowed
     if unknown:
@@ -1801,6 +1827,22 @@ def _sample_direct_mixture_query_positions(
     center = 0.5 * (low + high)
     centered = center + float(center_std) * (high - low) * torch.randn_like(clean_positions)
     fixed = torch.full_like(clean_positions, center)
+    component_points = None
+    hole_uniform = None
+    if "component_noised_target" in modes or "component_center_gaussian" in modes:
+        component_points = _sample_component_balanced_points_torch(
+            clean_positions,
+            image_size=component_balance_image_size,
+            contour_dilation=component_balance_dilation,
+            min_component_pixels=component_balance_min_pixels,
+        )
+    if "hole_region_uniform" in modes:
+        hole_uniform = _sample_hole_uniform_points_torch(
+            clean_positions,
+            image_size=component_balance_image_size,
+            hole_dilation=component_balance_dilation,
+            fallback_std=center_std,
+        )
     choices = torch.randint(0, len(modes), (batch_size,), device=clean_positions.device)
     out = torch.empty_like(clean_positions)
     for mode_index, mode in enumerate(modes):
@@ -1813,6 +1855,18 @@ def _sample_direct_mixture_query_positions(
             out[mask] = uniform[mask]
         elif mode == "center_gaussian":
             out[mask] = centered[mask]
+        elif mode == "component_noised_target":
+            if component_points is None:
+                raise RuntimeError("component_points unexpectedly missing")
+            out[mask] = component_points[mask] + sigma[mask] * torch.randn_like(component_points[mask])
+        elif mode == "component_center_gaussian":
+            if component_points is None:
+                raise RuntimeError("component_points unexpectedly missing")
+            out[mask] = component_points[mask] + float(center_std) * sigma[mask] * torch.randn_like(component_points[mask])
+        elif mode == "hole_region_uniform":
+            if hole_uniform is None:
+                raise RuntimeError("hole_uniform unexpectedly missing")
+            out[mask] = hole_uniform[mask]
         else:
             out[mask] = fixed[mask]
     if projection != "none":
@@ -1830,11 +1884,17 @@ def sample_direct_mixture_queries(
     coordinate_range: tuple[float, float] = (0.0, 1.0),
     center_std: float = 0.35,
     projection: str = "none",
+    component_balance_image_size: int = 64,
+    component_balance_dilation: int = 1,
+    component_balance_min_pixels: int = 4,
 ) -> Tensor:
     """Public wrapper for generation-like direct-mixture query sampling."""
     return _sample_direct_mixture_query_positions(
         clean_positions, masses, tau, query_modes=query_modes,
         coordinate_range=coordinate_range, center_std=center_std, projection=projection,
+        component_balance_image_size=component_balance_image_size,
+        component_balance_dilation=component_balance_dilation,
+        component_balance_min_pixels=component_balance_min_pixels,
     )
 
 
@@ -2007,6 +2067,10 @@ def _build_score_training_query_and_target(
     direct_query_center_std: float,
     mixture_chunk_size: Optional[int],
     mixture_target_norm_clip: Optional[float] = None,
+    component_balance_oracle: bool = False,
+    component_balance_image_size: int = 64,
+    component_balance_dilation: int = 1,
+    component_balance_min_pixels: int = 4,
     oracle_replay_steps_per_level: int = 2,
     oracle_replay_max_levels: Optional[int] = None,
     oracle_replay_initial_modes: Sequence[str] = ("uniform", "center_gaussian", "fixed_center"),
@@ -2047,6 +2111,10 @@ def _build_score_training_query_and_target(
             chunk_size=mixture_chunk_size,
             return_physical_score=False,
             target_norm_clip=mixture_target_norm_clip,
+            component_balance=component_balance_oracle,
+            component_balance_image_size=component_balance_image_size,
+            component_balance_dilation=component_balance_dilation,
+            component_balance_min_pixels=component_balance_min_pixels,
         )
         return query, target_scaled, replay_tau, "oracle_replay"
 
@@ -2058,6 +2126,9 @@ def _build_score_training_query_and_target(
             query_modes=direct_query_modes,
             center_std=direct_query_center_std,
             projection=projection,
+            component_balance_image_size=component_balance_image_size,
+            component_balance_dilation=component_balance_dilation,
+            component_balance_min_pixels=component_balance_min_pixels,
         )
         target_scaled = empirical_mixture_scaled_score_target(
             query,
@@ -2068,6 +2139,10 @@ def _build_score_training_query_and_target(
             chunk_size=mixture_chunk_size,
             return_physical_score=False,
             target_norm_clip=mixture_target_norm_clip,
+            component_balance=component_balance_oracle,
+            component_balance_image_size=component_balance_image_size,
+            component_balance_dilation=component_balance_dilation,
+            component_balance_min_pixels=component_balance_min_pixels,
         )
         return query, target_scaled, tau, "direct_mixture"
 
@@ -2304,6 +2379,10 @@ def evaluate_target_conditioned_score_model(
     direct_query_center_std: float = 0.35,
     mixture_chunk_size: Optional[int] = 256,
     mixture_target_norm_clip: Optional[float] = None,
+    component_balance_oracle: bool = False,
+    component_balance_image_size: int = 64,
+    component_balance_dilation: int = 1,
+    component_balance_min_pixels: int = 4,
     oracle_replay_steps_per_level: int = 2,
     oracle_replay_max_levels: Optional[int] = None,
     oracle_replay_initial_modes: Sequence[str] = ("uniform", "center_gaussian", "fixed_center"),
@@ -2410,6 +2489,10 @@ def train_target_conditioned_score_model(
     direct_query_center_std: float = 0.35,
     mixture_chunk_size: Optional[int] = 256,
     mixture_target_norm_clip: Optional[float] = None,
+    component_balance_oracle: bool = False,
+    component_balance_image_size: int = 64,
+    component_balance_dilation: int = 1,
+    component_balance_min_pixels: int = 4,
     oracle_replay_steps_per_level: int = 2,
     oracle_replay_max_levels: Optional[int] = None,
     oracle_replay_initial_modes: Sequence[str] = ("uniform", "center_gaussian", "fixed_center"),
@@ -2532,6 +2615,10 @@ def train_target_conditioned_score_model(
                 direct_query_center_std=direct_query_center_std,
                 mixture_chunk_size=mixture_chunk_size,
                 mixture_target_norm_clip=mixture_target_norm_clip,
+                component_balance_oracle=component_balance_oracle,
+                component_balance_image_size=component_balance_image_size,
+                component_balance_dilation=component_balance_dilation,
+                component_balance_min_pixels=component_balance_min_pixels,
                 oracle_replay_steps_per_level=oracle_replay_steps_per_level,
                 oracle_replay_max_levels=oracle_replay_max_levels,
                 oracle_replay_initial_modes=oracle_replay_initial_modes,
@@ -2638,6 +2725,10 @@ def train_target_conditioned_score_model(
                 direct_query_center_std=direct_query_center_std,
                 mixture_chunk_size=mixture_chunk_size,
                 mixture_target_norm_clip=mixture_target_norm_clip,
+                component_balance_oracle=component_balance_oracle,
+                component_balance_image_size=component_balance_image_size,
+                component_balance_dilation=component_balance_dilation,
+                component_balance_min_pixels=component_balance_min_pixels,
                 oracle_replay_steps_per_level=oracle_replay_steps_per_level,
                 oracle_replay_max_levels=oracle_replay_max_levels,
                 oracle_replay_initial_modes=oracle_replay_initial_modes,
@@ -2802,6 +2893,10 @@ def train_latent_only_student_from_teacher(
     posterior_mean_loss_weight: float = 0.0,
     posterior_mean_query_modes: Sequence[str] = ("noised_target", "center_gaussian"),
     posterior_mean_target_norm_clip: Optional[float] = None,
+    component_balance_oracle: bool = False,
+    component_balance_image_size: int = 64,
+    component_balance_dilation: int = 1,
+    component_balance_min_pixels: int = 4,
     teacher_temperature: float = 1.0,
     latent_autoencoder: Optional[LatentShapeAutoencoder] = None,
     initialize_from_latent_autoencoder: bool = False,
@@ -2889,6 +2984,18 @@ def train_latent_only_student_from_teacher(
             return torch.full_like(batch_positions, 0.5)
         if mode == "center_gaussian":
             return 0.5 + float(direct_query_center_std) * torch.randn_like(batch_positions)
+        if mode in {"component_noised_target", "component_center_gaussian", "hole_region_uniform"}:
+            return _sample_direct_mixture_query_positions(
+                batch_positions,
+                batch_masses,
+                tau,
+                query_modes=(mode,),
+                center_std=direct_query_center_std,
+                projection="none",
+                component_balance_image_size=component_balance_image_size,
+                component_balance_dilation=component_balance_dilation,
+                component_balance_min_pixels=component_balance_min_pixels,
+            )
         raise ValueError(f"unknown query mode {mode!r}")
 
     def _latent_only_validation_chamfer(epoch_index: int) -> float:
@@ -3003,6 +3110,10 @@ def train_latent_only_student_from_teacher(
                         chunk_size=256,
                         target_norm_clip=posterior_mean_target_norm_clip,
                         return_physical_score=True,
+                        component_balance=component_balance_oracle,
+                        component_balance_image_size=component_balance_image_size,
+                        component_balance_dilation=component_balance_dilation,
+                        component_balance_min_pixels=component_balance_min_pixels,
                     )
                 posterior_pred_scaled = student.predict_scaled_score(
                     batch_masses,
@@ -4818,6 +4929,286 @@ def paired_chamfer_reconstruction_metrics(
         out["per_label"] = per_label
     return out
 
+
+
+
+def _binary_dilate_numpy(mask: np.ndarray, steps: int = 1) -> np.ndarray:
+    out = np.asarray(mask, dtype=bool).copy()
+    for _ in range(max(0, int(steps))):
+        padded = np.pad(out, 1, mode="constant", constant_values=False)
+        dilated = np.zeros_like(out, dtype=bool)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                dilated |= padded[1 + dy : 1 + dy + out.shape[0], 1 + dx : 1 + dx + out.shape[1]]
+        out = dilated
+    return out
+
+
+def _rasterize_points_binary(points: np.ndarray, *, image_size: int = 64, dilation: int = 0) -> np.ndarray:
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] != 2:
+        raise ValueError("points must have shape (K, 2)")
+    image_size = int(image_size)
+    if image_size <= 1:
+        raise ValueError("image_size must be greater than one")
+    pix = np.floor(np.clip(pts, 0.0, 1.0) * float(image_size - 1) + 0.5).astype(np.int64)
+    mask = np.zeros((image_size, image_size), dtype=bool)
+    mask[pix[:, 1], pix[:, 0]] = True
+    if dilation > 0:
+        mask = _binary_dilate_numpy(mask, dilation)
+    return mask
+
+
+def _connected_components_numpy(mask: np.ndarray) -> tuple[np.ndarray, list[int]]:
+    mask = np.asarray(mask, dtype=bool)
+    labels = np.zeros(mask.shape, dtype=np.int32)
+    sizes: list[int] = []
+    current = 0
+    height, width = mask.shape
+    for y in range(height):
+        for x in range(width):
+            if not mask[y, x] or labels[y, x] != 0:
+                continue
+            current += 1
+            stack = [(y, x)]
+            labels[y, x] = current
+            size = 0
+            while stack:
+                cy, cx = stack.pop()
+                size += 1
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        if dy == 0 and dx == 0:
+                            continue
+                        ny, nx = cy + dy, cx + dx
+                        if 0 <= ny < height and 0 <= nx < width and mask[ny, nx] and labels[ny, nx] == 0:
+                            labels[ny, nx] = current
+                            stack.append((ny, nx))
+            sizes.append(size)
+    return labels, sizes
+
+
+def _hole_mask_numpy(contour_mask: np.ndarray, *, dilation: int = 1) -> np.ndarray:
+    # Dilate the contour a little so flood fill does not leak through sparse pixel gaps.
+    barrier = _binary_dilate_numpy(contour_mask, dilation)
+    background = ~barrier
+    height, width = background.shape
+    outside = np.zeros_like(background, dtype=bool)
+    stack: list[tuple[int, int]] = []
+    for x in range(width):
+        if background[0, x]:
+            outside[0, x] = True
+            stack.append((0, x))
+        if background[height - 1, x]:
+            outside[height - 1, x] = True
+            stack.append((height - 1, x))
+    for y in range(height):
+        if background[y, 0] and not outside[y, 0]:
+            outside[y, 0] = True
+            stack.append((y, 0))
+        if background[y, width - 1] and not outside[y, width - 1]:
+            outside[y, width - 1] = True
+            stack.append((y, width - 1))
+    while stack:
+        cy, cx = stack.pop()
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            ny, nx = cy + dy, cx + dx
+            if 0 <= ny < height and 0 <= nx < width and background[ny, nx] and not outside[ny, nx]:
+                outside[ny, nx] = True
+                stack.append((ny, nx))
+    return background & (~outside)
+
+
+def raster_topology_summary(
+    positions: np.ndarray,
+    *,
+    image_size: int = 64,
+    contour_dilation: int = 1,
+    hole_dilation: int = 1,
+    min_component_pixels: int = 4,
+    min_hole_pixels: int = 4,
+) -> dict[str, float]:
+    """Raster topology summary for one MNIST-CP contour point cloud."""
+    contour = _rasterize_points_binary(positions, image_size=image_size, dilation=contour_dilation)
+    comp_labels, comp_sizes = _connected_components_numpy(contour)
+    comp_sizes_kept = [size for size in comp_sizes if size >= int(min_component_pixels)]
+    holes = _hole_mask_numpy(contour, dilation=hole_dilation)
+    _, hole_sizes = _connected_components_numpy(holes)
+    hole_sizes_kept = [size for size in hole_sizes if size >= int(min_hole_pixels)]
+    return {
+        "component_count": float(len(comp_sizes_kept)),
+        "hole_count": float(len(hole_sizes_kept)),
+        "largest_component_pixels": float(max(comp_sizes_kept) if comp_sizes_kept else 0),
+        "hole_pixels": float(sum(hole_sizes_kept)),
+        "contour_pixels": float(np.sum(contour)),
+        "hole_fraction": float(np.mean(holes)),
+        "occupied_fraction": float(np.mean(contour)),
+    }
+
+
+def _component_balanced_weights_numpy(
+    points: np.ndarray,
+    *,
+    image_size: int = 64,
+    contour_dilation: int = 1,
+    min_component_pixels: int = 4,
+) -> np.ndarray:
+    pts = np.asarray(points, dtype=np.float64)
+    contour = _rasterize_points_binary(pts, image_size=image_size, dilation=contour_dilation)
+    labels, sizes = _connected_components_numpy(contour)
+    pix = np.floor(np.clip(pts, 0.0, 1.0) * float(image_size - 1) + 0.5).astype(np.int64)
+    point_labels = labels[pix[:, 1], pix[:, 0]]
+    kept = [idx + 1 for idx, size in enumerate(sizes) if size >= int(min_component_pixels)]
+    if not kept:
+        return np.full((pts.shape[0],), 1.0 / max(pts.shape[0], 1), dtype=np.float64)
+    weights = np.zeros((pts.shape[0],), dtype=np.float64)
+    kept_set = set(kept)
+    for label in kept:
+        mask = point_labels == label
+        if np.any(mask):
+            weights[mask] = 1.0 / (len(kept) * float(np.sum(mask)))
+    if float(np.sum(weights)) <= 0.0:
+        weights[:] = 1.0 / float(max(len(weights), 1))
+    else:
+        weights /= float(np.sum(weights))
+    return weights
+
+
+def component_balanced_target_masses(
+    target_positions: np.ndarray,
+    *,
+    image_size: int = 64,
+    contour_dilation: int = 1,
+    min_component_pixels: int = 4,
+) -> np.ndarray:
+    """Return target mixture weights that assign equal mass to each contour component."""
+    arr = np.asarray(target_positions, dtype=np.float64)
+    if arr.ndim != 3 or arr.shape[2] != 2:
+        raise ValueError("target_positions must have shape (N, K, 2)")
+    return np.stack(
+        [
+            _component_balanced_weights_numpy(
+                cloud,
+                image_size=image_size,
+                contour_dilation=contour_dilation,
+                min_component_pixels=min_component_pixels,
+            )
+            for cloud in arr
+        ],
+        axis=0,
+    )
+
+
+def _component_balanced_target_masses_torch(
+    target_positions: Tensor,
+    *,
+    image_size: int = 64,
+    contour_dilation: int = 1,
+    min_component_pixels: int = 4,
+) -> Tensor:
+    weights = component_balanced_target_masses(
+        target_positions.detach().cpu().numpy(),
+        image_size=image_size,
+        contour_dilation=contour_dilation,
+        min_component_pixels=min_component_pixels,
+    )
+    return torch.as_tensor(weights, dtype=target_positions.dtype, device=target_positions.device)
+
+
+def _sample_component_balanced_points_torch(
+    target_positions: Tensor,
+    *,
+    image_size: int = 64,
+    contour_dilation: int = 1,
+    min_component_pixels: int = 4,
+) -> Tensor:
+    weights = _component_balanced_target_masses_torch(
+        target_positions,
+        image_size=image_size,
+        contour_dilation=contour_dilation,
+        min_component_pixels=min_component_pixels,
+    ).clamp_min(1e-12)
+    weights = weights / torch.sum(weights, dim=1, keepdim=True).clamp_min(1e-12)
+    indices = torch.multinomial(weights, num_samples=target_positions.shape[1], replacement=True)
+    return torch.gather(target_positions, 1, indices.unsqueeze(-1).expand(-1, -1, 2))
+
+
+def _sample_hole_uniform_points_torch(
+    target_positions: Tensor,
+    *,
+    image_size: int = 64,
+    hole_dilation: int = 1,
+    fallback_std: float = 0.25,
+) -> Tensor:
+    clouds = target_positions.detach().cpu().numpy()
+    out = np.empty_like(clouds, dtype=np.float32)
+    rng = np.random.default_rng()
+    for i, cloud in enumerate(clouds):
+        contour = _rasterize_points_binary(cloud, image_size=image_size, dilation=1)
+        holes = _hole_mask_numpy(contour, dilation=hole_dilation)
+        ys, xs = np.nonzero(holes)
+        if len(xs) == 0:
+            center = np.mean(cloud, axis=0)
+            out[i] = center[None, :] + float(fallback_std) * rng.normal(size=cloud.shape)
+        else:
+            pick = rng.integers(0, len(xs), size=cloud.shape[0])
+            jitter = rng.uniform(-0.35, 0.35, size=cloud.shape)
+            coords = np.stack([xs[pick], ys[pick]], axis=1).astype(np.float64)
+            out[i] = (coords + 0.5 + jitter) / float(image_size)
+    return torch.as_tensor(np.clip(out, 0.0, 1.0), dtype=target_positions.dtype, device=target_positions.device)
+
+
+def topology_diagnostics(
+    generated_positions: np.ndarray,
+    target_positions: np.ndarray,
+    *,
+    image_size: int = 64,
+    max_samples: Optional[int] = None,
+    seed: int = 0,
+) -> dict[str, float]:
+    """Compare raster topology of generated and target MNIST-CP contours."""
+    gen = np.asarray(generated_positions, dtype=np.float64)
+    tgt = np.asarray(target_positions, dtype=np.float64)
+    if gen.ndim != 3 or tgt.ndim != 3 or gen.shape[0] != tgt.shape[0]:
+        raise ValueError("generated_positions and target_positions must have matching batches")
+    rng = np.random.default_rng(int(seed))
+    if max_samples is not None and gen.shape[0] > int(max_samples):
+        idx = rng.choice(gen.shape[0], size=int(max_samples), replace=False)
+        gen = gen[idx]
+        tgt = tgt[idx]
+    gen_holes: list[float] = []
+    tgt_holes: list[float] = []
+    gen_components: list[float] = []
+    tgt_components: list[float] = []
+    hole_match: list[float] = []
+    comp_match: list[float] = []
+    occupied_ratio: list[float] = []
+    hole_leakage: list[float] = []
+    for g, t in zip(gen, tgt):
+        gs = raster_topology_summary(g, image_size=image_size)
+        ts = raster_topology_summary(t, image_size=image_size)
+        gen_holes.append(gs["hole_count"])
+        tgt_holes.append(ts["hole_count"])
+        gen_components.append(gs["component_count"])
+        tgt_components.append(ts["component_count"])
+        hole_match.append(float(gs["hole_count"] == ts["hole_count"]))
+        comp_match.append(float(gs["component_count"] == ts["component_count"]))
+        occupied_ratio.append(gs["occupied_fraction"] / max(ts["occupied_fraction"], 1e-12))
+        target_contour = _rasterize_points_binary(t, image_size=image_size, dilation=1)
+        target_holes = _hole_mask_numpy(target_contour, dilation=1)
+        gen_contour = _rasterize_points_binary(g, image_size=image_size, dilation=1)
+        hole_leakage.append(float(np.mean(gen_contour[target_holes])) if np.any(target_holes) else 0.0)
+    return {
+        "generated_hole_count_mean": float(np.mean(gen_holes)),
+        "target_hole_count_mean": float(np.mean(tgt_holes)),
+        "hole_count_accuracy": float(np.mean(hole_match)),
+        "generated_component_count_mean": float(np.mean(gen_components)),
+        "target_component_count_mean": float(np.mean(tgt_components)),
+        "component_count_accuracy": float(np.mean(comp_match)),
+        "occupied_fraction_ratio_mean": float(np.mean(occupied_ratio)),
+        "hole_leakage_mean": float(np.mean(hole_leakage)),
+        "num_samples": float(gen.shape[0]),
+    }
 
 
 def contour_thickness_diagnostics(

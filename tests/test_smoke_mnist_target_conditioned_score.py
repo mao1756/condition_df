@@ -46,6 +46,9 @@ from mnist.target_conditioned_score import (
     make_sigma_tau_schedule,
     paired_chamfer_reconstruction_metrics,
     contour_thickness_diagnostics,
+    topology_diagnostics,
+    raster_topology_summary,
+    component_balanced_target_masses,
     perturb_target_conditioned_positions,
     reconstruct_target_conditioned_point_clouds,
     reconstruct_target_conditioned_from_latents,
@@ -266,7 +269,11 @@ def test_forward_loss_and_training_smoke() -> None:
             "final_polish_steps": 0,
             "batch_size": 2,
         },
-        query_modes=("uniform",),
+        query_modes=("component_noised_target", "hole_region_uniform"),
+        component_balance_oracle=True,
+        component_balance_image_size=16,
+        component_balance_dilation=1,
+        component_balance_min_pixels=1,
         device="cpu",
         verbose=False,
         show_progress=False,
@@ -419,6 +426,13 @@ def test_sampling_and_latent_priors_smoke() -> None:
     )
     assert thickness["self_nn_mean"] >= 0.0
     assert thickness["raster_occupied_fraction_mean"] >= 0.0
+    topo = topology_diagnostics(generated.positions, positions[:2], image_size=16)
+    assert "hole_count_accuracy" in topo
+    raster_topo = raster_topology_summary(positions[0], image_size=16)
+    assert "hole_count" in raster_topo
+    balanced = component_balanced_target_masses(positions[:2], image_size=16)
+    assert balanced.shape == masses[:2].shape
+    assert np.allclose(np.sum(balanced, axis=1), 1.0)
     metrics = paired_chamfer_reconstruction_metrics(generated.positions, positions[:2], labels[:2])
     assert "mean_chamfer" in metrics
     hybrid_rows = evaluate_hybrid_oracle_neural_reconstruction(
