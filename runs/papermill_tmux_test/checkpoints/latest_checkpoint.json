@@ -1,0 +1,7 @@
+{
+  "step": 20,
+  "latest_loss": 0.08702205249460775,
+  "latest_accuracy_like": 0.92326603261614,
+  "run_name": "papermill_tmux_test",
+  "note": "This is a fake checkpoint, but it proves checkpointing works."
+}

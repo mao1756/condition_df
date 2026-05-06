@@ -1,0 +1,181 @@
+============================================================
+Started: 2026-05-06T21:41:37+00:00
+Working directory: /workspace/condition_df
+Input notebook: notebooks/papermill_tmux_test.ipynb
+Output notebook: runs/papermill_test_output.ipynb
+Log file: logs/papermill_test_output_20260506_214137.log
+RunPod action after success: delete
+============================================================
+Papermill not found in current Python environment. Installing papermill and ipykernel...
+Collecting papermill
+  Downloading papermill-2.7.0-py3-none-any.whl.metadata (13 kB)
+Requirement already satisfied: ipykernel in /usr/local/lib/python3.11/dist-packages (6.29.5)
+Collecting click (from papermill)
+  Downloading click-8.3.3-py3-none-any.whl.metadata (2.6 kB)
+Requirement already satisfied: entrypoints in /usr/local/lib/python3.11/dist-packages (from papermill) (0.4)
+Requirement already satisfied: nbclient>=0.2 in /usr/local/lib/python3.11/dist-packages (from papermill) (0.10.0)
+Requirement already satisfied: nbformat>=5.2 in /usr/local/lib/python3.11/dist-packages (from papermill) (5.10.4)
+Requirement already satisfied: pyyaml in /usr/local/lib/python3.11/dist-packages (from papermill) (6.0.2)
+Requirement already satisfied: requests in /usr/local/lib/python3.11/dist-packages (from papermill) (2.32.3)
+Collecting tenacity>=5.0.2 (from papermill)
+  Downloading tenacity-9.1.4-py3-none-any.whl.metadata (1.2 kB)
+Collecting tqdm>=4.32.2 (from papermill)
+  Downloading tqdm-4.67.3-py3-none-any.whl.metadata (57 kB)
+Requirement already satisfied: comm>=0.1.1 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (0.2.2)
+Requirement already satisfied: debugpy>=1.6.5 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (1.8.5)
+Requirement already satisfied: ipython>=7.23.1 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (8.27.0)
+Requirement already satisfied: jupyter-client>=6.1.12 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (7.4.9)
+Requirement already satisfied: jupyter-core!=5.0.*,>=4.12 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (5.7.2)
+Requirement already satisfied: matplotlib-inline>=0.1 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (0.1.7)
+Requirement already satisfied: nest-asyncio in /usr/local/lib/python3.11/dist-packages (from ipykernel) (1.6.0)
+Requirement already satisfied: packaging in /usr/local/lib/python3.11/dist-packages (from ipykernel) (24.1)
+Requirement already satisfied: psutil in /usr/local/lib/python3.11/dist-packages (from ipykernel) (6.0.0)
+Requirement already satisfied: pyzmq>=24 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (24.0.1)
+Requirement already satisfied: tornado>=6.1 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (6.4.1)
+Requirement already satisfied: traitlets>=5.4.0 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (5.14.3)
+Requirement already satisfied: decorator in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (5.1.1)
+Requirement already satisfied: jedi>=0.16 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (0.19.1)
+Requirement already satisfied: prompt-toolkit<3.1.0,>=3.0.41 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (3.0.47)
+Requirement already satisfied: pygments>=2.4.0 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (2.18.0)
+Requirement already satisfied: stack-data in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (0.6.3)
+Requirement already satisfied: typing-extensions>=4.6 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (4.9.0)
+Requirement already satisfied: pexpect>4.3 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (4.9.0)
+Requirement already satisfied: python-dateutil>=2.8.2 in /usr/local/lib/python3.11/dist-packages (from jupyter-client>=6.1.12->ipykernel) (2.9.0.post0)
+Requirement already satisfied: platformdirs>=2.5 in /usr/local/lib/python3.11/dist-packages (from jupyter-core!=5.0.*,>=4.12->ipykernel) (4.3.6)
+Requirement already satisfied: fastjsonschema>=2.15 in /usr/local/lib/python3.11/dist-packages (from nbformat>=5.2->papermill) (2.20.0)
+Requirement already satisfied: jsonschema>=2.6 in /usr/local/lib/python3.11/dist-packages (from nbformat>=5.2->papermill) (4.23.0)
+Requirement already satisfied: charset-normalizer<4,>=2 in /usr/local/lib/python3.11/dist-packages (from requests->papermill) (3.3.2)
+Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.11/dist-packages (from requests->papermill) (3.10)
+Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.11/dist-packages (from requests->papermill) (2.2.3)
+Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.11/dist-packages (from requests->papermill) (2024.8.30)
+Requirement already satisfied: parso<0.9.0,>=0.8.3 in /usr/local/lib/python3.11/dist-packages (from jedi>=0.16->ipython>=7.23.1->ipykernel) (0.8.4)
+Requirement already satisfied: attrs>=22.2.0 in /usr/local/lib/python3.11/dist-packages (from jsonschema>=2.6->nbformat>=5.2->papermill) (24.2.0)
+Requirement already satisfied: jsonschema-specifications>=2023.03.6 in /usr/local/lib/python3.11/dist-packages (from jsonschema>=2.6->nbformat>=5.2->papermill) (2023.12.1)
+Requirement already satisfied: referencing>=0.28.4 in /usr/local/lib/python3.11/dist-packages (from jsonschema>=2.6->nbformat>=5.2->papermill) (0.35.1)
+Requirement already satisfied: rpds-py>=0.7.1 in /usr/local/lib/python3.11/dist-packages (from jsonschema>=2.6->nbformat>=5.2->papermill) (0.20.0)
+Requirement already satisfied: ptyprocess>=0.5 in /usr/local/lib/python3.11/dist-packages (from pexpect>4.3->ipython>=7.23.1->ipykernel) (0.7.0)
+Requirement already satisfied: wcwidth in /usr/local/lib/python3.11/dist-packages (from prompt-toolkit<3.1.0,>=3.0.41->ipython>=7.23.1->ipykernel) (0.2.13)
+Requirement already satisfied: six>=1.5 in /usr/lib/python3/dist-packages (from python-dateutil>=2.8.2->jupyter-client>=6.1.12->ipykernel) (1.16.0)
+Requirement already satisfied: executing>=1.2.0 in /usr/local/lib/python3.11/dist-packages (from stack-data->ipython>=7.23.1->ipykernel) (2.1.0)
+Requirement already satisfied: asttokens>=2.1.0 in /usr/local/lib/python3.11/dist-packages (from stack-data->ipython>=7.23.1->ipykernel) (2.4.1)
+Requirement already satisfied: pure-eval in /usr/local/lib/python3.11/dist-packages (from stack-data->ipython>=7.23.1->ipykernel) (0.2.3)
+Downloading papermill-2.7.0-py3-none-any.whl (88 kB)
+Downloading tenacity-9.1.4-py3-none-any.whl (28 kB)
+Downloading tqdm-4.67.3-py3-none-any.whl (78 kB)
+Downloading click-8.3.3-py3-none-any.whl (110 kB)
+Installing collected packages: tqdm, tenacity, click, papermill
+Successfully installed click-8.3.3 papermill-2.7.0 tenacity-9.1.4 tqdm-4.67.3
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable.It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+
+[notice] A new release of pip is available: 24.2 -> 26.1.1
+[notice] To update, run: python -m pip install --upgrade pip
+Running Papermill...
+Command: python -m papermill notebooks/papermill_tmux_test.ipynb runs/papermill_test_output.ipynb --log-output --request-save-on-cell-execute --autosave-cell-every 60 
+Input Notebook:  notebooks/papermill_tmux_test.ipynb
+Output Notebook: runs/papermill_test_output.ipynb
+/usr/local/lib/python3.11/dist-packages/nbformat/__init__.py:96: MissingIDFieldWarning: Cell is missing an id field, this will become a hard error in future nbformat versions. You may want to use `normalize()` on your notebooks before validations (available since nbformat 5.1.4). Previous versions of nbformat are fixing this issue transparently, and will stop doing so in the future.
+  validate(nb)
+Executing notebook with kernel: python3
+Executing Cell 1---------------------------------------
+Ending Cell 1------------------------------------------
+Executing Cell 2---------------------------------------
+Ending Cell 2------------------------------------------
+Executing Cell 3---------------------------------------
+Run name: papermill_tmux_test
+Output directory: /workspace/condition_df/runs/papermill_tmux_test
+Started at: 2026-05-06T21:41:41
+
+Ending Cell 3------------------------------------------
+Executing Cell 4---------------------------------------
+<Figure size 600x300 with 1 Axes>
+Ending Cell 4------------------------------------------
+Executing Cell 5---------------------------------------
+[step 001/20] loss=0.8990, accuracy_like=0.1070
+
+[step 002/20] loss=0.8020, accuracy_like=0.2012
+
+[step 003/20] loss=0.7082, accuracy_like=0.2944
+
+[step 004/20] loss=0.6317, accuracy_like=0.3807
+
+[step 005/20] loss=0.5430, accuracy_like=0.4674
+
+Saved diagnostic figure: runs/papermill_tmux_test/figures/loss_step_0005.png
+
+<Figure size 600x300 with 1 Axes>
+[step 006/20] loss=0.4874, accuracy_like=0.5200
+
+[step 007/20] loss=0.4390, accuracy_like=0.5737
+
+[step 008/20] loss=0.3829, accuracy_like=0.6268
+
+[step 009/20] loss=0.3441, accuracy_like=0.6742
+
+[step 010/20] loss=0.3079, accuracy_like=0.6935
+
+Saved diagnostic figure: runs/papermill_tmux_test/figures/loss_step_0010.png
+
+<Figure size 600x300 with 1 Axes>
+[step 011/20] loss=0.2622, accuracy_like=0.7381
+
+[step 012/20] loss=0.2424, accuracy_like=0.7662
+
+[step 013/20] loss=0.2031, accuracy_like=0.8107
+
+[step 014/20] loss=0.1763, accuracy_like=0.8435
+
+[step 015/20] loss=0.1594, accuracy_like=0.8604
+
+Saved diagnostic figure: runs/papermill_tmux_test/figures/loss_step_0015.png
+
+<Figure size 600x300 with 1 Axes>
+[step 016/20] loss=0.1617, accuracy_like=0.8464
+
+[step 017/20] loss=0.1388, accuracy_like=0.8809
+
+[step 018/20] loss=0.1326, accuracy_like=0.8740
+
+[step 019/20] loss=0.0960, accuracy_like=0.9205
+
+[step 020/20] loss=0.0870, accuracy_like=0.9233
+
+Saved diagnostic figure: runs/papermill_tmux_test/figures/loss_step_0020.png
+
+<Figure size 600x300 with 1 Axes>
+Finished loop.
+Metrics CSV: runs/papermill_tmux_test/metrics.csv
+Metrics JSONL: runs/papermill_tmux_test/metrics.jsonl
+Latest checkpoint: runs/papermill_tmux_test/checkpoints/latest_checkpoint.json
+
+Ending Cell 5------------------------------------------
+Executing Cell 6---------------------------------------
+    step      loss  accuracy_like            timestamp
+15    16  0.161652       0.846378  2026-05-06T21:41:49
+16    17  0.138816       0.880943  2026-05-06T21:41:50
+17    18  0.132635       0.873994  2026-05-06T21:41:50
+18    19  0.096001       0.920487  2026-05-06T21:41:51
+19    20  0.087022       0.923266  2026-05-06T21:41:51
+Final checkpoint contents:
+{
+  "step": 20,
+  "latest_loss": 0.08702205249460775,
+  "latest_accuracy_like": 0.92326603261614,
+  "run_name": "papermill_tmux_test",
+  "note": "This is a fake checkpoint, but it proves checkpointing works."
+}
+
+Ending Cell 6------------------------------------------
+Executing Cell 7---------------------------------------
+Saved final figure: runs/papermill_tmux_test/figures/final_loss_curve.png
+
+<Figure size 700x400 with 1 Axes>
+Ending Cell 7------------------------------------------
+Executing Cell 8---------------------------------------
+Ending Cell 8------------------------------------------
+Papermill finished successfully at 2026-05-06T21:41:55+00:00.
+Git status before adding:
+ M run_notebook_tmux_papermill_git_terminate.sh
+?? logs/
+?? runs/
+Running: git add -A
+Force-adding output notebook and log, in case runs/ or logs/ are ignored.
