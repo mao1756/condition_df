@@ -181,6 +181,8 @@ __all__ = [
     "topology_diagnostics",
     "component_balanced_target_masses",
     "contour_thickness_diagnostics",
+    "sample_points_from_decoded_raster",
+    "decoded_raster_topology_diagnostics",
 ]
 
 
@@ -2891,6 +2893,7 @@ def train_latent_only_student_from_teacher(
     latent_classification_weight: float = 0.1,
     latent_variance_target: float = 1.0,
     posterior_mean_loss_weight: float = 0.0,
+    posterior_mean_loss_mode: str = "position",
     posterior_mean_query_modes: Sequence[str] = ("noised_target", "center_gaussian"),
     posterior_mean_target_norm_clip: Optional[float] = None,
     component_balance_oracle: bool = False,
@@ -2927,6 +2930,8 @@ def train_latent_only_student_from_teacher(
         raise ValueError("latent regularization weights must be non-negative")
     if posterior_mean_loss_weight < 0.0:
         raise ValueError("posterior_mean_loss_weight must be non-negative")
+    if posterior_mean_loss_mode not in {"position", "sigma_normalized"}:
+        raise ValueError("posterior_mean_loss_mode must be 'position' or 'sigma_normalized'")
     if freeze_latent_modules_epochs < 0:
         raise ValueError("freeze_latent_modules_epochs must be non-negative")
     if validation_chamfer_every is not None and int(validation_chamfer_every) <= 0:
@@ -3123,8 +3128,14 @@ def train_latent_only_student_from_teacher(
                     labels=batch_labels,
                 )
                 sigma = torch.sqrt((2.0 * tau[:, None]) / batch_masses).clamp_min(1e-12)
-                predicted_posterior_mean = posterior_query + sigma.unsqueeze(-1) * posterior_pred_scaled
-                posterior_loss = torch.mean(torch.sum(batch_masses.unsqueeze(-1) * (predicted_posterior_mean - oracle_posterior_mean).square(), dim=(1, 2)))
+                if posterior_mean_loss_mode == "sigma_normalized":
+                    # Match (m_sigma(x;X)-x)/sigma instead of raw position MSE.
+                    # This keeps low-sigma contour-snapping errors numerically visible.
+                    oracle_scaled = (oracle_posterior_mean - posterior_query) / sigma.unsqueeze(-1)
+                    posterior_loss = _weighted_sample_loss(posterior_pred_scaled, oracle_scaled, batch_masses)
+                else:
+                    predicted_posterior_mean = posterior_query + sigma.unsqueeze(-1) * posterior_pred_scaled
+                    posterior_loss = torch.mean(torch.sum(batch_masses.unsqueeze(-1) * (predicted_posterior_mean - oracle_posterior_mean).square(), dim=(1, 2)))
             raster_loss = batch_positions.new_tensor(0.0)
             latent_var_value = batch_positions.new_tensor(0.0)
             latent_cov_value = batch_positions.new_tensor(0.0)
@@ -3427,6 +3438,12 @@ def sample_target_conditioned_annealed_dynamics(
     final_polish_alpha: Optional[float] = None,
     fine_level_count: int = 0,
     fine_level_step_multiplier: int = 1,
+    decoded_raster_guidance_weight: float = 0.0,
+    decoded_raster_guidance_start_level: Optional[int] = None,
+    decoded_raster_guidance_num_points: Optional[int] = None,
+    decoded_raster_guidance_channel: int = 0,
+    decoded_raster_guidance_component_balance: bool = True,
+    decoded_raster_guidance_threshold_quantile: float = 0.75,
     langevin_alpha: float = 5e-5,
     score_calibration: Optional[ScoreCalibration | dict[str, Any]] = None,
     score_norm_clip: Optional[float | Sequence[float] | np.ndarray] = None,
@@ -3463,6 +3480,10 @@ def sample_target_conditioned_annealed_dynamics(
         raise ValueError("final_polish_alpha must be positive when provided")
     if fine_level_count < 0 or fine_level_step_multiplier <= 0:
         raise ValueError("fine_level_count must be non-negative and fine_level_step_multiplier positive")
+    if not (0.0 <= float(decoded_raster_guidance_weight) <= 1.0):
+        raise ValueError("decoded_raster_guidance_weight must lie in [0, 1]")
+    if decoded_raster_guidance_num_points is not None and int(decoded_raster_guidance_num_points) <= 0:
+        raise ValueError("decoded_raster_guidance_num_points must be positive when provided")
     if oracle_prefix_levels < 0 or oracle_suffix_levels < 0:
         raise ValueError("oracle prefix/suffix levels must be non-negative")
     allowed_schemes = {"theory_euler", "bridge", "langevin", "shape_gf_langevin", "oracle_shape_gf_langevin"}
@@ -3542,6 +3563,30 @@ def sample_target_conditioned_annealed_dynamics(
     else:
         raise RuntimeError("unreachable latent resolution state")
 
+    decoded_guidance_positions: Optional[Tensor] = None
+    decoded_guidance_masses: Optional[Tensor] = None
+    if decoded_raster_guidance_weight > 0.0:
+        if getattr(model, "latent_raster_decoder", None) is None:
+            raise ValueError("decoded_raster_guidance_weight > 0 requires a model with latent_raster_decoder")
+        guidance_points = int(decoded_raster_guidance_num_points or num_points_resolved)
+        decoded_guidance_positions, decoded_guidance_masses = _decoded_raster_pseudo_targets_torch(
+            model,
+            latents,
+            num_points=guidance_points,
+            channel=int(decoded_raster_guidance_channel),
+            component_balance=bool(decoded_raster_guidance_component_balance),
+            threshold_quantile=float(decoded_raster_guidance_threshold_quantile),
+        )
+    if decoded_raster_guidance_start_level is None:
+        decoded_guidance_start_index = max(0, len(levels) - max(int(fine_level_count), 4))
+    elif int(decoded_raster_guidance_start_level) < 0:
+        decoded_guidance_start_index = max(0, len(levels) + int(decoded_raster_guidance_start_level))
+    else:
+        decoded_guidance_start_index = min(int(decoded_raster_guidance_start_level), len(levels))
+
+    def _decoded_guidance_active(level_index: int) -> bool:
+        return decoded_guidance_positions is not None and level_index >= decoded_guidance_start_index
+
     def _target_slice(start_idx: int, stop: int) -> tuple[Optional[Tensor], Optional[Tensor]]:
         return (
             target_positions_tensor[start_idx:stop] if target_positions_tensor is not None else None,
@@ -3586,6 +3631,21 @@ def sample_target_conditioned_annealed_dynamics(
         explicit_clip = _explicit_clip_for_level(score_norm_clip, level_index, len(levels))
         clip_value = explicit_clip if explicit_clip is not None else calibration_clip
         physical_score = _clip_vectors_by_norm(physical_score, clip_value)
+        if _decoded_guidance_active(level_index):
+            assert decoded_guidance_positions is not None and decoded_guidance_masses is not None
+            pseudo_positions = decoded_guidance_positions[start_idx:stop]
+            pseudo_masses = decoded_guidance_masses[start_idx:stop]
+            _, pseudo_wasserstein, _ = empirical_gaussian_mixture_scaled_score(
+                batch_masses,
+                batch_positions,
+                pseudo_positions,
+                tau,
+                target_masses=pseudo_masses,
+            )
+            pseudo_physical = batch_masses.unsqueeze(-1) * pseudo_wasserstein
+            pseudo_physical = _clip_vectors_by_norm(pseudo_physical, clip_value)
+            weight = float(decoded_raster_guidance_weight)
+            physical_score = (1.0 - weight) * physical_score + weight * pseudo_physical
         return physical_score / batch_masses.unsqueeze(-1).clamp_min(1e-12)
 
     def _use_oracle_for_level(level_index: int) -> bool:
@@ -5156,6 +5216,224 @@ def _sample_hole_uniform_points_torch(
             coords = np.stack([xs[pick], ys[pick]], axis=1).astype(np.float64)
             out[i] = (coords + 0.5 + jitter) / float(image_size)
     return torch.as_tensor(np.clip(out, 0.0, 1.0), dtype=target_positions.dtype, device=target_positions.device)
+
+
+
+def _raster_topology_summary_from_mask(
+    contour_mask: np.ndarray,
+    *,
+    hole_dilation: int = 1,
+    min_component_pixels: int = 4,
+    min_hole_pixels: int = 4,
+) -> dict[str, float]:
+    contour = np.asarray(contour_mask, dtype=bool)
+    _, comp_sizes = _connected_components_numpy(contour)
+    comp_sizes_kept = [size for size in comp_sizes if size >= int(min_component_pixels)]
+    holes = _hole_mask_numpy(contour, dilation=hole_dilation)
+    _, hole_sizes = _connected_components_numpy(holes)
+    hole_sizes_kept = [size for size in hole_sizes if size >= int(min_hole_pixels)]
+    return {
+        "component_count": float(len(comp_sizes_kept)),
+        "hole_count": float(len(hole_sizes_kept)),
+        "largest_component_pixels": float(max(comp_sizes_kept) if comp_sizes_kept else 0),
+        "hole_pixels": float(sum(hole_sizes_kept)),
+        "contour_pixels": float(np.sum(contour)),
+        "hole_fraction": float(np.mean(holes)),
+        "occupied_fraction": float(np.mean(contour)),
+    }
+
+
+def _sample_points_from_probability_grid_numpy(
+    grid: np.ndarray,
+    *,
+    num_points: int,
+    component_balance: bool = False,
+    threshold_quantile: float = 0.75,
+    min_component_pixels: int = 3,
+    rng: Optional[np.random.Generator] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample [0,1]^2 points from a raster probability grid.
+
+    If ``component_balance`` is enabled, connected components of high-probability
+    pixels receive equal total mass.  This is useful for decoded rasters with an
+    outer loop plus a smaller inner loop: the small loop otherwise receives too
+    little probability mass to seed points.
+    """
+    if num_points <= 0:
+        raise ValueError("num_points must be positive")
+    rng = np.random.default_rng() if rng is None else rng
+    prob = np.asarray(grid, dtype=np.float64)
+    if prob.ndim != 2:
+        raise ValueError("grid must have shape (H, W)")
+    height, width = prob.shape
+    prob = np.nan_to_num(prob, nan=0.0, posinf=0.0, neginf=0.0)
+    prob = np.maximum(prob, 0.0)
+    if float(np.sum(prob)) <= 0.0:
+        prob = np.ones_like(prob, dtype=np.float64)
+
+    if component_balance:
+        positive_values = prob[prob > 0.0]
+        if positive_values.size > 0:
+            threshold = float(np.quantile(positive_values, float(np.clip(threshold_quantile, 0.0, 1.0))))
+        else:
+            threshold = 0.0
+        mask = prob >= max(threshold, 1e-8)
+        labels, sizes = _connected_components_numpy(mask)
+        components = [i + 1 for i, size in enumerate(sizes) if size >= int(min_component_pixels)]
+        if components:
+            component_choices = rng.integers(0, len(components), size=int(num_points), endpoint=False)
+            ys = np.empty((int(num_points),), dtype=np.int64)
+            xs = np.empty((int(num_points),), dtype=np.int64)
+            for comp_idx, label in enumerate(components):
+                out_mask = component_choices == comp_idx
+                count = int(np.sum(out_mask))
+                if count == 0:
+                    continue
+                comp_y, comp_x = np.nonzero(labels == label)
+                comp_prob = prob[comp_y, comp_x].astype(np.float64)
+                comp_prob = comp_prob / max(float(np.sum(comp_prob)), 1e-12)
+                picks = rng.choice(len(comp_x), size=count, replace=True, p=comp_prob)
+                ys[out_mask] = comp_y[picks]
+                xs[out_mask] = comp_x[picks]
+        else:
+            flat = (prob / max(float(np.sum(prob)), 1e-12)).reshape(-1)
+            picks = rng.choice(flat.size, size=int(num_points), replace=True, p=flat)
+            ys, xs = np.divmod(picks, width)
+    else:
+        flat = (prob / max(float(np.sum(prob)), 1e-12)).reshape(-1)
+        picks = rng.choice(flat.size, size=int(num_points), replace=True, p=flat)
+        ys, xs = np.divmod(picks, width)
+
+    jitter = rng.uniform(-0.45, 0.45, size=(int(num_points), 2))
+    coords = np.stack([xs.astype(np.float64), ys.astype(np.float64)], axis=1)
+    points = (coords + 0.5 + jitter) / np.asarray([[max(width, 1), max(height, 1)]], dtype=np.float64)
+    points = np.clip(points, 0.0, 1.0)
+    masses = np.full((int(num_points),), 1.0 / float(num_points), dtype=np.float64)
+    return points.astype(np.float64), masses
+
+
+def sample_points_from_decoded_raster(
+    decoded_rasters: np.ndarray,
+    *,
+    num_points: int,
+    channel: int = 0,
+    component_balance: bool = True,
+    threshold_quantile: float = 0.75,
+    min_component_pixels: int = 3,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample pseudo-target point clouds from decoded latent rasters."""
+    rasters = np.asarray(decoded_rasters, dtype=np.float64)
+    if rasters.ndim != 4:
+        raise ValueError("decoded_rasters must have shape (N, C, H, W)")
+    if channel < 0 or channel >= rasters.shape[1]:
+        raise ValueError("channel out of range")
+    rng = np.random.default_rng(int(seed))
+    clouds: list[np.ndarray] = []
+    masses: list[np.ndarray] = []
+    for raster in rasters:
+        pts, ms = _sample_points_from_probability_grid_numpy(
+            raster[int(channel)],
+            num_points=int(num_points),
+            component_balance=component_balance,
+            threshold_quantile=threshold_quantile,
+            min_component_pixels=min_component_pixels,
+            rng=rng,
+        )
+        clouds.append(pts)
+        masses.append(ms)
+    return np.stack(clouds, axis=0), np.stack(masses, axis=0)
+
+
+@torch.no_grad()
+def _decoded_raster_pseudo_targets_torch(
+    model: TargetConditionedScoreModel,
+    target_latents: Tensor,
+    *,
+    num_points: int,
+    channel: int = 0,
+    component_balance: bool = True,
+    threshold_quantile: float = 0.75,
+    min_component_pixels: int = 3,
+) -> tuple[Tensor, Tensor]:
+    if getattr(model, "latent_raster_decoder", None) is None:
+        raise RuntimeError("decoded-raster guidance requires model.latent_raster_decoder")
+    decoded = model.predict_target_raster_from_latent(target_latents).detach().cpu().numpy()
+    pts, masses = sample_points_from_decoded_raster(
+        decoded,
+        num_points=int(num_points),
+        channel=int(channel),
+        component_balance=component_balance,
+        threshold_quantile=float(threshold_quantile),
+        min_component_pixels=int(min_component_pixels),
+        seed=0,
+    )
+    return (
+        torch.as_tensor(pts, dtype=target_latents.dtype, device=target_latents.device),
+        torch.as_tensor(masses, dtype=target_latents.dtype, device=target_latents.device),
+    )
+
+
+@torch.no_grad()
+def decoded_raster_topology_diagnostics(
+    model: TargetConditionedScoreModel,
+    masses: np.ndarray,
+    target_positions: np.ndarray,
+    labels: Optional[np.ndarray] = None,
+    *,
+    channel: int = 0,
+    threshold: float = 0.5,
+    max_samples: Optional[int] = None,
+    batch_size: int = 64,
+    device: Optional[str | torch.device] = None,
+) -> dict[str, float]:
+    """Compare decoded latent rasters against true target-contour topology."""
+    masses_arr = np.asarray(masses, dtype=np.float32)
+    positions_arr = np.asarray(target_positions, dtype=np.float32)
+    if masses_arr.ndim != 2 or positions_arr.shape != (*masses_arr.shape, 2):
+        raise ValueError("masses and target_positions must have shapes (N,K), (N,K,2)")
+    labels_arr = None if labels is None else np.asarray(labels, dtype=np.int64).reshape(-1)
+    n = masses_arr.shape[0]
+    if max_samples is not None:
+        n = min(n, int(max_samples))
+        masses_arr = masses_arr[:n]
+        positions_arr = positions_arr[:n]
+        labels_arr = None if labels_arr is None else labels_arr[:n]
+    model_device = _resolve_device(device)
+    was_training = model.training
+    model = model.to(model_device)
+    model.eval()
+    decoded_summaries: list[dict[str, float]] = []
+    target_summaries: list[dict[str, float]] = []
+    for start in range(0, n, int(batch_size)):
+        stop = min(start + int(batch_size), n)
+        batch_masses = torch.from_numpy(masses_arr[start:stop]).to(model_device)
+        batch_positions = torch.from_numpy(positions_arr[start:stop]).to(model_device)
+        z = model.encode_target(batch_masses, batch_positions)
+        if getattr(model, "latent_raster_decoder", None) is None:
+            raise RuntimeError("model must have latent_raster_decoder enabled")
+        decoded = model.predict_target_raster_from_latent(z).detach().cpu().numpy()
+        for local_index, raster in enumerate(decoded):
+            contour = raster[int(channel)] >= float(threshold)
+            decoded_summaries.append(_raster_topology_summary_from_mask(contour))
+            target_summaries.append(raster_topology_summary(positions_arr[start + local_index], image_size=raster.shape[-1]))
+    if was_training:
+        model.train()
+    def _mean(key: str, rows: list[dict[str, float]]) -> float:
+        return float(np.mean([row[key] for row in rows])) if rows else float("nan")
+    hole_match = [float(a["hole_count"] == b["hole_count"]) for a, b in zip(decoded_summaries, target_summaries)]
+    comp_match = [float(a["component_count"] == b["component_count"]) for a, b in zip(decoded_summaries, target_summaries)]
+    return {
+        "decoded_hole_count_mean": _mean("hole_count", decoded_summaries),
+        "target_hole_count_mean": _mean("hole_count", target_summaries),
+        "decoded_component_count_mean": _mean("component_count", decoded_summaries),
+        "target_component_count_mean": _mean("component_count", target_summaries),
+        "decoded_hole_count_accuracy": float(np.mean(hole_match)) if hole_match else float("nan"),
+        "decoded_component_count_accuracy": float(np.mean(comp_match)) if comp_match else float("nan"),
+        "decoded_occupied_fraction_mean": _mean("occupied_fraction", decoded_summaries),
+        "target_occupied_fraction_mean": _mean("occupied_fraction", target_summaries),
+        "num_samples": float(n),
+    }
 
 
 def topology_diagnostics(
