@@ -46,6 +46,7 @@ from mnist.target_conditioned_score import (
     make_sigma_tau_schedule,
     paired_chamfer_reconstruction_metrics,
     contour_thickness_diagnostics,
+    decoded_raster_topology_diagnostics,
     topology_diagnostics,
     raster_topology_summary,
     component_balanced_target_masses,
@@ -53,6 +54,7 @@ from mnist.target_conditioned_score import (
     reconstruct_target_conditioned_point_clouds,
     reconstruct_target_conditioned_from_latents,
     sample_empirical_latent_prior,
+    sample_points_from_decoded_raster,
     sample_gaussian_latent_prior,
     sample_oracle_mixture_annealed_dynamics,
     sample_pca_latent_prior,
@@ -227,6 +229,24 @@ def test_forward_loss_and_training_smoke() -> None:
     z = model.encode_target(batch_masses, clean)
     raster = model.predict_target_raster_from_latent(z)
     assert raster.shape[0] == 2 and raster.ndim == 4
+    pseudo_pts, pseudo_masses = sample_points_from_decoded_raster(
+        raster.detach().cpu().numpy(),
+        num_points=clean.shape[1],
+        component_balance=True,
+        seed=12,
+    )
+    assert pseudo_pts.shape == tuple(clean.shape)
+    assert pseudo_masses.shape == tuple(batch_masses.shape)
+    decoded_topo = decoded_raster_topology_diagnostics(
+        model,
+        masses[:2],
+        positions[:2],
+        labels[:2],
+        max_samples=2,
+        batch_size=2,
+        device="cpu",
+    )
+    assert "decoded_hole_count_accuracy" in decoded_topo
     raster_loss, raster_metrics = model.latent_raster_reconstruction_loss(z, batch_masses, clean)
     assert torch.isfinite(raster_loss)
     assert "latent_raster_loss" in raster_metrics
@@ -254,6 +274,7 @@ def test_forward_loss_and_training_smoke() -> None:
         latent_covariance_weight=0.01,
         latent_classification_weight=0.05,
         posterior_mean_loss_weight=0.1,
+        posterior_mean_loss_mode="sigma_normalized",
         posterior_mean_query_modes=("noised_target",),
         latent_autoencoder=latent_ae,
         initialize_from_latent_autoencoder=True,
@@ -409,6 +430,9 @@ def test_sampling_and_latent_priors_smoke() -> None:
         state_projection="none",
         langevin_alpha=1e-5,
         final_polish_steps=0,
+        decoded_raster_guidance_weight=0.1,
+        decoded_raster_guidance_start_level=-1,
+        decoded_raster_guidance_component_balance=True,
         oracle_prefix_levels=1,
         batch_size=2,
         device="cpu",
