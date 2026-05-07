@@ -3141,7 +3141,18 @@ def train_latent_only_student_from_teacher(
             return torch.full_like(batch_positions, 0.5)
         if mode == "center_gaussian":
             return 0.5 + float(direct_query_center_std) * torch.randn_like(batch_positions)
-        if mode in {"component_noised_target", "component_center_gaussian", "hole_region_uniform"}:
+        # Delegate all component/topology-aware modes to the shared direct-query
+        # sampler.  The notebook's topology refinement uses corner_* modes, and
+        # posterior-mean distillation reuses ``query_modes``; keeping this branch
+        # in sync avoids runtime failures when new query modes are added there.
+        topology_query_modes = {
+            "component_noised_target",
+            "component_center_gaussian",
+            "hole_region_uniform",
+            "corner_noised_target",
+            "corner_region_uniform",
+        }
+        if mode in topology_query_modes:
             return _sample_direct_mixture_query_positions(
                 batch_positions,
                 batch_masses,
@@ -3153,7 +3164,12 @@ def train_latent_only_student_from_teacher(
                 component_balance_dilation=component_balance_dilation,
                 component_balance_min_pixels=component_balance_min_pixels,
             )
-        raise ValueError(f"unknown query mode {mode!r}")
+        raise ValueError(
+            f"unknown query mode {mode!r}; supported modes are "
+            "'noised_target', 'uniform', 'fixed_center', 'center_gaussian', "
+            "'component_noised_target', 'component_center_gaussian', "
+            "'hole_region_uniform', 'corner_noised_target', 'corner_region_uniform'"
+        )
 
     def _latent_only_validation_chamfer(epoch_index: int) -> float:
         if val_masses is None or val_positions is None:
