@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 import copy
+from contextlib import nullcontext
 import hashlib
 import math
 
@@ -182,6 +183,8 @@ __all__ = [
     "component_balanced_target_masses",
     "contour_thickness_diagnostics",
     "sample_points_from_decoded_raster",
+    "coverage_reseed_positions",
+    "corner_points_from_contour",
     "decoded_raster_topology_diagnostics",
 ]
 
@@ -264,6 +267,19 @@ def _weighted_mean_and_std(h: Tensor, masses: Tensor) -> tuple[Tensor, Tensor]:
 
 def _uniform_masses(num_samples: int, num_points: int, *, dtype: np.dtype | type = np.float64) -> np.ndarray:
     return np.full((int(num_samples), int(num_points)), 1.0 / float(num_points), dtype=dtype)
+
+
+def _amp_autocast_context(device: torch.device, enabled: bool) -> Any:
+    if not enabled or device.type != "cuda":
+        return nullcontext()
+    return torch.autocast(device_type="cuda", dtype=torch.float16)
+
+
+def _make_grad_scaler(device: torch.device, enabled: bool) -> Any:
+    try:
+        return torch.amp.GradScaler("cuda", enabled=bool(enabled and device.type == "cuda"))
+    except Exception:
+        return torch.cuda.amp.GradScaler(enabled=bool(enabled and device.type == "cuda"))
 
 
 def _clip_vectors_by_norm(vectors: Tensor, max_norm: Optional[float | Tensor]) -> Tensor:
@@ -732,6 +748,9 @@ class TargetConditionedScoreModel(nn.Module):
         self.measure_gate_max = float(measure_gate_max)
         self.score_conditioning_mode = str(score_conditioning_mode)
         self.measure_residual_active = True
+        self._target_raster_cache_enabled = False
+        self._target_raster_cache_max_items = 2048
+        self._target_raster_cache: dict[str, Tensor] = {}
 
         self.target_encoder = TargetPointCloudEncoder(
             latent_dim=latent_dim,
@@ -870,16 +889,70 @@ class TargetConditionedScoreModel(nn.Module):
     def encode_target(self, target_masses: Tensor, target_positions: Tensor) -> Tensor:
         return self.target_encoder(target_masses, target_positions)
 
+    def set_target_raster_cache(self, enabled: bool = True, *, max_items: int = 2048, clear: bool = False) -> None:
+        """Enable/disable a small per-target raster cache.
+
+        The cache avoids rebuilding fixed target rasters every epoch.  It is keyed
+        by CPU bytes of one target's masses/positions and stores detached CPU
+        tensors, so it is safe across devices but should be bounded.
+        """
+        self._target_raster_cache_enabled = bool(enabled)
+        self._target_raster_cache_max_items = max(1, int(max_items))
+        if clear or not enabled:
+            self._target_raster_cache.clear()
+
+    def clear_target_raster_cache(self) -> None:
+        self._target_raster_cache.clear()
+
+    def _target_raster_cache_key(self, target_masses: Tensor, target_positions: Tensor, index: int) -> str:
+        masses_np = target_masses[index].detach().cpu().contiguous().numpy().astype(np.float32, copy=False)
+        pos_np = target_positions[index].detach().cpu().contiguous().numpy().astype(np.float32, copy=False)
+        h = hashlib.sha1()
+        h.update(str(self.grid_size).encode())
+        h.update(str(int(self.include_occupancy_channel)).encode())
+        h.update(masses_np.tobytes())
+        h.update(pos_np.tobytes())
+        return h.hexdigest()
+
     def _rasterize_target_measure(self, target_masses: Tensor, target_positions: Tensor) -> Tensor:
         _validate_probability_masses(target_masses, name="target_masses")
         _validate_positions_tensor(target_positions, target_masses, name="target_positions")
-        return _rasterize_weighted_point_clouds_torch(
-            target_masses,
-            target_positions,
-            grid_size=self.grid_size,
-            periodic=False,
-            include_occupancy=self.include_occupancy_channel,
-        )
+        if not self._target_raster_cache_enabled or target_positions.shape[0] <= 0:
+            return _rasterize_weighted_point_clouds_torch(
+                target_masses,
+                target_positions,
+                grid_size=self.grid_size,
+                periodic=False,
+                include_occupancy=self.include_occupancy_channel,
+            )
+        rasters: list[Tensor] = []
+        missing_indices: list[int] = []
+        missing_keys: list[str] = []
+        for i in range(int(target_positions.shape[0])):
+            key = self._target_raster_cache_key(target_masses, target_positions, i)
+            cached = self._target_raster_cache.get(key)
+            if cached is None:
+                missing_indices.append(i)
+                missing_keys.append(key)
+                rasters.append(target_positions.new_empty((0,)))
+            else:
+                rasters.append(cached.to(device=target_positions.device, dtype=target_positions.dtype))
+        if missing_indices:
+            idx = torch.as_tensor(missing_indices, device=target_positions.device, dtype=torch.long)
+            computed = _rasterize_weighted_point_clouds_torch(
+                target_masses.index_select(0, idx),
+                target_positions.index_select(0, idx),
+                grid_size=self.grid_size,
+                periodic=False,
+                include_occupancy=self.include_occupancy_channel,
+            )
+            for local, (batch_index, key) in enumerate(zip(missing_indices, missing_keys)):
+                raster = computed[local].detach().cpu()
+                if len(self._target_raster_cache) >= self._target_raster_cache_max_items:
+                    self._target_raster_cache.pop(next(iter(self._target_raster_cache)))
+                self._target_raster_cache[key] = raster
+                rasters[batch_index] = raster.to(device=target_positions.device, dtype=target_positions.dtype)
+        return torch.stack(rasters, dim=0)
 
     def predict_target_raster_from_latent(self, target_latents: Tensor) -> Tensor:
         """Decode a target raster from ``z`` when no target positions are available."""
@@ -1335,17 +1408,22 @@ def train_latent_shape_autoencoder(
     verbose: bool = True,
     show_progress: bool = False,
     progress_desc: str = "latent shape AE",
+    dataloader_num_workers: int = 0,
+    pin_memory: Optional[bool] = None,
+    use_amp: bool = False,
 ) -> dict[str, list[float]]:
     """Pretrain ``X -> z -> raster(X)`` before latent-only score distillation."""
     if epochs <= 0 or batch_size <= 0 or lr <= 0.0:
         raise ValueError("epochs, batch_size and lr must be positive")
     model_device = _resolve_device(device)
     model = model.to(model_device)
-    loader = _make_tensor_loader(masses, positions, labels, batch_size=batch_size, shuffle=True)
+    pin = bool(model_device.type == "cuda") if pin_memory is None else bool(pin_memory)
+    loader = _make_tensor_loader(masses, positions, labels, batch_size=batch_size, shuffle=True, num_workers=dataloader_num_workers, pin_memory=pin)
     val_loader = None
     if val_masses is not None and val_positions is not None:
-        val_loader = _make_tensor_loader(val_masses, val_positions, val_labels, batch_size=batch_size, shuffle=False)
+        val_loader = _make_tensor_loader(val_masses, val_positions, val_labels, batch_size=batch_size, shuffle=False, num_workers=dataloader_num_workers, pin_memory=pin)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scaler = _make_grad_scaler(model_device, use_amp)
     history: dict[str, list[float]] = {
         "train_loss": [],
         "train_raster_loss": [],
@@ -1370,26 +1448,29 @@ def train_latent_shape_autoencoder(
             batch_masses = batch_masses.to(model_device)
             batch_positions = batch_positions.to(model_device)
             batch_labels = batch_labels.to(model_device)
-            loss_value, metrics = latent_shape_autoencoder_loss(
-                model,
-                batch_masses,
-                batch_positions,
-                batch_labels,
-                raster_loss=raster_loss,
-                positive_weight=positive_weight,
-                dice_weight=dice_weight,
-                blur_steps=blur_steps,
-                latent_variance_weight=latent_variance_weight,
-                latent_covariance_weight=latent_covariance_weight,
-                latent_variance_target=latent_variance_target,
-                latent_classification_weight=latent_classification_weight,
-            )
+            with _amp_autocast_context(model_device, use_amp):
+                loss_value, metrics = latent_shape_autoencoder_loss(
+                    model,
+                    batch_masses,
+                    batch_positions,
+                    batch_labels,
+                    raster_loss=raster_loss,
+                    positive_weight=positive_weight,
+                    dice_weight=dice_weight,
+                    blur_steps=blur_steps,
+                    latent_variance_weight=latent_variance_weight,
+                    latent_covariance_weight=latent_covariance_weight,
+                    latent_variance_target=latent_variance_target,
+                    latent_classification_weight=latent_classification_weight,
+                )
             if train:
                 optimizer.zero_grad(set_to_none=True)
-                loss_value.backward()
+                scaler.scale(loss_value).backward()
                 if max_grad_norm is not None:
+                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), float(max_grad_norm))
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
             bsz = int(batch_masses.shape[0])
             count += bsz
             totals["loss"] += float(metrics["loss"]) * bsz
@@ -1814,6 +1895,8 @@ def _sample_direct_mixture_query_positions(
         "component_noised_target",
         "component_center_gaussian",
         "hole_region_uniform",
+        "corner_noised_target",
+        "corner_region_uniform",
     }
     modes = tuple(str(mode) for mode in query_modes)
     unknown = set(modes) - allowed
@@ -1830,6 +1913,7 @@ def _sample_direct_mixture_query_positions(
     centered = center + float(center_std) * (high - low) * torch.randn_like(clean_positions)
     fixed = torch.full_like(clean_positions, center)
     component_points = None
+    corner_points = None
     hole_uniform = None
     if "component_noised_target" in modes or "component_center_gaussian" in modes:
         component_points = _sample_component_balanced_points_torch(
@@ -1837,6 +1921,13 @@ def _sample_direct_mixture_query_positions(
             image_size=component_balance_image_size,
             contour_dilation=component_balance_dilation,
             min_component_pixels=component_balance_min_pixels,
+        )
+    if "corner_noised_target" in modes or "corner_region_uniform" in modes:
+        corner_points = _sample_corner_points_torch(
+            clean_positions,
+            image_size=component_balance_image_size,
+            contour_dilation=component_balance_dilation,
+            corner_quantile=0.70,
         )
     if "hole_region_uniform" in modes:
         hole_uniform = _sample_hole_uniform_points_torch(
@@ -1869,6 +1960,14 @@ def _sample_direct_mixture_query_positions(
             if hole_uniform is None:
                 raise RuntimeError("hole_uniform unexpectedly missing")
             out[mask] = hole_uniform[mask]
+        elif mode == "corner_noised_target":
+            if corner_points is None:
+                raise RuntimeError("corner_points unexpectedly missing")
+            out[mask] = corner_points[mask] + sigma[mask] * torch.randn_like(corner_points[mask])
+        elif mode == "corner_region_uniform":
+            if corner_points is None:
+                raise RuntimeError("corner_points unexpectedly missing")
+            out[mask] = corner_points[mask] + 0.5 * sigma[mask] * torch.randn_like(corner_points[mask])
         else:
             out[mask] = fixed[mask]
     if projection != "none":
@@ -2037,6 +2136,8 @@ def _make_tensor_loader(
     *,
     batch_size: int,
     shuffle: bool,
+    num_workers: int = 0,
+    pin_memory: bool = False,
 ) -> DataLoader[tuple[Tensor, Tensor, Tensor]]:
     masses_arr = np.asarray(masses, dtype=np.float32)
     positions_arr = np.asarray(positions, dtype=np.float32)
@@ -2052,7 +2153,15 @@ def _make_tensor_loader(
         torch.from_numpy(positions_arr),
         torch.from_numpy(labels_arr),
     )
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    workers = max(0, int(num_workers))
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=workers,
+        pin_memory=bool(pin_memory),
+        persistent_workers=workers > 0,
+    )
 
 
 
@@ -2522,6 +2631,9 @@ def train_target_conditioned_score_model(
     verbose: bool = True,
     show_progress: bool = False,
     progress_desc: str = "target score training",
+    dataloader_num_workers: int = 0,
+    pin_memory: Optional[bool] = None,
+    use_amp: bool = False,
 ) -> dict[str, list[float]]:
     """Train ``f_phi`` and ``S_theta`` by target-conditioned mixed score matching.
 
@@ -2551,7 +2663,8 @@ def train_target_conditioned_score_model(
     model_device = _resolve_device(device)
     model = model.to(model_device)
     model.train()
-    loader = _make_tensor_loader(masses, positions, labels, batch_size=batch_size, shuffle=True)
+    pin = bool(model_device.type == "cuda") if pin_memory is None else bool(pin_memory)
+    loader = _make_tensor_loader(masses, positions, labels, batch_size=batch_size, shuffle=True, num_workers=dataloader_num_workers, pin_memory=pin)
     enc_lr = lr if encoder_lr is None else float(encoder_lr)
     optimizer = torch.optim.Adam(
         [
@@ -2560,6 +2673,7 @@ def train_target_conditioned_score_model(
         ],
         weight_decay=weight_decay,
     )
+    scaler = _make_grad_scaler(model_device, use_amp)
     scheduler = None
     if lr_scheduler_patience is not None and int(lr_scheduler_patience) >= 0:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -2628,16 +2742,17 @@ def train_target_conditioned_score_model(
                 oracle_replay_diffusion_temperature=oracle_replay_diffusion_temperature,
                 oracle_replay_score_scale=oracle_replay_score_scale,
             )
-            pred_scaled = model.predict_scaled_score(
-                batch_masses,
-                query,
-                tau_used,
-                target_positions=batch_positions,
-                target_masses=batch_masses,
-                labels=batch_labels,
-            )
-            loss, metrics = target_conditioned_score_matching_loss(pred_scaled, target_scaled, batch_masses, tau_used, time_weighting=time_weighting)
-            objective_loss = loss * (float(oracle_replay_weight) if target_kind == "oracle_replay" else 1.0)
+            with _amp_autocast_context(model_device, use_amp):
+                pred_scaled = model.predict_scaled_score(
+                    batch_masses,
+                    query,
+                    tau_used,
+                    target_positions=batch_positions,
+                    target_masses=batch_masses,
+                    labels=batch_labels,
+                )
+                loss, metrics = target_conditioned_score_matching_loss(pred_scaled, target_scaled, batch_masses, tau_used, time_weighting=time_weighting)
+                objective_loss = loss * (float(oracle_replay_weight) if target_kind == "oracle_replay" else 1.0)
             latent_raster_loss_value = batch_positions.new_tensor(0.0)
             latent_var_value = batch_positions.new_tensor(0.0)
             latent_cov_value = batch_positions.new_tensor(0.0)
@@ -2682,10 +2797,12 @@ def train_target_conditioned_score_model(
                 gate = model._measure_residual_gate_tensor().to(device=objective_loss.device, dtype=objective_loss.dtype)
                 objective_loss = objective_loss + float(measure_gate_regularization) * gate.square()
             optimizer.zero_grad(set_to_none=True)
-            objective_loss.backward()
+            scaler.scale(objective_loss).backward()
             if max_grad_norm is not None:
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(max_grad_norm))
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             bsz = int(batch_masses.shape[0])
             total_loss += float(objective_loss.detach().item()) * bsz
             total_sample_loss += float(metrics["sample_loss"]) * bsz
@@ -2914,6 +3031,9 @@ def train_latent_only_student_from_teacher(
     verbose: bool = True,
     show_progress: bool = False,
     progress_desc: str = "latent student",
+    dataloader_num_workers: int = 0,
+    pin_memory: Optional[bool] = None,
+    use_amp: bool = False,
 ) -> dict[str, list[float]]:
     """Distill a latent-only student from a successful target-grid teacher.
 
@@ -2944,6 +3064,7 @@ def train_latent_only_student_from_teacher(
     model_device = _resolve_device(device)
     teacher = teacher.to(model_device)
     student = student.to(model_device)
+    pin = bool(model_device.type == "cuda") if pin_memory is None else bool(pin_memory)
     if latent_autoencoder is not None:
         latent_autoencoder = latent_autoencoder.to(model_device)
         latent_autoencoder.eval()
@@ -2951,8 +3072,9 @@ def train_latent_only_student_from_teacher(
             initialize_score_model_from_latent_autoencoder(student, latent_autoencoder)
     teacher.eval()
     student.train()
-    loader = _make_tensor_loader(masses, positions, labels, batch_size=batch_size, shuffle=True)
+    loader = _make_tensor_loader(masses, positions, labels, batch_size=batch_size, shuffle=True, num_workers=dataloader_num_workers, pin_memory=pin)
     optimizer = torch.optim.Adam(student.parameters(), lr=lr, weight_decay=weight_decay)
+    scaler = _make_grad_scaler(model_device, use_amp)
     history: dict[str, list[float]] = {
         "train_loss": [],
         "train_distill_loss": [],
@@ -3070,26 +3192,27 @@ def train_latent_only_student_from_teacher(
             batch_labels = batch_labels.to(model_device)
             tau = _sample_tau_from_levels(int(batch_masses.shape[0]), tau_arr, device=model_device, dtype=batch_positions.dtype)
             query = _batch_query(batch_masses, batch_positions, tau)
-            with torch.no_grad():
-                teacher_scaled = teacher.predict_scaled_score(
+            with _amp_autocast_context(model_device, use_amp):
+                with torch.no_grad():
+                    teacher_scaled = teacher.predict_scaled_score(
+                        batch_masses,
+                        query,
+                        tau,
+                        target_positions=batch_positions,
+                        target_masses=batch_masses,
+                        labels=batch_labels,
+                    )
+                    if teacher_temperature != 1.0:
+                        teacher_scaled = float(teacher_temperature) * teacher_scaled
+                student_latents = student.encode_target(batch_masses, batch_positions)
+                student_scaled = student.predict_scaled_score(
                     batch_masses,
                     query,
                     tau,
-                    target_positions=batch_positions,
-                    target_masses=batch_masses,
+                    target_latents=student_latents,
                     labels=batch_labels,
                 )
-                if teacher_temperature != 1.0:
-                    teacher_scaled = float(teacher_temperature) * teacher_scaled
-            student_latents = student.encode_target(batch_masses, batch_positions)
-            student_scaled = student.predict_scaled_score(
-                batch_masses,
-                query,
-                tau,
-                target_latents=student_latents,
-                labels=batch_labels,
-            )
-            distill_loss = _weighted_sample_loss(student_scaled, teacher_scaled, batch_masses)
+                distill_loss = _weighted_sample_loss(student_scaled, teacher_scaled, batch_masses)
             posterior_loss = batch_positions.new_tensor(0.0)
             if posterior_mean_loss_weight > 0.0:
                 if len(posterior_mean_query_modes) == 0:
@@ -3169,10 +3292,12 @@ def train_latent_only_student_from_teacher(
                 loss = loss + float(latent_classification_weight) * latent_class_value
                 latent_class_accuracy = float(latent_class_metrics["latent_class_accuracy"])
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            scaler.scale(loss).backward()
             if max_grad_norm is not None:
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(student.parameters(), float(max_grad_norm))
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             bsz = int(batch_masses.shape[0])
             total += float(loss.detach().item()) * bsz
             total_distill += float(distill_loss.detach().item()) * bsz
@@ -3197,7 +3322,7 @@ def train_latent_only_student_from_teacher(
         history["latent_modules_frozen"].append(float(epoch < int(freeze_latent_modules_epochs)))
 
         if val_masses is not None and val_positions is not None:
-            val_loader = _make_tensor_loader(val_masses, val_positions, val_labels, batch_size=batch_size, shuffle=False)
+            val_loader = _make_tensor_loader(val_masses, val_positions, val_labels, batch_size=batch_size, shuffle=False, num_workers=dataloader_num_workers, pin_memory=pin)
             val_loss = 0.0
             val_items = 0
             student.eval()
@@ -3444,6 +3569,13 @@ def sample_target_conditioned_annealed_dynamics(
     decoded_raster_guidance_channel: int = 0,
     decoded_raster_guidance_component_balance: bool = True,
     decoded_raster_guidance_threshold_quantile: float = 0.75,
+    decoded_raster_guidance_sampler_mode: str = "uniform_fps",
+    decoded_raster_guidance_corner_weight: float = 1.0,
+    decoded_raster_guidance_jitter_scale: float = 0.35,
+    coverage_reseed_fraction: float = 0.0,
+    coverage_reseed_start_level: Optional[int] = None,
+    coverage_reseed_every: int = 1,
+    coverage_reseed_jitter: float = 0.01,
     langevin_alpha: float = 5e-5,
     score_calibration: Optional[ScoreCalibration | dict[str, Any]] = None,
     score_norm_clip: Optional[float | Sequence[float] | np.ndarray] = None,
@@ -3484,6 +3616,12 @@ def sample_target_conditioned_annealed_dynamics(
         raise ValueError("decoded_raster_guidance_weight must lie in [0, 1]")
     if decoded_raster_guidance_num_points is not None and int(decoded_raster_guidance_num_points) <= 0:
         raise ValueError("decoded_raster_guidance_num_points must be positive when provided")
+    if not (0.0 <= float(coverage_reseed_fraction) <= 1.0):
+        raise ValueError("coverage_reseed_fraction must lie in [0, 1]")
+    if coverage_reseed_every <= 0:
+        raise ValueError("coverage_reseed_every must be positive")
+    if coverage_reseed_jitter < 0.0:
+        raise ValueError("coverage_reseed_jitter must be non-negative")
     if oracle_prefix_levels < 0 or oracle_suffix_levels < 0:
         raise ValueError("oracle prefix/suffix levels must be non-negative")
     allowed_schemes = {"theory_euler", "bridge", "langevin", "shape_gf_langevin", "oracle_shape_gf_langevin"}
@@ -3576,6 +3714,9 @@ def sample_target_conditioned_annealed_dynamics(
             channel=int(decoded_raster_guidance_channel),
             component_balance=bool(decoded_raster_guidance_component_balance),
             threshold_quantile=float(decoded_raster_guidance_threshold_quantile),
+            sampler_mode=decoded_raster_guidance_sampler_mode,
+            corner_weight=float(decoded_raster_guidance_corner_weight),
+            jitter_scale=float(decoded_raster_guidance_jitter_scale),
         )
     if decoded_raster_guidance_start_level is None:
         decoded_guidance_start_index = max(0, len(levels) - max(int(fine_level_count), 4))
@@ -3583,6 +3724,32 @@ def sample_target_conditioned_annealed_dynamics(
         decoded_guidance_start_index = max(0, len(levels) + int(decoded_raster_guidance_start_level))
     else:
         decoded_guidance_start_index = min(int(decoded_raster_guidance_start_level), len(levels))
+    if coverage_reseed_start_level is None:
+        coverage_reseed_start_index = decoded_guidance_start_index
+    elif int(coverage_reseed_start_level) < 0:
+        coverage_reseed_start_index = max(0, len(levels) + int(coverage_reseed_start_level))
+    else:
+        coverage_reseed_start_index = min(int(coverage_reseed_start_level), len(levels))
+
+    def _coverage_reseed_batch(batch_positions: Tensor, start_idx: int, stop: int, *, level_index: int, inner_step: int) -> Tensor:
+        if decoded_guidance_positions is None or coverage_reseed_fraction <= 0.0:
+            return batch_positions
+        if level_index < coverage_reseed_start_index or (inner_step % int(coverage_reseed_every)) != 0:
+            return batch_positions
+        num_replace = int(round(float(coverage_reseed_fraction) * batch_positions.shape[1]))
+        if num_replace <= 0:
+            return batch_positions
+        pseudo = decoded_guidance_positions[start_idx:stop].to(device=batch_positions.device, dtype=batch_positions.dtype)
+        d2 = torch.cdist(pseudo, batch_positions).square()
+        min_d2 = torch.min(d2, dim=2).values
+        topk = torch.topk(min_d2, k=min(num_replace, pseudo.shape[1]), dim=1).indices
+        replacement = torch.gather(pseudo, 1, topk.unsqueeze(-1).expand(-1, -1, 2))
+        if coverage_reseed_jitter > 0.0:
+            replacement = replacement + float(coverage_reseed_jitter) * torch.randn_like(replacement)
+        replace_idx = torch.randint(0, batch_positions.shape[1], (batch_positions.shape[0], replacement.shape[1]), device=batch_positions.device)
+        out = batch_positions.clone()
+        out.scatter_(1, replace_idx.unsqueeze(-1).expand(-1, -1, 2), replacement)
+        return project_positions(out, mode=state_projection)
 
     def _decoded_guidance_active(level_index: int) -> bool:
         return decoded_guidance_positions is not None and level_index >= decoded_guidance_start_index
@@ -3678,6 +3845,7 @@ def sample_target_conditioned_annealed_dynamics(
                 else:
                     batch_positions = clean_estimate
                 batch_positions = project_positions(batch_positions, mode=state_projection)
+                batch_positions = _coverage_reseed_batch(batch_positions, start_idx, stop, level_index=level_id, inner_step=int(polish_step))
                 positions[start_idx:stop] = batch_positions
             if return_trajectories:
                 trajectory_snapshots.append(positions.detach().cpu().numpy().astype(np.float64))
@@ -3688,7 +3856,7 @@ def sample_target_conditioned_annealed_dynamics(
             level_steps = int(steps_per_level)
             if fine_level_count > 0 and level_id >= len(levels) - int(fine_level_count):
                 level_steps *= int(fine_level_step_multiplier)
-            for _ in _progress_range(level_steps, enabled=show_progress, desc=f"{progress_desc}: level {level_id + 1}/{len(levels)}", leave=False):
+            for inner_step in _progress_range(level_steps, enabled=show_progress, desc=f"{progress_desc}: level {level_id + 1}/{len(levels)}", leave=False):
                 for start_idx in range(0, num_samples, batch_size):
                     stop = min(start_idx + batch_size, num_samples)
                     batch_masses = masses[start_idx:stop]
@@ -3704,6 +3872,7 @@ def sample_target_conditioned_annealed_dynamics(
                     physical_score = batch_masses.unsqueeze(-1) * score
                     batch_positions = batch_positions + 0.5 * float(langevin_alpha) * ratio.square() * float(score_scale) * physical_score
                     batch_positions = project_positions(batch_positions, mode=state_projection)
+                    batch_positions = _coverage_reseed_batch(batch_positions, start_idx, stop, level_index=level_id, inner_step=int(inner_step))
                     positions[start_idx:stop] = batch_positions
             if return_trajectories:
                 trajectory_snapshots.append(positions.detach().cpu().numpy().astype(np.float64))
@@ -3734,7 +3903,7 @@ def sample_target_conditioned_annealed_dynamics(
     if final_polish_steps > 0 and not pure_oracle:
         tau_value = float(levels[-1])
         level_id = len(levels) - 1
-        for _ in _progress_range(int(final_polish_steps), enabled=show_progress, desc=f"{progress_desc}: final polish", leave=False):
+        for polish_step in _progress_range(int(final_polish_steps), enabled=show_progress, desc=f"{progress_desc}: final polish", leave=False):
             for start_idx in range(0, num_samples, batch_size):
                 stop = min(start_idx + batch_size, num_samples)
                 batch_masses = masses[start_idx:stop]
@@ -5219,6 +5388,24 @@ def _sample_hole_uniform_points_torch(
 
 
 
+
+def _sample_corner_points_torch(
+    target_positions: Tensor,
+    *,
+    image_size: int = 64,
+    contour_dilation: int = 1,
+    corner_quantile: float = 0.75,
+) -> Tensor:
+    clouds = corner_points_from_contour(
+        target_positions.detach().cpu().numpy(),
+        num_points=int(target_positions.shape[1]),
+        image_size=image_size,
+        contour_dilation=contour_dilation,
+        corner_quantile=corner_quantile,
+    )
+    return torch.as_tensor(clouds, dtype=target_positions.dtype, device=target_positions.device)
+
+
 def _raster_topology_summary_from_mask(
     contour_mask: np.ndarray,
     *,
@@ -5243,6 +5430,110 @@ def _raster_topology_summary_from_mask(
     }
 
 
+
+def _cornerness_from_probability_grid_numpy(grid: np.ndarray) -> np.ndarray:
+    """Cheap high-curvature / turning-region proxy for a decoded contour raster."""
+    prob = np.asarray(grid, dtype=np.float64)
+    prob = np.nan_to_num(prob, nan=0.0, posinf=0.0, neginf=0.0)
+    if prob.ndim != 2:
+        raise ValueError("grid must have shape (H, W)")
+    if float(np.max(prob)) > 0.0:
+        prob = prob / float(np.max(prob))
+    gy, gx = np.gradient(prob)
+    grad = np.sqrt(gx * gx + gy * gy)
+    gyy, gyx = np.gradient(gy)
+    gxy, gxx = np.gradient(gx)
+    curvature = np.sqrt(gxx * gxx + gyy * gyy + 0.5 * (gxy * gxy + gyx * gyx))
+    score = grad * curvature
+    score = np.maximum(score, 0.0)
+    if float(np.max(score)) > 0.0:
+        score = score / float(np.max(score))
+    return score
+
+
+def _grid_indices_to_unit_points_numpy(ys: np.ndarray, xs: np.ndarray, *, height: int, width: int, rng: np.random.Generator, jitter_scale: float = 0.45) -> np.ndarray:
+    jitter = rng.uniform(-float(jitter_scale), float(jitter_scale), size=(len(xs), 2))
+    coords = np.stack([xs.astype(np.float64), ys.astype(np.float64)], axis=1)
+    points = (coords + 0.5 + jitter) / np.asarray([[max(width, 1), max(height, 1)]], dtype=np.float64)
+    return np.clip(points, 0.0, 1.0).astype(np.float64)
+
+
+def _farthest_point_sample_indices_numpy(points: np.ndarray, num_samples: int, *, rng: np.random.Generator, weights: Optional[np.ndarray] = None) -> np.ndarray:
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[0] == 0:
+        raise ValueError("points must have shape (N, D) with N > 0")
+    n = pts.shape[0]
+    k = min(int(num_samples), n)
+    if weights is None:
+        first = int(rng.integers(0, n))
+    else:
+        w = np.asarray(weights, dtype=np.float64).reshape(-1)
+        w = np.maximum(w, 0.0)
+        if w.shape != (n,) or float(np.sum(w)) <= 0.0:
+            first = int(rng.integers(0, n))
+        else:
+            first = int(rng.choice(n, p=w / float(np.sum(w))))
+    selected = np.empty((k,), dtype=np.int64)
+    selected[0] = first
+    min_d2 = np.sum((pts - pts[first][None, :]) ** 2, axis=1)
+    for i in range(1, k):
+        # Prefer uncovered points, with a small probability boost for high-weight pixels.
+        score = min_d2.copy()
+        if weights is not None:
+            w = np.asarray(weights, dtype=np.float64).reshape(-1)
+            if w.shape == (n,) and float(np.max(w)) > 0.0:
+                score = score * (1.0 + 0.25 * w / float(np.max(w)))
+        selected[i] = int(np.argmax(score))
+        d2 = np.sum((pts - pts[selected[i]][None, :]) ** 2, axis=1)
+        min_d2 = np.minimum(min_d2, d2)
+    if int(num_samples) > n:
+        extra = rng.choice(selected, size=int(num_samples) - n, replace=True)
+        selected = np.concatenate([selected, extra.astype(np.int64)])
+    return selected
+
+
+def corner_points_from_contour(
+    positions: np.ndarray,
+    *,
+    num_points: Optional[int] = None,
+    image_size: int = 64,
+    contour_dilation: int = 1,
+    corner_quantile: float = 0.75,
+    seed: int = 0,
+) -> np.ndarray:
+    """Sample points near high-curvature rasterized contour regions."""
+    pts = np.asarray(positions, dtype=np.float64)
+    if pts.ndim == 2:
+        pts = pts[None, :, :]
+    if pts.ndim != 3 or pts.shape[2] != 2:
+        raise ValueError("positions must have shape (K,2) or (N,K,2)")
+    rng = np.random.default_rng(int(seed))
+    clouds: list[np.ndarray] = []
+    count = int(num_points or pts.shape[1])
+    for cloud in pts:
+        mask = _rasterize_points_binary(cloud, image_size=image_size, dilation=contour_dilation).astype(np.float64)
+        corner = _cornerness_from_probability_grid_numpy(mask)
+        positive = corner[corner > 0.0]
+        if positive.size == 0:
+            # Fall back to component-balanced target samples.
+            weights = _component_balanced_weights_numpy(cloud, image_size=image_size, contour_dilation=contour_dilation)
+            idx = rng.choice(cloud.shape[0], size=count, replace=True, p=weights)
+            clouds.append(cloud[idx])
+            continue
+        threshold = float(np.quantile(positive, float(np.clip(corner_quantile, 0.0, 1.0))))
+        ys, xs = np.nonzero(corner >= max(threshold, 1e-8))
+        if len(xs) == 0:
+            ys, xs = np.nonzero(mask > 0.0)
+        if len(xs) == 0:
+            clouds.append(rng.uniform(0.0, 1.0, size=(count, 2)))
+            continue
+        candidates = np.stack([xs / max(image_size - 1, 1), ys / max(image_size - 1, 1)], axis=1)
+        weights = corner[ys, xs]
+        indices = _farthest_point_sample_indices_numpy(candidates, count, rng=rng, weights=weights)
+        clouds.append(_grid_indices_to_unit_points_numpy(ys[indices], xs[indices], height=image_size, width=image_size, rng=rng, jitter_scale=0.30))
+    return np.stack(clouds, axis=0) if positions.ndim == 3 else clouds[0]
+
+
 def _sample_points_from_probability_grid_numpy(
     grid: np.ndarray,
     *,
@@ -5251,16 +5542,22 @@ def _sample_points_from_probability_grid_numpy(
     threshold_quantile: float = 0.75,
     min_component_pixels: int = 3,
     rng: Optional[np.random.Generator] = None,
+    sampler_mode: str = "random",
+    corner_weight: float = 0.0,
+    jitter_scale: float = 0.45,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Sample [0,1]^2 points from a raster probability grid.
 
-    If ``component_balance`` is enabled, connected components of high-probability
-    pixels receive equal total mass.  This is useful for decoded rasters with an
-    outer loop plus a smaller inner loop: the small loop otherwise receives too
-    little probability mass to seed points.
+    ``sampler_mode='uniform_fps'`` spreads points over the decoded contour by
+    farthest-point sampling over high-probability raster pixels.  ``corner_weight``
+    boosts high-curvature raster pixels, which helps populate stroke turns.
     """
     if num_points <= 0:
         raise ValueError("num_points must be positive")
+    if sampler_mode not in {"random", "uniform_fps", "fps", "corner_fps"}:
+        raise ValueError("sampler_mode must be one of {'random', 'uniform_fps', 'fps', 'corner_fps'}")
+    if corner_weight < 0.0:
+        raise ValueError("corner_weight must be non-negative")
     rng = np.random.default_rng() if rng is None else rng
     prob = np.asarray(grid, dtype=np.float64)
     if prob.ndim != 2:
@@ -5270,46 +5567,81 @@ def _sample_points_from_probability_grid_numpy(
     prob = np.maximum(prob, 0.0)
     if float(np.sum(prob)) <= 0.0:
         prob = np.ones_like(prob, dtype=np.float64)
+    corner = _cornerness_from_probability_grid_numpy(prob)
+    if corner_weight > 0.0:
+        prob = prob * (1.0 + float(corner_weight) * corner)
 
+    positive_values = prob[prob > 0.0]
+    threshold = float(np.quantile(positive_values, float(np.clip(threshold_quantile, 0.0, 1.0)))) if positive_values.size else 0.0
+    candidate_mask = prob >= max(threshold, 1e-8)
+    if not np.any(candidate_mask):
+        candidate_mask = prob > 0.0
+    labels = None
+    components: list[int] = []
     if component_balance:
-        positive_values = prob[prob > 0.0]
-        if positive_values.size > 0:
-            threshold = float(np.quantile(positive_values, float(np.clip(threshold_quantile, 0.0, 1.0))))
-        else:
-            threshold = 0.0
-        mask = prob >= max(threshold, 1e-8)
-        labels, sizes = _connected_components_numpy(mask)
+        labels, sizes = _connected_components_numpy(candidate_mask)
         components = [i + 1 for i, size in enumerate(sizes) if size >= int(min_component_pixels)]
-        if components:
-            component_choices = rng.integers(0, len(components), size=int(num_points), endpoint=False)
-            ys = np.empty((int(num_points),), dtype=np.int64)
-            xs = np.empty((int(num_points),), dtype=np.int64)
-            for comp_idx, label in enumerate(components):
-                out_mask = component_choices == comp_idx
-                count = int(np.sum(out_mask))
-                if count == 0:
-                    continue
+
+    if sampler_mode in {"uniform_fps", "fps", "corner_fps"}:
+        if component_balance and components and labels is not None:
+            ys_all: list[np.ndarray] = []
+            xs_all: list[np.ndarray] = []
+            counts = np.full((len(components),), int(num_points) // len(components), dtype=np.int64)
+            counts[: int(num_points) % len(components)] += 1
+            for count, label in zip(counts, components):
                 comp_y, comp_x = np.nonzero(labels == label)
-                comp_prob = prob[comp_y, comp_x].astype(np.float64)
-                comp_prob = comp_prob / max(float(np.sum(comp_prob)), 1e-12)
-                picks = rng.choice(len(comp_x), size=count, replace=True, p=comp_prob)
-                ys[out_mask] = comp_y[picks]
-                xs[out_mask] = comp_x[picks]
+                if len(comp_x) == 0 or count <= 0:
+                    continue
+                candidates = np.stack([comp_x / max(width - 1, 1), comp_y / max(height - 1, 1)], axis=1)
+                weights = prob[comp_y, comp_x]
+                if sampler_mode == "corner_fps" or corner_weight > 0.0:
+                    weights = weights * (1.0 + float(max(corner_weight, 1.0)) * corner[comp_y, comp_x])
+                idx = _farthest_point_sample_indices_numpy(candidates, int(count), rng=rng, weights=weights)
+                ys_all.append(comp_y[idx])
+                xs_all.append(comp_x[idx])
+            ys = np.concatenate(ys_all) if ys_all else np.empty((0,), dtype=np.int64)
+            xs = np.concatenate(xs_all) if xs_all else np.empty((0,), dtype=np.int64)
         else:
+            ys, xs = np.nonzero(candidate_mask)
+            if len(xs) > 0:
+                candidates = np.stack([xs / max(width - 1, 1), ys / max(height - 1, 1)], axis=1)
+                weights = prob[ys, xs]
+                if sampler_mode == "corner_fps" or corner_weight > 0.0:
+                    weights = weights * (1.0 + float(max(corner_weight, 1.0)) * corner[ys, xs])
+                idx = _farthest_point_sample_indices_numpy(candidates, int(num_points), rng=rng, weights=weights)
+                ys, xs = ys[idx], xs[idx]
+        if len(xs) == 0:
             flat = (prob / max(float(np.sum(prob)), 1e-12)).reshape(-1)
             picks = rng.choice(flat.size, size=int(num_points), replace=True, p=flat)
             ys, xs = np.divmod(picks, width)
+        elif len(xs) < int(num_points):
+            extra = rng.choice(len(xs), size=int(num_points) - len(xs), replace=True)
+            ys = np.concatenate([ys, ys[extra]])
+            xs = np.concatenate([xs, xs[extra]])
+    elif component_balance and components and labels is not None:
+        component_choices = rng.integers(0, len(components), size=int(num_points), endpoint=False)
+        ys = np.empty((int(num_points),), dtype=np.int64)
+        xs = np.empty((int(num_points),), dtype=np.int64)
+        for comp_idx, label in enumerate(components):
+            out_mask = component_choices == comp_idx
+            count = int(np.sum(out_mask))
+            if count == 0:
+                continue
+            comp_y, comp_x = np.nonzero(labels == label)
+            comp_prob = prob[comp_y, comp_x].astype(np.float64)
+            comp_prob = comp_prob / max(float(np.sum(comp_prob)), 1e-12)
+            picks = rng.choice(len(comp_x), size=count, replace=True, p=comp_prob)
+            ys[out_mask] = comp_y[picks]
+            xs[out_mask] = comp_x[picks]
     else:
         flat = (prob / max(float(np.sum(prob)), 1e-12)).reshape(-1)
         picks = rng.choice(flat.size, size=int(num_points), replace=True, p=flat)
         ys, xs = np.divmod(picks, width)
 
-    jitter = rng.uniform(-0.45, 0.45, size=(int(num_points), 2))
-    coords = np.stack([xs.astype(np.float64), ys.astype(np.float64)], axis=1)
-    points = (coords + 0.5 + jitter) / np.asarray([[max(width, 1), max(height, 1)]], dtype=np.float64)
-    points = np.clip(points, 0.0, 1.0)
+    points = _grid_indices_to_unit_points_numpy(ys[: int(num_points)], xs[: int(num_points)], height=height, width=width, rng=rng, jitter_scale=jitter_scale)
     masses = np.full((int(num_points),), 1.0 / float(num_points), dtype=np.float64)
     return points.astype(np.float64), masses
+
 
 
 def sample_points_from_decoded_raster(
@@ -5320,6 +5652,9 @@ def sample_points_from_decoded_raster(
     component_balance: bool = True,
     threshold_quantile: float = 0.75,
     min_component_pixels: int = 3,
+    sampler_mode: str = "random",
+    corner_weight: float = 0.0,
+    jitter_scale: float = 0.45,
     seed: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Sample pseudo-target point clouds from decoded latent rasters."""
@@ -5339,6 +5674,9 @@ def sample_points_from_decoded_raster(
             threshold_quantile=threshold_quantile,
             min_component_pixels=min_component_pixels,
             rng=rng,
+            sampler_mode=sampler_mode,
+            corner_weight=corner_weight,
+            jitter_scale=jitter_scale,
         )
         clouds.append(pts)
         masses.append(ms)
@@ -5355,6 +5693,9 @@ def _decoded_raster_pseudo_targets_torch(
     component_balance: bool = True,
     threshold_quantile: float = 0.75,
     min_component_pixels: int = 3,
+    sampler_mode: str = "random",
+    corner_weight: float = 0.0,
+    jitter_scale: float = 0.45,
 ) -> tuple[Tensor, Tensor]:
     if getattr(model, "latent_raster_decoder", None) is None:
         raise RuntimeError("decoded-raster guidance requires model.latent_raster_decoder")
@@ -5366,6 +5707,9 @@ def _decoded_raster_pseudo_targets_torch(
         component_balance=component_balance,
         threshold_quantile=float(threshold_quantile),
         min_component_pixels=int(min_component_pixels),
+        sampler_mode=sampler_mode,
+        corner_weight=float(corner_weight),
+        jitter_scale=float(jitter_scale),
         seed=0,
     )
     return (

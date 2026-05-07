@@ -50,6 +50,7 @@ from mnist.target_conditioned_score import (
     topology_diagnostics,
     raster_topology_summary,
     component_balanced_target_masses,
+    corner_points_from_contour,
     perturb_target_conditioned_positions,
     reconstruct_target_conditioned_point_clouds,
     reconstruct_target_conditioned_from_latents,
@@ -180,6 +181,8 @@ def test_forward_loss_and_training_smoke() -> None:
         latent_classification_weight=0.05,
         device="cpu",
         verbose=False,
+        dataloader_num_workers=0,
+        use_amp=False,
         show_progress=False,
     )
     assert len(history["train_loss"]) == 1
@@ -233,10 +236,14 @@ def test_forward_loss_and_training_smoke() -> None:
         raster.detach().cpu().numpy(),
         num_points=clean.shape[1],
         component_balance=True,
+        sampler_mode="uniform_fps",
+        corner_weight=1.0,
         seed=12,
     )
     assert pseudo_pts.shape == tuple(clean.shape)
     assert pseudo_masses.shape == tuple(batch_masses.shape)
+    corner_pts = corner_points_from_contour(positions[:2], num_points=positions.shape[1], image_size=16)
+    assert corner_pts.shape == positions[:2].shape
     decoded_topo = decoded_raster_topology_diagnostics(
         model,
         masses[:2],
@@ -433,6 +440,10 @@ def test_sampling_and_latent_priors_smoke() -> None:
         decoded_raster_guidance_weight=0.1,
         decoded_raster_guidance_start_level=-1,
         decoded_raster_guidance_component_balance=True,
+        decoded_raster_guidance_sampler_mode="uniform_fps",
+        decoded_raster_guidance_corner_weight=1.0,
+        coverage_reseed_fraction=0.05,
+        coverage_reseed_start_level=-1,
         oracle_prefix_levels=1,
         batch_size=2,
         device="cpu",
