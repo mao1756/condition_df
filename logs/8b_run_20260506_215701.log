@@ -1,0 +1,1079 @@
+============================================================
+Started: 2026-05-06T21:57:01+00:00
+Working directory: /workspace/condition_df
+Input notebook: notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb
+Output notebook: runs/8b_run.ipynb
+Log file: logs/8b_run_20260506_215701.log
+RunPod action after success: delete
+============================================================
+Papermill not found in current Python environment. Installing papermill and ipykernel...
+Collecting papermill
+  Downloading papermill-2.7.0-py3-none-any.whl.metadata (13 kB)
+Requirement already satisfied: ipykernel in /usr/local/lib/python3.11/dist-packages (6.29.5)
+Collecting click (from papermill)
+  Downloading click-8.3.3-py3-none-any.whl.metadata (2.6 kB)
+Requirement already satisfied: entrypoints in /usr/local/lib/python3.11/dist-packages (from papermill) (0.4)
+Requirement already satisfied: nbclient>=0.2 in /usr/local/lib/python3.11/dist-packages (from papermill) (0.10.0)
+Requirement already satisfied: nbformat>=5.2 in /usr/local/lib/python3.11/dist-packages (from papermill) (5.10.4)
+Requirement already satisfied: pyyaml in /usr/local/lib/python3.11/dist-packages (from papermill) (6.0.2)
+Requirement already satisfied: requests in /usr/local/lib/python3.11/dist-packages (from papermill) (2.32.3)
+Collecting tenacity>=5.0.2 (from papermill)
+  Downloading tenacity-9.1.4-py3-none-any.whl.metadata (1.2 kB)
+Collecting tqdm>=4.32.2 (from papermill)
+  Downloading tqdm-4.67.3-py3-none-any.whl.metadata (57 kB)
+Requirement already satisfied: comm>=0.1.1 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (0.2.2)
+Requirement already satisfied: debugpy>=1.6.5 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (1.8.5)
+Requirement already satisfied: ipython>=7.23.1 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (8.27.0)
+Requirement already satisfied: jupyter-client>=6.1.12 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (7.4.9)
+Requirement already satisfied: jupyter-core!=5.0.*,>=4.12 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (5.7.2)
+Requirement already satisfied: matplotlib-inline>=0.1 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (0.1.7)
+Requirement already satisfied: nest-asyncio in /usr/local/lib/python3.11/dist-packages (from ipykernel) (1.6.0)
+Requirement already satisfied: packaging in /usr/local/lib/python3.11/dist-packages (from ipykernel) (24.1)
+Requirement already satisfied: psutil in /usr/local/lib/python3.11/dist-packages (from ipykernel) (6.0.0)
+Requirement already satisfied: pyzmq>=24 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (24.0.1)
+Requirement already satisfied: tornado>=6.1 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (6.4.1)
+Requirement already satisfied: traitlets>=5.4.0 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (5.14.3)
+Requirement already satisfied: decorator in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (5.1.1)
+Requirement already satisfied: jedi>=0.16 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (0.19.1)
+Requirement already satisfied: prompt-toolkit<3.1.0,>=3.0.41 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (3.0.47)
+Requirement already satisfied: pygments>=2.4.0 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (2.18.0)
+Requirement already satisfied: stack-data in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (0.6.3)
+Requirement already satisfied: typing-extensions>=4.6 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (4.9.0)
+Requirement already satisfied: pexpect>4.3 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (4.9.0)
+Requirement already satisfied: python-dateutil>=2.8.2 in /usr/local/lib/python3.11/dist-packages (from jupyter-client>=6.1.12->ipykernel) (2.9.0.post0)
+Requirement already satisfied: platformdirs>=2.5 in /usr/local/lib/python3.11/dist-packages (from jupyter-core!=5.0.*,>=4.12->ipykernel) (4.3.6)
+Requirement already satisfied: fastjsonschema>=2.15 in /usr/local/lib/python3.11/dist-packages (from nbformat>=5.2->papermill) (2.20.0)
+Requirement already satisfied: jsonschema>=2.6 in /usr/local/lib/python3.11/dist-packages (from nbformat>=5.2->papermill) (4.23.0)
+Requirement already satisfied: charset-normalizer<4,>=2 in /usr/local/lib/python3.11/dist-packages (from requests->papermill) (3.3.2)
+Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.11/dist-packages (from requests->papermill) (3.10)
+Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.11/dist-packages (from requests->papermill) (2.2.3)
+Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.11/dist-packages (from requests->papermill) (2024.8.30)
+Requirement already satisfied: parso<0.9.0,>=0.8.3 in /usr/local/lib/python3.11/dist-packages (from jedi>=0.16->ipython>=7.23.1->ipykernel) (0.8.4)
+Requirement already satisfied: attrs>=22.2.0 in /usr/local/lib/python3.11/dist-packages (from jsonschema>=2.6->nbformat>=5.2->papermill) (24.2.0)
+Requirement already satisfied: jsonschema-specifications>=2023.03.6 in /usr/local/lib/python3.11/dist-packages (from jsonschema>=2.6->nbformat>=5.2->papermill) (2023.12.1)
+Requirement already satisfied: referencing>=0.28.4 in /usr/local/lib/python3.11/dist-packages (from jsonschema>=2.6->nbformat>=5.2->papermill) (0.35.1)
+Requirement already satisfied: rpds-py>=0.7.1 in /usr/local/lib/python3.11/dist-packages (from jsonschema>=2.6->nbformat>=5.2->papermill) (0.20.0)
+Requirement already satisfied: ptyprocess>=0.5 in /usr/local/lib/python3.11/dist-packages (from pexpect>4.3->ipython>=7.23.1->ipykernel) (0.7.0)
+Requirement already satisfied: wcwidth in /usr/local/lib/python3.11/dist-packages (from prompt-toolkit<3.1.0,>=3.0.41->ipython>=7.23.1->ipykernel) (0.2.13)
+Requirement already satisfied: six>=1.5 in /usr/lib/python3/dist-packages (from python-dateutil>=2.8.2->jupyter-client>=6.1.12->ipykernel) (1.16.0)
+Requirement already satisfied: executing>=1.2.0 in /usr/local/lib/python3.11/dist-packages (from stack-data->ipython>=7.23.1->ipykernel) (2.1.0)
+Requirement already satisfied: asttokens>=2.1.0 in /usr/local/lib/python3.11/dist-packages (from stack-data->ipython>=7.23.1->ipykernel) (2.4.1)
+Requirement already satisfied: pure-eval in /usr/local/lib/python3.11/dist-packages (from stack-data->ipython>=7.23.1->ipykernel) (0.2.3)
+Downloading papermill-2.7.0-py3-none-any.whl (88 kB)
+Downloading tenacity-9.1.4-py3-none-any.whl (28 kB)
+Downloading tqdm-4.67.3-py3-none-any.whl (78 kB)
+Downloading click-8.3.3-py3-none-any.whl (110 kB)
+Installing collected packages: tqdm, tenacity, click, papermill
+Successfully installed click-8.3.3 papermill-2.7.0 tenacity-9.1.4 tqdm-4.67.3
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable.It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+
+[notice] A new release of pip is available: 24.2 -> 26.1.1
+[notice] To update, run: python -m pip install --upgrade pip
+Running Papermill...
+Command: python -m papermill notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb runs/8b_run.ipynb --log-output --request-save-on-cell-execute --autosave-cell-every 60 
+Input Notebook:  notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb
+Output Notebook: runs/8b_run.ipynb
+Executing notebook with kernel: python3
+Executing Cell 1---------------------------------------
+Ending Cell 1------------------------------------------
+Executing Cell 2---------------------------------------
+Ending Cell 2------------------------------------------
+Executing Cell 3---------------------------------------
+CUDA available: True
+GPU: NVIDIA H100 80GB HBM3
+_CudaDeviceProperties(name='NVIDIA H100 80GB HBM3', major=9, minor=0, total_memory=81079MB, multi_processor_count=132)
+
+Ending Cell 3------------------------------------------
+Executing Cell 4---------------------------------------
+repo root: /workspace/condition_df
+device: cuda
+
+Ending Cell 4------------------------------------------
+Executing Cell 5---------------------------------------
+Ending Cell 5------------------------------------------
+Executing Cell 6---------------------------------------
+Ending Cell 6------------------------------------------
+Executing Cell 7---------------------------------------
+FAST_DEMO = False
+MNIST-CP path = /workspace/condition_df/mnist_data/mnist_cp.npz
+train/val/test per class = (2000, 250, 250)
+points per contour = all saved points
+score epochs/batch = (80, 32)
+score conditioning mode = film
+sigma range = (0.25, 0.005) levels = 10
+sampler = shape_gf_langevin steps per level = 10
+direct/replay probabilities = (0.25, 0.5)
+target-grid dropout = 0.25
+latent priors: Gaussian covariance scale = 0.25 PCA dim = 32
+show progress = True latent generation progress = True
+student latent regularizers = (1.0, 0.05, 0.1)
+latent shape AE = (True, 100)
+latent-only student enabled = True
+generation latent source / force recompute = ('student', True)
+student Chamfer validation = (5, 16)
+fine refinement = (True, 20, 0.03)
+topology refinement = (True, (0, 6, 8, 9), 20)
+fine sampler levels/multiplier = (4, 3)
+decoded raster guidance = (0.25, -4)
+checkpoint mode/path = auto /workspace/condition_df/artifacts/checkpoints/example_8b_mnist_cp_target_conditioned_score.pt
+
+Ending Cell 7------------------------------------------
+Executing Cell 8---------------------------------------
+Ending Cell 8------------------------------------------
+Executing Cell 9---------------------------------------
+normalization in file: bbox_centered_longest_side_to_[-1,1]
+train positions: (20000, 800, 2) labels: [2000 2000 2000 2000 2000 2000 2000 2000 2000 2000]
+val positions: (2500, 800, 2) labels: [250 250 250 250 250 250 250 250 250 250]
+reference positions: (2500, 800, 2) labels: [250 250 250 250 250 250 250 250 250 250]
+K = 800
+
+Ending Cell 9------------------------------------------
+Executing Cell 10--------------------------------------
+<Figure size 650x1300 with 50 Axes>
+Ending Cell 10-----------------------------------------
+Executing Cell 11--------------------------------------
+Ending Cell 11-----------------------------------------
+Executing Cell 12--------------------------------------
+tau range: (1.5625e-08, 3.90625e-05)
+
+   level  sigma_unit_square  sigma_pixels           tau
+0      0           0.250000      7.000000  3.906250e-05
+1      1           0.161870      4.532352  1.637613e-05
+2      2           0.104807      2.934602  6.865343e-06
+3      3           0.067860      1.900092  2.878150e-06
+4      4           0.043938      1.230270  1.206603e-06
+5      5           0.028449      0.796573  5.058428e-07
+6      6           0.018420      0.515764  2.120639e-07
+7      7           0.011927      0.333947  8.890328e-08
+8      8           0.007722      0.216223  3.727082e-08
+9      9           0.005000      0.140000  1.562500e-08
+Ending Cell 12-----------------------------------------
+Executing Cell 13--------------------------------------
+Ending Cell 13-----------------------------------------
+Executing Cell 14--------------------------------------
+Ending Cell 14-----------------------------------------
+Executing Cell 15--------------------------------------
+Ending Cell 15-----------------------------------------
+Executing Cell 16--------------------------------------
+Loaded score checkpoint from /workspace/condition_df/artifacts/checkpoints/example_8b_mnist_cp_target_conditioned_score.pt
+TargetConditionedScoreModel(
+  (target_encoder): TargetPointCloudEncoder(
+    (point_mlp): Sequential(
+      (0): Linear(in_features=4, out_features=256, bias=True)
+      (1): GELU(approximate='none')
+      (2): Dropout(p=0.02, inplace=False)
+      (3): Linear(in_features=256, out_features=256, bias=True)
+      (4): GELU(approximate='none')
+      (5): Dropout(p=0.02, inplace=False)
+      (6): Linear(in_features=256, out_features=256, bias=True)
+      (7): GELU(approximate='none')
+    )
+    (latent_head): Sequential(
+      (0): Linear(in_features=768, out_features=256, bias=True)
+      (1): GELU(approximate='none')
+      (2): Dropout(p=0.02, inplace=False)
+      (3): Linear(in_features=256, out_features=128, bias=True)
+    )
+    (latent_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+  )
+  (time_mlp): Sequential(
+    (0): Linear(in_features=3, out_features=64, bias=True)
+    (1): GELU(approximate='none')
+    (2): Linear(in_features=64, out_features=64, bias=True)
+    (3): GELU(approximate='none')
+  )
+  (label_embedding): Embedding(10, 64)
+  (context_mlp): Sequential(
+    (0): Linear(in_features=256, out_features=128, bias=True)
+    (1): GELU(approximate='none')
+    (2): Linear(in_features=128, out_features=128, bias=True)
+    (3): GELU(approximate='none')
+  )
+  (latent_label_head): Sequential(
+    (0): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+    (1): Linear(in_features=128, out_features=128, bias=True)
+    (2): GELU(approximate='none')
+    (3): Linear(in_features=128, out_features=10, bias=True)
+  )
+  (feature_unet): _SmallUNet2d(
+    (enc1): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(130, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (pool1): AvgPool2d(kernel_size=2, stride=2, padding=0)
+    (enc2): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(48, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(96, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (pool2): AvgPool2d(kernel_size=2, stride=2, padding=0)
+    (bottleneck): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(96, 192, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 192, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(192, 192, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 192, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (up2): Conv2d(192, 96, kernel_size=(1, 1), stride=(1, 1))
+    (dec2): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(192, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(96, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (up1): Conv2d(96, 48, kernel_size=(1, 1), stride=(1, 1))
+    (dec1): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(96, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (out): Conv2d(48, 96, kernel_size=(1, 1), stride=(1, 1))
+  )
+  (target_feature_unet): _SmallUNet2d(
+    (enc1): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(130, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (pool1): AvgPool2d(kernel_size=2, stride=2, padding=0)
+    (enc2): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(48, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(96, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (pool2): AvgPool2d(kernel_size=2, stride=2, padding=0)
+    (bottleneck): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(96, 192, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 192, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(192, 192, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 192, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (up2): Conv2d(192, 96, kernel_size=(1, 1), stride=(1, 1))
+    (dec2): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(192, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(96, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (up1): Conv2d(96, 48, kernel_size=(1, 1), stride=(1, 1))
+    (dec1): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(96, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (out): Conv2d(48, 96, kernel_size=(1, 1), stride=(1, 1))
+  )
+  (set_encoder): NoisySetEquivariantEncoder(
+    (input_projection): Sequential(
+      (0): Linear(in_features=132, out_features=128, bias=True)
+      (1): GELU(approximate='none')
+      (2): Linear(in_features=128, out_features=128, bias=True)
+      (3): GELU(approximate='none')
+    )
+    (blocks): ModuleList(
+      (0-2): 3 x _EquivariantContextBlock(
+        (update): Sequential(
+          (0): LayerNorm((512,), eps=1e-05, elementwise_affine=True)
+          (1): Linear(in_features=512, out_features=128, bias=True)
+          (2): GELU(approximate='none')
+          (3): Dropout(p=0.02, inplace=False)
+          (4): Linear(in_features=128, out_features=128, bias=True)
+        )
+      )
+    )
+    (output_projection): Sequential(
+      (0): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+      (1): Linear(in_features=128, out_features=128, bias=True)
+      (2): GELU(approximate='none')
+    )
+  )
+  (point_score_head): _FiLMScoreHead(
+    (input): Sequential(
+      (0): Linear(in_features=228, out_features=256, bias=True)
+      (1): GELU(approximate='none')
+    )
+    (blocks): ModuleList(
+      (0-1): 2 x _FiLMResidualMLPBlock(
+        (norm): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+        (to_scale_shift): Sequential(
+          (0): Linear(in_features=128, out_features=512, bias=True)
+          (1): GELU(approximate='none')
+          (2): Linear(in_features=512, out_features=512, bias=True)
+        )
+        (net): Sequential(
+          (0): Linear(in_features=256, out_features=256, bias=True)
+          (1): GELU(approximate='none')
+          (2): Dropout(p=0.02, inplace=False)
+          (3): Linear(in_features=256, out_features=256, bias=True)
+        )
+      )
+    )
+    (output): Sequential(
+      (0): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+      (1): Linear(in_features=256, out_features=2, bias=True)
+    )
+  )
+  (measure_score_head): _FiLMScoreHead(
+    (input): Sequential(
+      (0): Linear(in_features=452, out_features=256, bias=True)
+      (1): GELU(approximate='none')
+    )
+    (blocks): ModuleList(
+      (0-1): 2 x _FiLMResidualMLPBlock(
+        (norm): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+        (to_scale_shift): Sequential(
+          (0): Linear(in_features=128, out_features=512, bias=True)
+          (1): GELU(approximate='none')
+          (2): Linear(in_features=512, out_features=512, bias=True)
+        )
+        (net): Sequential(
+          (0): Linear(in_features=256, out_features=256, bias=True)
+          (1): GELU(approximate='none')
+          (2): Dropout(p=0.02, inplace=False)
+          (3): Linear(in_features=256, out_features=256, bias=True)
+        )
+      )
+    )
+    (output): Sequential(
+      (0): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+      (1): Linear(in_features=256, out_features=2, bias=True)
+    )
+  )
+)
+
+Ending Cell 16-----------------------------------------
+Executing Cell 17--------------------------------------
+Checkpoint loaded; skipping score training. Set CHECKPOINT_MODE = "train" to retrain.
+
+Ending Cell 17-----------------------------------------
+Executing Cell 18--------------------------------------
+Ending Cell 18-----------------------------------------
+Executing Cell 19--------------------------------------
+Intermediate checkpoint saving is disabled; final checkpoint will be written near the end if SAVE_SCORE_CHECKPOINT=True.
+
+Ending Cell 19-----------------------------------------
+Executing Cell 20--------------------------------------
+<Figure size 600x400 with 1 Axes>
+Ending Cell 20-----------------------------------------
+Executing Cell 21--------------------------------------
+Ending Cell 21-----------------------------------------
+Executing Cell 22--------------------------------------
+latent shape AE:   0%|          | 0/100 [00:00<?, ?it/s]
+latent shape AE train 1/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 1/100:   0%|          | 0/20 [00:00<?, ?it/s]
+[latent-shape-ae] epoch 0001/100: train=4.39787 val=8.712 z_std=0.902 cls=0.100
+
+latent shape AE train 2/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 2/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 3/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 3/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 4/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 4/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 5/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 5/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 6/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 6/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 7/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 7/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 8/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 8/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 9/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 9/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 10/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 10/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 11/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 11/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 12/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 12/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 13/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 13/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 14/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 14/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 15/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 15/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 16/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 16/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 17/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 17/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 18/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 18/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 19/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 19/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 20/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 20/100:   0%|          | 0/20 [00:00<?, ?it/s]
+[latent-shape-ae] epoch 0020/100: train=2.99924 val=3.33723 z_std=1.201 cls=0.901
+
+latent shape AE train 21/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 21/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 22/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 22/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 23/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 23/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 24/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 24/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 25/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 25/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 26/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 26/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 27/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 27/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 28/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 28/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 29/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 29/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 30/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 30/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 31/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 31/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 32/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 32/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 33/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 33/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 34/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 34/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 35/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 35/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 36/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 36/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 37/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 37/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 38/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 38/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 39/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 39/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 40/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 40/100:   0%|          | 0/20 [00:00<?, ?it/s]
+[latent-shape-ae] epoch 0040/100: train=2.87379 val=3.1459 z_std=1.200 cls=0.957
+
+latent shape AE train 41/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 41/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 42/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 42/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 43/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 43/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 44/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 44/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 45/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 45/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 46/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 46/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 47/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 47/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 48/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 48/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 49/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 49/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 50/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 50/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 51/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 51/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 52/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 52/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 53/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 53/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 54/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 54/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 55/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 55/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 56/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 56/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 57/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 57/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 58/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 58/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 59/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 59/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 60/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 60/100:   0%|          | 0/20 [00:00<?, ?it/s]
+[latent-shape-ae] epoch 0060/100: train=2.79929 val=3.13188 z_std=1.191 cls=0.984
+
+latent shape AE train 61/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 61/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 62/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 62/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 63/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 63/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 64/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 64/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 65/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 65/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 66/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 66/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 67/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 67/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 68/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 68/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 69/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 69/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 70/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 70/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 71/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 71/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 72/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 72/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 73/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 73/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 74/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 74/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 75/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 75/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 76/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 76/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 77/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 77/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 78/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 78/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 79/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 79/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 80/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 80/100:   0%|          | 0/20 [00:00<?, ?it/s]
+[latent-shape-ae] epoch 0080/100: train=2.76208 val=3.10034 z_std=1.184 cls=0.990
+
+latent shape AE train 81/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 81/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 82/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 82/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 83/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 83/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 84/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 84/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 85/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 85/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 86/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 86/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 87/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 87/100:   0%|          | 0/20 [00:00<?, ?it/s]
+latent shape AE train 88/100:   0%|          | 0/157 [00:00<?, ?it/s]
+latent shape AE val 88/100:   0%|          | 0/20 [00:00<?, ?it/s]
+[latent-shape-ae] early stopping at epoch 88
+latent shape autoencoder validation metrics
+
+                                            value
+loss                                     3.046263
+raster_loss                              2.986029
+latent_mean_std                          1.180321
+latent_class_accuracy                    0.938400
+latent_num_samples                     512.000000
+latent_latent_dim                      128.000000
+latent_mean_per_dim_std                  1.189808
+latent_median_per_dim_std                1.183315
+latent_min_per_dim_std                   1.056022
+latent_max_per_dim_std                   1.354177
+latent_mean_pairwise_distance           18.944070
+latent_median_pairwise_distance         19.408735
+latent_rank90                           25.000000
+latent_collapsed_by_pairwise_distance    0.000000
+latent_collapsed_by_std                  0.000000
+Ending Cell 22-----------------------------------------
+Executing Cell 23--------------------------------------
+<Figure size 600x400 with 1 Axes>
+<Figure size 600x300 with 1 Axes>
+Ending Cell 23-----------------------------------------
+Executing Cell 24--------------------------------------
+Ending Cell 24-----------------------------------------
+Executing Cell 25--------------------------------------
+latent student epoch 1/40:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0001/40: loss=78.3399 distill=73.9984 raster=4.09132 post=0 z_std=1.1598 z_cls=0.082 val=44.5806 val_chamfer=nan
+
+latent student epoch 2/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 3/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 4/40:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0004/40: loss=26.4328 distill=22.0913 raster=4.09137 post=0 z_std=1.1602 z_cls=0.084 val=21.6537 val_chamfer=nan
+
+latent student epoch 5/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 6/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 7/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 8/40:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0008/40: loss=21.2537 distill=16.9129 raster=4.09095 post=0 z_std=1.1603 z_cls=0.083 val=13.8077 val_chamfer=nan
+
+latent student epoch 9/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 10/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 11/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 12/40:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0012/40: loss=19.499 distill=15.1582 raster=4.09087 post=0 z_std=1.1602 z_cls=0.083 val=14.649 val_chamfer=nan
+
+latent student epoch 13/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 14/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 15/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 16/40:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0016/40: loss=17.8266 distill=13.4857 raster=4.09101 post=0 z_std=1.1603 z_cls=0.084 val=14.8408 val_chamfer=nan
+
+latent student epoch 17/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 18/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 19/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 20/40:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0020/40: loss=16.492 distill=12.1503 raster=4.09191 post=0 z_std=1.1606 z_cls=0.085 val=12.4751 val_chamfer=0.003624
+
+latent student epoch 21/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 22/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 23/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 24/40:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0024/40: loss=17.8774 distill=14.59 raster=3.19729 post=0 z_std=1.0595 z_cls=0.823 val=19.5593 val_chamfer=nan
+
+latent student epoch 25/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 26/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 27/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 28/40:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0028/40: loss=17.4917 distill=14.1942 raster=3.21008 post=0 z_std=1.0581 z_cls=0.825 val=13.0868 val_chamfer=nan
+
+latent student epoch 29/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 30/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 31/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 32/40:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0032/40: loss=17.2339 distill=13.9585 raster=3.19464 post=0 z_std=1.0663 z_cls=0.839 val=15.3643 val_chamfer=nan
+
+latent student epoch 33/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 34/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 35/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 36/40:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0036/40: loss=16.9464 distill=13.6813 raster=3.18559 post=0 z_std=1.0705 z_cls=0.839 val=10.8677 val_chamfer=nan
+
+latent student epoch 37/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 38/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 39/40:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student epoch 40/40:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0040/40: loss=16.3921 distill=13.1414 raster=3.17687 post=0 z_std=1.0774 z_cls=0.849 val=14.3697 val_chamfer=0.002395
+Running fine-scale latent-student refinement on tau levels: [5.05842815e-07 2.12063876e-07 8.89032844e-08 3.72708173e-08
+ 1.56250000e-08]
+
+latent student fine refinement epoch 1/20:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0001/20: loss=54.2581 distill=30.1993 raster=3.17792 post=22.4087 z_std=1.0675 z_cls=0.873 val=28.153 val_chamfer=nan
+
+latent student fine refinement epoch 2/20:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0002/20: loss=52.2458 distill=30.5919 raster=3.19614 post=19.9915 z_std=1.0539 z_cls=0.875 val=29.7726 val_chamfer=nan
+
+latent student fine refinement epoch 3/20:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student fine refinement epoch 4/20:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0004/20: loss=50.1656 distill=27.9283 raster=3.21121 post=20.5629 z_std=1.0397 z_cls=0.873 val=27.4838 val_chamfer=nan
+
+latent student fine refinement epoch 5/20:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student fine refinement epoch 6/20:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0006/20: loss=50.4164 distill=28.54 raster=3.22252 post=20.1933 z_std=1.0295 z_cls=0.870 val=27.0454 val_chamfer=nan
+
+latent student fine refinement epoch 7/20:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student fine refinement epoch 8/20:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0008/20: loss=46.5455 distill=26.6111 raster=3.22969 post=18.2478 z_std=1.0236 z_cls=0.869 val=32.0836 val_chamfer=nan
+
+latent student fine refinement epoch 9/20:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student fine refinement epoch 10/20:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0010/20: loss=48.8743 distill=27.9656 raster=3.23716 post=19.2151 z_std=1.0176 z_cls=0.868 val=28.6073 val_chamfer=0.0008642
+
+latent student fine refinement epoch 11/20:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student fine refinement epoch 12/20:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0012/20: loss=47.1094 distill=27.5371 raster=3.24342 post=17.8738 z_std=1.0118 z_cls=0.865 val=24.4518 val_chamfer=nan
+
+latent student fine refinement epoch 13/20:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student fine refinement epoch 14/20:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0014/20: loss=45.6162 distill=25.7918 raster=3.24792 post=18.1227 z_std=1.0063 z_cls=0.868 val=23.1424 val_chamfer=nan
+
+latent student fine refinement epoch 15/20:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student fine refinement epoch 16/20:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0016/20: loss=45.4042 distill=25.1897 raster=3.25265 post=18.5092 z_std=1.0014 z_cls=0.868 val=27.2218 val_chamfer=nan
+
+latent student fine refinement epoch 17/20:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student fine refinement epoch 18/20:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0018/20: loss=44.8558 distill=25.3735 raster=3.25734 post=17.7738 z_std=0.9981 z_cls=0.868 val=25.0037 val_chamfer=nan
+
+latent student fine refinement epoch 19/20:   0%|          | 0/625 [00:00<?, ?it/s]
+latent student fine refinement epoch 20/20:   0%|          | 0/625 [00:00<?, ?it/s]
+[latent-student] epoch 0020/20: loss=43.8029 distill=24.2815 raster=3.2605 post=17.8112 z_std=0.9941 z_cls=0.869 val=25.7688 val_chamfer=0.0008095
+Running topology fine refinement on labels (0, 6, 8, 9) and tau levels: [2.12063876e-07 8.89032844e-08 3.72708173e-08 1.56250000e-08]
+
+topology fine refinement epoch 1/20:   0%|          | 0/250 [00:00<?, ?it/s]
+[latent-student] epoch 0001/20: loss=84.6258 distill=23.6579 raster=3.34865 post=29.6176 z_std=0.9436 z_cls=0.924 val=13.3307 val_chamfer=nan
+
+topology fine refinement epoch 2/20:   0%|          | 0/250 [00:00<?, ?it/s]
+[latent-student] epoch 0002/20: loss=86.3011 distill=28.5147 raster=3.34636 post=28.0323 z_std=0.9473 z_cls=0.939 val=27.4946 val_chamfer=nan
+
+topology fine refinement epoch 3/20:   0%|          | 0/250 [00:00<?, ?it/s]
+topology fine refinement epoch 4/20:   0%|          | 0/250 [00:00<?, ?it/s]
+[latent-student] epoch 0004/20: loss=83.7019 distill=23.8258 raster=3.33852 post=29.0816 z_std=0.9560 z_cls=0.946 val=18.1348 val_chamfer=nan
+
+topology fine refinement epoch 5/20:   0%|          | 0/250 [00:00<?, ?it/s]
+topology fine refinement epoch 6/20:   0%|          | 0/250 [00:00<?, ?it/s]
+[latent-student] epoch 0006/20: loss=77.8621 distill=22.8298 raster=3.33591 post=26.6613 z_std=0.9633 z_cls=0.946 val=25.6515 val_chamfer=nan
+
+topology fine refinement epoch 7/20:   0%|          | 0/250 [00:00<?, ?it/s]
+topology fine refinement epoch 8/20:   0%|          | 0/250 [00:00<?, ?it/s]
+[latent-student] epoch 0008/20: loss=77.6459 distill=26.1268 raster=3.3324 post=24.9063 z_std=0.9668 z_cls=0.947 val=20.5046 val_chamfer=nan
+
+topology fine refinement epoch 9/20:   0%|          | 0/250 [00:00<?, ?it/s]
+topology fine refinement epoch 10/20:   0%|          | 0/250 [00:00<?, ?it/s]
+[latent-student] epoch 0010/20: loss=80.0357 distill=26.522 raster=3.3319 post=25.904 z_std=0.9692 z_cls=0.949 val=31.9653 val_chamfer=0.0006711
+
+topology fine refinement epoch 11/20:   0%|          | 0/250 [00:00<?, ?it/s]
+topology fine refinement epoch 12/20:   0%|          | 0/250 [00:00<?, ?it/s]
+[latent-student] epoch 0012/20: loss=74.3865 distill=21.1868 raster=3.32835 post=25.7486 z_std=0.9749 z_cls=0.949 val=29.2403 val_chamfer=nan
+
+topology fine refinement epoch 13/20:   0%|          | 0/250 [00:00<?, ?it/s]
+topology fine refinement epoch 14/20:   0%|          | 0/250 [00:00<?, ?it/s]
+[latent-student] epoch 0014/20: loss=75.5941 distill=22.7999 raster=3.32674 post=25.5462 z_std=0.9743 z_cls=0.946 val=25.7823 val_chamfer=nan
+
+topology fine refinement epoch 15/20:   0%|          | 0/250 [00:00<?, ?it/s]
+topology fine refinement epoch 16/20:   0%|          | 0/250 [00:00<?, ?it/s]
+[latent-student] epoch 0016/20: loss=85.5345 distill=21.6949 raster=3.32507 post=31.0697 z_std=0.9791 z_cls=0.950 val=24.2777 val_chamfer=nan
+
+topology fine refinement epoch 17/20:   0%|          | 0/250 [00:00<?, ?it/s]
+topology fine refinement epoch 18/20:   0%|          | 0/250 [00:00<?, ?it/s]
+[latent-student] epoch 0018/20: loss=79.2364 distill=22.1381 raster=3.32506 post=27.6994 z_std=0.9800 z_cls=0.951 val=29.6949 val_chamfer=nan
+
+topology fine refinement epoch 19/20:   0%|          | 0/250 [00:00<?, ?it/s]
+topology fine refinement epoch 20/20:   0%|          | 0/250 [00:00<?, ?it/s]
+[latent-student] epoch 0020/20: loss=88.5393 distill=23.6956 raster=3.3249 post=31.5721 z_std=0.9789 z_cls=0.950 val=27.845 val_chamfer=0.0006214
+Using latent-only student for latent-prior generation.
+best in-training latent-only Chamfer: 0.0016503388631579053
+
+    epoch  val_latent_only_chamfer
+4       5                 0.004649
+9      10                 0.006013
+14     15                 0.005144
+19     20                 0.003624
+24     25                 0.001938
+29     30                 0.002157
+34     35                 0.001650
+39     40                 0.002395
+Ending Cell 25-----------------------------------------
+Executing Cell 26--------------------------------------
+Ending Cell 26-----------------------------------------
+Executing Cell 27--------------------------------------
+<Figure size 600x1320 with 24 Axes>
+<Figure size 600x1320 with 24 Axes>
+<Figure size 600x1320 with 24 Axes>
+Ending Cell 27-----------------------------------------
+Executing Cell 28--------------------------------------
+Ending Cell 28-----------------------------------------
+Executing Cell 29--------------------------------------
+            tau  sigma_approx       query_mode  physical_score_rmse  \
+0  3.906250e-05      0.250000    noised_target             0.426634   
+1  3.906250e-05      0.250000          uniform             0.414455   
+2  3.906250e-05      0.250000  center_gaussian             0.468057   
+3  5.058428e-07      0.028449    noised_target             2.967654   
+4  5.058428e-07      0.028449          uniform            18.285355   
+5  5.058428e-07      0.028449  center_gaussian            31.154446   
+6  1.562500e-08      0.005000    noised_target            45.211911   
+7  1.562500e-08      0.005000          uniform           641.245628   
+8  1.562500e-08      0.005000  center_gaussian          1042.692850   
+
+   relative_rmse    cosine  
+0       0.145432  0.990011  
+1       0.182810  0.983161  
+2       0.151629  0.989278  
+3       0.126821  0.993084  
+4       0.163113  0.987770  
+5       0.167423  0.987669  
+6       0.322103  0.947966  
+7       0.176242  0.984703  
+8       0.172620  0.985057  
+Ending Cell 29-----------------------------------------
+Executing Cell 30--------------------------------------
+Ending Cell 30-----------------------------------------
+Executing Cell 31--------------------------------------
+Loaded score calibration from checkpoint.
+
+   level           tau  sigma_unit_square  physical_score_scale  \
+0      0  3.906250e-05           0.250000              1.031013   
+1      1  1.637613e-05           0.161870              1.017823   
+2      2  6.865343e-06           0.104807              1.044456   
+3      3  2.878150e-06           0.067860              1.066287   
+4      4  1.206603e-06           0.043938              1.071475   
+5      5  5.058428e-07           0.028449              1.059442   
+6      6  2.120639e-07           0.018420              1.048131   
+7      7  8.890328e-08           0.011927              1.034783   
+8      8  3.727082e-08           0.007722              1.006470   
+9      9  1.562500e-08           0.005000              1.015552   
+
+   physical_norm_clip  
+0           10.407744  
+1           21.861800  
+2           50.825004  
+3          120.910206  
+4          287.348308  
+5          684.577339  
+6         1636.828553  
+7         3897.992546  
+8         9258.482754  
+9        22181.436797  
+Ending Cell 31-----------------------------------------
+Executing Cell 32--------------------------------------
+Ending Cell 32-----------------------------------------
+Executing Cell 33--------------------------------------
+(64, 800, 2)
+
+Ending Cell 33-----------------------------------------
+Executing Cell 34--------------------------------------
+                    value
+mean_chamfer     0.000013
+median_chamfer   0.000012
+std_chamfer      0.000004
+squared_chamfer      True
+<Figure size 400x1980 with 24 Axes>
+Ending Cell 34-----------------------------------------
+Executing Cell 35--------------------------------------
+                    value
+mean_chamfer     0.000008
+median_chamfer   0.000008
+std_chamfer      0.000002
+squared_chamfer      True
+<Figure size 400x1980 with 24 Axes>
+Ending Cell 35-----------------------------------------
+Executing Cell 36--------------------------------------
+Ending Cell 36-----------------------------------------
+Executing Cell 37--------------------------------------
+            mode  oracle_levels  mean_chamfer  median_chamfer  std_chamfer  \
+0  oracle_prefix              0      0.000014        0.000013     0.000004   
+1  oracle_prefix              1      0.000014        0.000013     0.000004   
+2  oracle_prefix              2      0.000014        0.000013     0.000004   
+3  oracle_prefix              3      0.000013        0.000014     0.000004   
+4  oracle_prefix              5      0.000013        0.000013     0.000003   
+5  oracle_prefix             10      0.000009        0.000009     0.000002   
+
+   num_samples  
+0           24  
+1           24  
+2           24  
+3           24  
+4           24  
+5           24  
+Ending Cell 37-----------------------------------------
+Executing Cell 38--------------------------------------
+<Figure size 1080x480 with 36 Axes>
+Ending Cell 38-----------------------------------------
+Executing Cell 39--------------------------------------
+Ending Cell 39-----------------------------------------
+Executing Cell 40--------------------------------------
+selected generation latent source: student hash: 3bad71e0c9c8ff4f
+
+train latents: (20000, 128) val latents: (2500, 128)
+latent bank provenance: {'source': 'student', 'model_hash': '3bad71e0c9c8ff4f', 'metadata': {'split': 'train', 'generation_latent_source': 'student'}}
+
+                         model_hash  num_samples  latent_dim  \
+source                                                         
+teacher            6a54e31a0702da9f          256         128   
+student            3bad71e0c9c8ff4f          256         128   
+shape_autoencoder  fe37c6f202920c81          256         128   
+
+                   mean_per_dim_std  median_per_dim_std  min_per_dim_std  \
+source                                                                     
+teacher                    0.000000            0.000000         0.000000   
+student                    1.017205            1.009021         0.783353   
+shape_autoencoder          1.179911            1.179324         1.033290   
+
+                   max_per_dim_std  mean_pairwise_distance  \
+source                                                       
+teacher                   0.000000                0.000000   
+student                   1.238483               16.095546   
+shape_autoencoder         1.365857               18.797513   
+
+                   median_pairwise_distance  rank90  \
+source                                                
+teacher                            0.000000     129   
+student                           16.592648      11   
+shape_autoencoder                 19.274974      24   
+
+                   collapsed_by_pairwise_distance  collapsed_by_std  
+source                                                               
+teacher                                      True              True  
+student                                     False             False  
+shape_autoencoder                           False             False  
+Gaussian prior components: 10 latent_dim: 128
+PCA prior components: 10 pca_dim: 32
+PCA-GMM components per class: 8
+selected latent collapse diagnostics
+
+                                    value
+num_samples                           256
+latent_dim                            128
+mean_per_dim_std                 1.017911
+median_per_dim_std               1.016224
+min_per_dim_std                  0.825789
+max_per_dim_std                  1.237211
+mean_pairwise_distance          16.089849
+median_pairwise_distance        16.569156
+rank90                                 11
+collapsed_by_pairwise_distance      False
+collapsed_by_std                    False
+top-5 PCA explained variance: [0.16635663 0.13919829 0.12453295 0.11831083 0.08327723]
+
+decoded latent raster topology diagnostics
+
+                                      value
+decoded_hole_count_mean            1.046875
+target_hole_count_mean             1.765625
+decoded_component_count_mean       2.859375
+target_component_count_mean        1.546875
+decoded_hole_count_accuracy        0.281250
+decoded_component_count_accuracy   0.171875
+decoded_occupied_fraction_mean     0.317230
+target_occupied_fraction_mean      0.225777
+num_samples                       64.000000
+Saved score checkpoint [after_latent_prior_fit] to /workspace/condition_df/artifacts/checkpoints/example_8b_mnist_cp_target_conditioned_score.pt
+
+Ending Cell 40-----------------------------------------
+Executing Cell 41--------------------------------------
+Ending Cell 41-----------------------------------------
+Executing Cell 42--------------------------------------
+latent-only real-z reconstruction: sigma levels:   0%|          | 0/10 [00:00<?, ?it/s]
+latent-only real-z reconstruction: level 1/10:   0%|          | 0/10 [00:00<?, ?it/s]
+latent-only real-z reconstruction: level 2/10:   0%|          | 0/10 [00:00<?, ?it/s]
+latent-only real-z reconstruction: level 3/10:   0%|          | 0/10 [00:00<?, ?it/s]
+latent-only real-z reconstruction: level 4/10:   0%|          | 0/10 [00:00<?, ?it/s]
+latent-only real-z reconstruction: level 5/10:   0%|          | 0/10 [00:00<?, ?it/s]
+latent-only real-z reconstruction: level 6/10:   0%|          | 0/10 [00:00<?, ?it/s]
+latent-only real-z reconstruction: level 7/10:   0%|          | 0/30 [00:00<?, ?it/s]
+latent-only real-z reconstruction: level 8/10:   0%|          | 0/30 [00:00<?, ?it/s]
+latent-only real-z reconstruction: level 9/10:   0%|          | 0/30 [00:00<?, ?it/s]
+latent-only real-z reconstruction: level 10/10:   0%|          | 0/30 [00:00<?, ?it/s]
+latent-only real-z reconstruction: final polish:   0%|          | 0/20 [00:00<?, ?it/s]
+                    value
+mean_chamfer     0.001674
+median_chamfer   0.001495
+std_chamfer      0.000646
+squared_chamfer      True
+latent-only contour thickness diagnostics
+
+                                     value
+self_nn_mean                      0.001527
+self_nn_std                       0.004574
+self_nn_median                    0.000448
+raster_occupied_fraction_mean     0.280054
+raster_occupied_fraction_std      0.035339
+num_samples                      16.000000
+oracle_projection_rmse            0.033710
+oracle_projection_mean_distance   0.027661
+latent-only topology diagnostics
+
+                                    value
+generated_hole_count_mean        1.937500
+target_hole_count_mean           1.625000
+hole_count_accuracy              0.125000
+generated_component_count_mean  12.468750
+target_component_count_mean      1.468750
+component_count_accuracy         0.000000
+occupied_fraction_ratio_mean     0.838880
+hole_leakage_mean                0.261888
+num_samples                     32.000000
+latent-only topology passed hole-accuracy threshold: False
+
+<Figure size 400x1650 with 20 Axes>
+Ending Cell 42-----------------------------------------
+Executing Cell 43--------------------------------------
+Ending Cell 43-----------------------------------------
+Executing Cell 44--------------------------------------
+                        num_queries  mean_nn_distance  median_nn_distance  \
+prior                                                                       
+validation_encoded_z            256          4.873483            4.761193   
+empirical_train_z               160          4.264983            4.482394   
+empirical_z_noise_0.01          160          4.028961            4.321871   
+empirical_z_noise_0.03          160          4.585169            4.601425   
+empirical_z_noise_0.05          160          4.086955            4.177536   
+gaussian_scale_0.25             160          6.806843            6.976353   
+pca_shrink_0.50                 160          5.292298            5.288183   
+pca_gmm_shrink_0.50             160          4.669166            4.752007   
+
+                        q90_nn_distance  q95_nn_distance  p95_nn_distance  \
+prior                                                                       
+validation_encoded_z           7.089487         7.674443         7.674443   
+empirical_train_z              6.558451         7.316733         7.316733   
+empirical_z_noise_0.01         6.259391         6.875942         6.875942   
+empirical_z_noise_0.03         6.913928         7.727506         7.727506   
+empirical_z_noise_0.05         6.495274         7.110391         7.110391   
+gaussian_scale_0.25            7.815898         8.049222         8.049222   
+pca_shrink_0.50                6.860021         7.738395         7.738395   
+pca_gmm_shrink_0.50            5.954023         6.533971         6.533971   
+
+                        max_nn_distance      mean    median       q95  \
+prior                                                                   
+validation_encoded_z          11.951538  4.873483  4.761193  7.674443   
+empirical_train_z             10.873282  4.264983  4.482394  7.316733   
+empirical_z_noise_0.01        10.962013  4.028961  4.321871  6.875942   
+empirical_z_noise_0.03        11.627171  4.585169  4.601425  7.727506   
+empirical_z_noise_0.05        14.828838  4.086955  4.177536  7.110391   
+gaussian_scale_0.25            8.623240  6.806843  6.976353  8.049222   
+pca_shrink_0.50               10.286742  5.292298  5.288183  7.738395   
+pca_gmm_shrink_0.50            7.692668  4.669166  4.752007  6.533971   
+
+                        same_label  
+prior                               
+validation_encoded_z          True  
+empirical_train_z             True  
+empirical_z_noise_0.01        True  
+empirical_z_noise_0.03        True  
+empirical_z_noise_0.05        True  
+gaussian_scale_0.25           True  
+pca_shrink_0.50               True  
+pca_gmm_shrink_0.50           True  
+Ending Cell 44-----------------------------------------
+Executing Cell 45--------------------------------------
+Ending Cell 45-----------------------------------------
+Executing Cell 46--------------------------------------
+Skipping latent-prior generation because latent-only reconstruction is still too weak: mean_chamfer=0.001674 > 0.001.
+Re-run this section after improving the latent-only student.
+
+Empty DataFrame
+Columns: []
+Index: []
+Ending Cell 46-----------------------------------------
+Executing Cell 47--------------------------------------
+Ending Cell 47-----------------------------------------
+Executing Cell 48--------------------------------------
+Skipping latent WGAN. Set RUN_LATENT_WGAN=True to train it.
+
+Ending Cell 48-----------------------------------------
+Executing Cell 49--------------------------------------
+Ending Cell 49-----------------------------------------
+Executing Cell 50--------------------------------------
+Ending Cell 50-----------------------------------------
+Papermill finished successfully at 2026-05-07T01:38:48+00:00.
+Git status before adding:
+ M artifacts/checkpoints/example_8b_mnist_cp_target_conditioned_score.pt
+ M notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb
+?? logs/8b_run_20260506_215701.log
+?? runs/8b_run.ipynb
+Running: git add -A
+Force-adding output notebook and log, in case runs/ or logs/ are ignored.
