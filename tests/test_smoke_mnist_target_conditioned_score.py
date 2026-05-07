@@ -222,6 +222,7 @@ def test_forward_loss_and_training_smoke() -> None:
         lr=1e-3,
         device="cpu",
         verbose=False,
+        use_amp=True,
     )
     assert len(ae_history["train_loss"]) == 1
     ae_metrics = evaluate_latent_shape_autoencoder(latent_ae, masses, positions, labels, batch_size=4, device="cpu")

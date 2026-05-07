@@ -275,6 +275,36 @@ def _amp_autocast_context(device: torch.device, enabled: bool) -> Any:
     return torch.autocast(device_type="cuda", dtype=torch.float16)
 
 
+def _autocast_disabled_context(device: torch.device) -> Any:
+    """Disable autocast for operations that are unsafe in AMP, such as BCE on probabilities."""
+    if device.type != "cuda":
+        return nullcontext()
+    return torch.autocast(device_type="cuda", enabled=False)
+
+
+def _binary_cross_entropy_probability_safe(
+    input_prob: Tensor,
+    target: Tensor,
+    *,
+    weight: Optional[Tensor] = None,
+    reduction: str = "mean",
+) -> Tensor:
+    """Binary cross entropy for probability inputs that is safe under torch autocast.
+
+    ``torch.nn.functional.binary_cross_entropy`` on post-sigmoid probabilities is
+    explicitly disallowed inside CUDA autocast.  The latent raster decoders in
+    this file output probabilities rather than logits, so the numerically safest
+    local fix is to temporarily disable autocast and compute BCE in fp32.
+    """
+    if reduction not in {"none", "mean", "sum"}:
+        raise ValueError("reduction must be one of {'none', 'mean', 'sum'}")
+    with _autocast_disabled_context(input_prob.device):
+        input_float = input_prob.float().clamp(1e-6, 1.0 - 1e-6)
+        target_float = target.float()
+        weight_float = None if weight is None else weight.float()
+        return F.binary_cross_entropy(input_float, target_float, weight=weight_float, reduction=reduction)
+
+
 def _make_grad_scaler(device: torch.device, enabled: bool) -> Any:
     try:
         return torch.amp.GradScaler("cuda", enabled=bool(enabled and device.type == "cuda"))
@@ -997,12 +1027,12 @@ class TargetConditionedScoreModel(nn.Module):
             value = F.mse_loss(pred_raster, true_raster)
             return value, {"latent_raster_loss": float(value.detach().item()), "latent_raster_bce": 0.0, "latent_raster_dice": 0.0}
         if loss == "bce":
-            bce = F.binary_cross_entropy(pred_raster, true_raster)
+            bce = _binary_cross_entropy_probability_safe(pred_raster, true_raster)
             return bce, {"latent_raster_loss": float(bce.detach().item()), "latent_raster_bce": float(bce.detach().item()), "latent_raster_dice": 0.0}
         if loss != "bce_dice":
             raise ValueError("loss must be 'mse', 'bce', or 'bce_dice'")
         weights = 1.0 + (float(positive_weight) - 1.0) * true_raster
-        bce = F.binary_cross_entropy(pred_raster, true_raster, weight=weights)
+        bce = _binary_cross_entropy_probability_safe(pred_raster, true_raster, weight=weights)
         intersection = torch.sum(pred_raster * true_raster, dim=(1, 2, 3))
         denom = torch.sum(pred_raster + true_raster, dim=(1, 2, 3)).clamp_min(1e-6)
         dice = torch.mean(1.0 - (2.0 * intersection + 1e-6) / (denom + 1e-6))
@@ -1339,7 +1369,7 @@ def latent_shape_autoencoder_loss(
         blur_steps=blur_steps,
     ).to(device=positions.device, dtype=positions.dtype)
     pred = pred.clamp(1e-6, 1.0 - 1e-6)
-    bce = F.binary_cross_entropy(pred, target)
+    bce = _binary_cross_entropy_probability_safe(pred, target)
     dice = positions.new_tensor(0.0)
     if raster_loss == "mse":
         raster_value = F.mse_loss(pred, target)
@@ -1347,7 +1377,7 @@ def latent_shape_autoencoder_loss(
         raster_value = bce
     elif raster_loss in {"bce_dice", "balanced_bce_dice"}:
         weights = 1.0 + (float(positive_weight) - 1.0) * target
-        bce = F.binary_cross_entropy(pred, target, weight=weights)
+        bce = _binary_cross_entropy_probability_safe(pred, target, weight=weights)
         intersection = torch.sum(pred * target, dim=(1, 2, 3))
         denom = torch.sum(pred + target, dim=(1, 2, 3)).clamp_min(1e-6)
         dice = torch.mean(1.0 - (2.0 * intersection + 1e-6) / (denom + 1e-6))
