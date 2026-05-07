@@ -1082,3 +1082,20 @@ Git status before adding:
 ?? mnist_cp_samples.png
 Running: git add -A
 Force-adding output notebook and log, in case runs/ or logs/ are ignored.
+Committing changes...
+[main 35a8b92] 8b coverage run
+ 4 files changed, 59763 insertions(+), 20710 deletions(-)
+ create mode 100644 logs/8b_run_coverage_20260507_162100.log
+ create mode 100644 mnist_cp_samples.png
+Pushing to origin main...
+To https://github.com/mao1756/condition_df.git
+   6c97ea6..35a8b92  main -> main
+============================================================
+SUCCESS at 2026-05-07T18:27:49+00:00
+Output notebook: runs/8b_run_coverage.ipynb
+Log file: logs/8b_run_coverage_20260507_162100.log
+Git push succeeded.
+============================================================
+Terminating/deleting RunPod pod: tezxhq3whgtxir
+WARNING: This permanently deletes pod data not stored in a network volume.
+curl: (22) 
