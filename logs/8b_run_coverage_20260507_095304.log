@@ -1,0 +1,129 @@
+============================================================
+Started: 2026-05-07T09:53:04+00:00
+Working directory: /workspace/condition_df
+Input notebook: notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb
+Output notebook: runs/8b_run_coverage.ipynb
+Log file: logs/8b_run_coverage_20260507_095304.log
+RunPod action after success: delete
+============================================================
+Papermill not found in current Python environment. Installing papermill and ipykernel...
+Collecting papermill
+  Downloading papermill-2.7.0-py3-none-any.whl.metadata (13 kB)
+Requirement already satisfied: ipykernel in /usr/local/lib/python3.11/dist-packages (6.29.5)
+Collecting click (from papermill)
+  Downloading click-8.3.3-py3-none-any.whl.metadata (2.6 kB)
+Requirement already satisfied: entrypoints in /usr/local/lib/python3.11/dist-packages (from papermill) (0.4)
+Requirement already satisfied: nbclient>=0.2 in /usr/local/lib/python3.11/dist-packages (from papermill) (0.10.0)
+Requirement already satisfied: nbformat>=5.2 in /usr/local/lib/python3.11/dist-packages (from papermill) (5.10.4)
+Requirement already satisfied: pyyaml in /usr/local/lib/python3.11/dist-packages (from papermill) (6.0.2)
+Requirement already satisfied: requests in /usr/local/lib/python3.11/dist-packages (from papermill) (2.32.3)
+Collecting tenacity>=5.0.2 (from papermill)
+  Downloading tenacity-9.1.4-py3-none-any.whl.metadata (1.2 kB)
+Collecting tqdm>=4.32.2 (from papermill)
+  Downloading tqdm-4.67.3-py3-none-any.whl.metadata (57 kB)
+Requirement already satisfied: comm>=0.1.1 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (0.2.2)
+Requirement already satisfied: debugpy>=1.6.5 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (1.8.5)
+Requirement already satisfied: ipython>=7.23.1 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (8.27.0)
+Requirement already satisfied: jupyter-client>=6.1.12 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (7.4.9)
+Requirement already satisfied: jupyter-core!=5.0.*,>=4.12 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (5.7.2)
+Requirement already satisfied: matplotlib-inline>=0.1 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (0.1.7)
+Requirement already satisfied: nest-asyncio in /usr/local/lib/python3.11/dist-packages (from ipykernel) (1.6.0)
+Requirement already satisfied: packaging in /usr/local/lib/python3.11/dist-packages (from ipykernel) (24.1)
+Requirement already satisfied: psutil in /usr/local/lib/python3.11/dist-packages (from ipykernel) (6.0.0)
+Requirement already satisfied: pyzmq>=24 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (24.0.1)
+Requirement already satisfied: tornado>=6.1 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (6.4.1)
+Requirement already satisfied: traitlets>=5.4.0 in /usr/local/lib/python3.11/dist-packages (from ipykernel) (5.14.3)
+Requirement already satisfied: decorator in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (5.1.1)
+Requirement already satisfied: jedi>=0.16 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (0.19.1)
+Requirement already satisfied: prompt-toolkit<3.1.0,>=3.0.41 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (3.0.47)
+Requirement already satisfied: pygments>=2.4.0 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (2.18.0)
+Requirement already satisfied: stack-data in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (0.6.3)
+Requirement already satisfied: typing-extensions>=4.6 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (4.9.0)
+Requirement already satisfied: pexpect>4.3 in /usr/local/lib/python3.11/dist-packages (from ipython>=7.23.1->ipykernel) (4.9.0)
+Requirement already satisfied: python-dateutil>=2.8.2 in /usr/local/lib/python3.11/dist-packages (from jupyter-client>=6.1.12->ipykernel) (2.9.0.post0)
+Requirement already satisfied: platformdirs>=2.5 in /usr/local/lib/python3.11/dist-packages (from jupyter-core!=5.0.*,>=4.12->ipykernel) (4.3.6)
+Requirement already satisfied: fastjsonschema>=2.15 in /usr/local/lib/python3.11/dist-packages (from nbformat>=5.2->papermill) (2.20.0)
+Requirement already satisfied: jsonschema>=2.6 in /usr/local/lib/python3.11/dist-packages (from nbformat>=5.2->papermill) (4.23.0)
+Requirement already satisfied: charset-normalizer<4,>=2 in /usr/local/lib/python3.11/dist-packages (from requests->papermill) (3.3.2)
+Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.11/dist-packages (from requests->papermill) (3.10)
+Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.11/dist-packages (from requests->papermill) (2.2.3)
+Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.11/dist-packages (from requests->papermill) (2024.8.30)
+Requirement already satisfied: parso<0.9.0,>=0.8.3 in /usr/local/lib/python3.11/dist-packages (from jedi>=0.16->ipython>=7.23.1->ipykernel) (0.8.4)
+Requirement already satisfied: attrs>=22.2.0 in /usr/local/lib/python3.11/dist-packages (from jsonschema>=2.6->nbformat>=5.2->papermill) (24.2.0)
+Requirement already satisfied: jsonschema-specifications>=2023.03.6 in /usr/local/lib/python3.11/dist-packages (from jsonschema>=2.6->nbformat>=5.2->papermill) (2023.12.1)
+Requirement already satisfied: referencing>=0.28.4 in /usr/local/lib/python3.11/dist-packages (from jsonschema>=2.6->nbformat>=5.2->papermill) (0.35.1)
+Requirement already satisfied: rpds-py>=0.7.1 in /usr/local/lib/python3.11/dist-packages (from jsonschema>=2.6->nbformat>=5.2->papermill) (0.20.0)
+Requirement already satisfied: ptyprocess>=0.5 in /usr/local/lib/python3.11/dist-packages (from pexpect>4.3->ipython>=7.23.1->ipykernel) (0.7.0)
+Requirement already satisfied: wcwidth in /usr/local/lib/python3.11/dist-packages (from prompt-toolkit<3.1.0,>=3.0.41->ipython>=7.23.1->ipykernel) (0.2.13)
+Requirement already satisfied: six>=1.5 in /usr/lib/python3/dist-packages (from python-dateutil>=2.8.2->jupyter-client>=6.1.12->ipykernel) (1.16.0)
+Requirement already satisfied: executing>=1.2.0 in /usr/local/lib/python3.11/dist-packages (from stack-data->ipython>=7.23.1->ipykernel) (2.1.0)
+Requirement already satisfied: asttokens>=2.1.0 in /usr/local/lib/python3.11/dist-packages (from stack-data->ipython>=7.23.1->ipykernel) (2.4.1)
+Requirement already satisfied: pure-eval in /usr/local/lib/python3.11/dist-packages (from stack-data->ipython>=7.23.1->ipykernel) (0.2.3)
+Downloading papermill-2.7.0-py3-none-any.whl (88 kB)
+Downloading tenacity-9.1.4-py3-none-any.whl (28 kB)
+Downloading tqdm-4.67.3-py3-none-any.whl (78 kB)
+Downloading click-8.3.3-py3-none-any.whl (110 kB)
+Installing collected packages: tqdm, tenacity, click, papermill
+Successfully installed click-8.3.3 papermill-2.7.0 tenacity-9.1.4 tqdm-4.67.3
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable.It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+
+[notice] A new release of pip is available: 24.2 -> 26.1.1
+[notice] To update, run: python -m pip install --upgrade pip
+Running Papermill...
+Command: python -m papermill notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb runs/8b_run_coverage.ipynb --log-output --request-save-on-cell-execute --autosave-cell-every 60 
+Input Notebook:  notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb
+Output Notebook: runs/8b_run_coverage.ipynb
+Executing notebook with kernel: python3
+Executing Cell 1---------------------------------------
+Ending Cell 1------------------------------------------
+Executing Cell 2---------------------------------------
+Ending Cell 2------------------------------------------
+Executing Cell 3---------------------------------------
+CUDA available: True
+GPU: NVIDIA H100 80GB HBM3
+_CudaDeviceProperties(name='NVIDIA H100 80GB HBM3', major=9, minor=0, total_memory=81079MB, multi_processor_count=132)
+
+Ending Cell 3------------------------------------------
+Executing Cell 4---------------------------------------
+repo root: /workspace/condition_df
+device: cuda
+
+Ending Cell 4------------------------------------------
+Executing Cell 5---------------------------------------
+Ending Cell 5------------------------------------------
+Executing Cell 6---------------------------------------
+Ending Cell 6------------------------------------------
+Executing Cell 7---------------------------------------
+FAST_DEMO = False
+MNIST-CP path = /workspace/condition_df/mnist_data/mnist_cp.npz
+train/val/test per class = (2000, 250, 250)
+points per contour = all saved points
+score epochs/batch = (80, 32)
+score conditioning mode = film
+sigma range = (0.25, 0.005) levels = 10
+sampler = shape_gf_langevin steps per level = 10
+direct/replay probabilities = (0.25, 0.5)
+target-grid dropout = 0.25
+latent priors: Gaussian covariance scale = 0.25 PCA dim = 32
+show progress = True latent generation progress = True
+student latent regularizers = (1.0, 0.05, 0.1)
+latent shape AE = (True, 100)
+latent-only student enabled = True
+generation latent source / force recompute = ('student', True)
+student Chamfer validation = (5, 16)
+fine refinement = (True, 20, 0.03)
+topology refinement = (True, (0, 6, 8, 9), 20)
+fine sampler levels/multiplier = (4, 3)
+decoded raster guidance = (0.25, -4)
+checkpoint mode/path = auto /workspace/condition_df/artifacts/checkpoints/example_8b_mnist_cp_target_conditioned_score.pt
+
+Ending Cell 7------------------------------------------
+Executing Cell 8---------------------------------------
+Ending Cell 8------------------------------------------
+Executing Cell 9---------------------------------------
+normalization in file: bbox_centered_longest_side_to_[-1,1]
+train positions: (20000, 800, 2) labels: [2000 2000 2000 2000 2000 2000 2000 2000 2000 2000]
+val positions: (2500, 800, 2) labels: [250 250 250 250 250 250 250 250 250 250]
+reference positions: (2500, 800, 2) labels: [250 250 250 250 250 250 250 250 250 250]
+K = 800
+

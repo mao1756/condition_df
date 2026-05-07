@@ -1077,3 +1077,22 @@ Git status before adding:
 ?? runs/8b_run.ipynb
 Running: git add -A
 Force-adding output notebook and log, in case runs/ or logs/ are ignored.
+Committing changes...
+[main 0a97055] 8b run
+ 4 files changed, 110211 insertions(+), 5407 deletions(-)
+ create mode 100644 logs/8b_run_20260506_215701.log
+ rewrite notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb (89%)
+ create mode 100644 runs/8b_run.ipynb
+Pushing to origin main...
+To https://github.com/mao1756/condition_df.git
+   3b54377..0a97055  main -> main
+============================================================
+SUCCESS at 2026-05-07T01:39:08+00:00
+Output notebook: runs/8b_run.ipynb
+Log file: logs/8b_run_20260506_215701.log
+Git push succeeded.
+============================================================
+Terminating/deleting RunPod pod: hk2ytxvmln44v6
+WARNING: This permanently deletes pod data not stored in a network volume.
+
+Delete request sent. This session may disappear soon.

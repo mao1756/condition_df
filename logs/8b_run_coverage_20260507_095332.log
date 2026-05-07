@@ -1,0 +1,475 @@
+============================================================
+Started: 2026-05-07T09:53:32+00:00
+Working directory: /workspace/condition_df
+Input notebook: notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb
+Output notebook: runs/8b_run_coverage.ipynb
+Log file: logs/8b_run_coverage_20260507_095332.log
+RunPod action after success: delete
+============================================================
+Running Papermill...
+Command: python -m papermill notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb runs/8b_run_coverage.ipynb --log-output --request-save-on-cell-execute --autosave-cell-every 60 
+Input Notebook:  notebooks/example_8b_mnist_cp_target_conditioned_score.ipynb
+Output Notebook: runs/8b_run_coverage.ipynb
+Executing notebook with kernel: python3
+Executing Cell 1---------------------------------------
+Ending Cell 1------------------------------------------
+Executing Cell 2---------------------------------------
+Ending Cell 2------------------------------------------
+Executing Cell 3---------------------------------------
+CUDA available: True
+GPU: NVIDIA H100 80GB HBM3
+_CudaDeviceProperties(name='NVIDIA H100 80GB HBM3', major=9, minor=0, total_memory=81079MB, multi_processor_count=132)
+
+Ending Cell 3------------------------------------------
+Executing Cell 4---------------------------------------
+repo root: /workspace/condition_df
+device: cuda
+
+Ending Cell 4------------------------------------------
+Executing Cell 5---------------------------------------
+Ending Cell 5------------------------------------------
+Executing Cell 6---------------------------------------
+Ending Cell 6------------------------------------------
+Executing Cell 7---------------------------------------
+FAST_DEMO = False
+MNIST-CP path = /workspace/condition_df/mnist_data/mnist_cp.npz
+train/val/test per class = (2000, 250, 250)
+points per contour = all saved points
+score epochs/batch = (80, 32)
+score conditioning mode = film
+sigma range = (0.25, 0.005) levels = 10
+sampler = shape_gf_langevin steps per level = 10
+direct/replay probabilities = (0.25, 0.5)
+target-grid dropout = 0.25
+latent priors: Gaussian covariance scale = 0.25 PCA dim = 32
+show progress = True latent generation progress = True
+student latent regularizers = (1.0, 0.05, 0.1)
+latent shape AE = (True, 100)
+latent-only student enabled = True
+generation latent source / force recompute = ('student', True)
+student Chamfer validation = (5, 16)
+fine refinement = (True, 20, 0.03)
+topology refinement = (True, (0, 6, 8, 9), 20)
+fine sampler levels/multiplier = (4, 3)
+decoded raster guidance = (0.25, -4)
+checkpoint mode/path = auto /workspace/condition_df/artifacts/checkpoints/example_8b_mnist_cp_target_conditioned_score.pt
+
+Ending Cell 7------------------------------------------
+Executing Cell 8---------------------------------------
+Ending Cell 8------------------------------------------
+Executing Cell 9---------------------------------------
+normalization in file: bbox_centered_longest_side_to_[-1,1]
+train positions: (20000, 800, 2) labels: [2000 2000 2000 2000 2000 2000 2000 2000 2000 2000]
+val positions: (2500, 800, 2) labels: [250 250 250 250 250 250 250 250 250 250]
+reference positions: (2500, 800, 2) labels: [250 250 250 250 250 250 250 250 250 250]
+K = 800
+
+Ending Cell 9------------------------------------------
+Executing Cell 10--------------------------------------
+<Figure size 650x1300 with 50 Axes>
+Ending Cell 10-----------------------------------------
+Executing Cell 11--------------------------------------
+Ending Cell 11-----------------------------------------
+Executing Cell 12--------------------------------------
+tau range: (1.5625e-08, 3.90625e-05)
+
+   level  sigma_unit_square  sigma_pixels           tau
+0      0           0.250000      7.000000  3.906250e-05
+1      1           0.161870      4.532352  1.637613e-05
+2      2           0.104807      2.934602  6.865343e-06
+3      3           0.067860      1.900092  2.878150e-06
+4      4           0.043938      1.230270  1.206603e-06
+5      5           0.028449      0.796573  5.058428e-07
+6      6           0.018420      0.515764  2.120639e-07
+7      7           0.011927      0.333947  8.890328e-08
+8      8           0.007722      0.216223  3.727082e-08
+9      9           0.005000      0.140000  1.562500e-08
+Ending Cell 12-----------------------------------------
+Executing Cell 13--------------------------------------
+Ending Cell 13-----------------------------------------
+Executing Cell 14--------------------------------------
+Ending Cell 14-----------------------------------------
+Executing Cell 15--------------------------------------
+Ending Cell 15-----------------------------------------
+Executing Cell 16--------------------------------------
+Loaded score checkpoint from /workspace/condition_df/artifacts/checkpoints/example_8b_mnist_cp_target_conditioned_score.pt
+target raster cache enabled: True
+TargetConditionedScoreModel(
+  (target_encoder): TargetPointCloudEncoder(
+    (point_mlp): Sequential(
+      (0): Linear(in_features=4, out_features=256, bias=True)
+      (1): GELU(approximate='none')
+      (2): Dropout(p=0.02, inplace=False)
+      (3): Linear(in_features=256, out_features=256, bias=True)
+      (4): GELU(approximate='none')
+      (5): Dropout(p=0.02, inplace=False)
+      (6): Linear(in_features=256, out_features=256, bias=True)
+      (7): GELU(approximate='none')
+    )
+    (latent_head): Sequential(
+      (0): Linear(in_features=768, out_features=256, bias=True)
+      (1): GELU(approximate='none')
+      (2): Dropout(p=0.02, inplace=False)
+      (3): Linear(in_features=256, out_features=128, bias=True)
+    )
+    (latent_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+  )
+  (time_mlp): Sequential(
+    (0): Linear(in_features=3, out_features=64, bias=True)
+    (1): GELU(approximate='none')
+    (2): Linear(in_features=64, out_features=64, bias=True)
+    (3): GELU(approximate='none')
+  )
+  (label_embedding): Embedding(10, 64)
+  (context_mlp): Sequential(
+    (0): Linear(in_features=256, out_features=128, bias=True)
+    (1): GELU(approximate='none')
+    (2): Linear(in_features=128, out_features=128, bias=True)
+    (3): GELU(approximate='none')
+  )
+  (latent_label_head): Sequential(
+    (0): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+    (1): Linear(in_features=128, out_features=128, bias=True)
+    (2): GELU(approximate='none')
+    (3): Linear(in_features=128, out_features=10, bias=True)
+  )
+  (feature_unet): _SmallUNet2d(
+    (enc1): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(130, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (pool1): AvgPool2d(kernel_size=2, stride=2, padding=0)
+    (enc2): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(48, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(96, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (pool2): AvgPool2d(kernel_size=2, stride=2, padding=0)
+    (bottleneck): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(96, 192, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 192, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(192, 192, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 192, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (up2): Conv2d(192, 96, kernel_size=(1, 1), stride=(1, 1))
+    (dec2): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(192, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(96, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (up1): Conv2d(96, 48, kernel_size=(1, 1), stride=(1, 1))
+    (dec1): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(96, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (out): Conv2d(48, 96, kernel_size=(1, 1), stride=(1, 1))
+  )
+  (target_feature_unet): _SmallUNet2d(
+    (enc1): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(130, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (pool1): AvgPool2d(kernel_size=2, stride=2, padding=0)
+    (enc2): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(48, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(96, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (pool2): AvgPool2d(kernel_size=2, stride=2, padding=0)
+    (bottleneck): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(96, 192, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 192, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(192, 192, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 192, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (up2): Conv2d(192, 96, kernel_size=(1, 1), stride=(1, 1))
+    (dec2): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(192, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(96, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 96, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (up1): Conv2d(96, 48, kernel_size=(1, 1), stride=(1, 1))
+    (dec1): _ConvBlock2d(
+      (net): Sequential(
+        (0): Conv2d(96, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (1): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (2): GELU(approximate='none')
+        (3): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        (4): GroupNorm(8, 48, eps=1e-05, affine=True)
+        (5): GELU(approximate='none')
+      )
+    )
+    (out): Conv2d(48, 96, kernel_size=(1, 1), stride=(1, 1))
+  )
+  (set_encoder): NoisySetEquivariantEncoder(
+    (input_projection): Sequential(
+      (0): Linear(in_features=132, out_features=128, bias=True)
+      (1): GELU(approximate='none')
+      (2): Linear(in_features=128, out_features=128, bias=True)
+      (3): GELU(approximate='none')
+    )
+    (blocks): ModuleList(
+      (0-2): 3 x _EquivariantContextBlock(
+        (update): Sequential(
+          (0): LayerNorm((512,), eps=1e-05, elementwise_affine=True)
+          (1): Linear(in_features=512, out_features=128, bias=True)
+          (2): GELU(approximate='none')
+          (3): Dropout(p=0.02, inplace=False)
+          (4): Linear(in_features=128, out_features=128, bias=True)
+        )
+      )
+    )
+    (output_projection): Sequential(
+      (0): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+      (1): Linear(in_features=128, out_features=128, bias=True)
+      (2): GELU(approximate='none')
+    )
+  )
+  (point_score_head): _FiLMScoreHead(
+    (input): Sequential(
+      (0): Linear(in_features=228, out_features=256, bias=True)
+      (1): GELU(approximate='none')
+    )
+    (blocks): ModuleList(
+      (0-1): 2 x _FiLMResidualMLPBlock(
+        (norm): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+        (to_scale_shift): Sequential(
+          (0): Linear(in_features=128, out_features=512, bias=True)
+          (1): GELU(approximate='none')
+          (2): Linear(in_features=512, out_features=512, bias=True)
+        )
+        (net): Sequential(
+          (0): Linear(in_features=256, out_features=256, bias=True)
+          (1): GELU(approximate='none')
+          (2): Dropout(p=0.02, inplace=False)
+          (3): Linear(in_features=256, out_features=256, bias=True)
+        )
+      )
+    )
+    (output): Sequential(
+      (0): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+      (1): Linear(in_features=256, out_features=2, bias=True)
+    )
+  )
+  (measure_score_head): _FiLMScoreHead(
+    (input): Sequential(
+      (0): Linear(in_features=452, out_features=256, bias=True)
+      (1): GELU(approximate='none')
+    )
+    (blocks): ModuleList(
+      (0-1): 2 x _FiLMResidualMLPBlock(
+        (norm): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+        (to_scale_shift): Sequential(
+          (0): Linear(in_features=128, out_features=512, bias=True)
+          (1): GELU(approximate='none')
+          (2): Linear(in_features=512, out_features=512, bias=True)
+        )
+        (net): Sequential(
+          (0): Linear(in_features=256, out_features=256, bias=True)
+          (1): GELU(approximate='none')
+          (2): Dropout(p=0.02, inplace=False)
+          (3): Linear(in_features=256, out_features=256, bias=True)
+        )
+      )
+    )
+    (output): Sequential(
+      (0): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+      (1): Linear(in_features=256, out_features=2, bias=True)
+    )
+  )
+)
+
+Ending Cell 16-----------------------------------------
+Executing Cell 17--------------------------------------
+Checkpoint loaded; skipping score training. Set CHECKPOINT_MODE = "train" to retrain.
+
+Ending Cell 17-----------------------------------------
+Executing Cell 18--------------------------------------
+Ending Cell 18-----------------------------------------
+Executing Cell 19--------------------------------------
+Intermediate checkpoint saving is disabled; final checkpoint will be written near the end if SAVE_SCORE_CHECKPOINT=True.
+
+Ending Cell 19-----------------------------------------
+Executing Cell 20--------------------------------------
+<Figure size 600x400 with 1 Axes>
+Ending Cell 20-----------------------------------------
+Executing Cell 21--------------------------------------
+Ending Cell 21-----------------------------------------
+Executing Cell 22--------------------------------------
+latent shape AE:   0%|          | 0/100 [00:00<?, ?it/s]
+latent shape AE train 1/100:   0%|          | 0/157 [00:00<?, ?it/s]
+Ending Cell 22-----------------------------------------
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/usr/local/lib/python3.11/dist-packages/papermill/__main__.py", line 4, in <module>
+    papermill()
+  File "/usr/local/lib/python3.11/dist-packages/click/core.py", line 1514, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/click/core.py", line 1435, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/click/core.py", line 1298, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/click/core.py", line 853, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/click/decorators.py", line 34, in new_func
+    return f(get_current_context(), *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/papermill/cli.py", line 235, in papermill
+    execute_notebook(
+  File "/usr/local/lib/python3.11/dist-packages/papermill/execute.py", line 131, in execute_notebook
+    raise_for_execution_errors(nb, output_path)
+  File "/usr/local/lib/python3.11/dist-packages/papermill/execute.py", line 251, in raise_for_execution_errors
+    raise error
+papermill.exceptions.PapermillExecutionError: 
+---------------------------------------------------------------------------
+Exception encountered at "In [13]":
+---------------------------------------------------------------------------
+RuntimeError                              Traceback (most recent call last)
+Cell In[13], line 18
+      5 if RUN_LATENT_SHAPE_AE_PRETRAIN:
+      6     latent_shape_autoencoder = LatentShapeAutoencoder(
+      7         latent_dim=Z_DIM,
+      8         encoder_hidden_dim=TARGET_ENCODER_HIDDEN_DIM,
+   (...)
+     16         use_fourier_features=False,
+     17     ).to(DEVICE)
+---> 18     latent_shape_ae_history = train_latent_shape_autoencoder(
+     19         latent_shape_autoencoder,
+     20         train_pc.masses,
+     21         train_pc.positions,
+     22         train_pc.labels,
+     23         val_masses=val_pc.masses,
+     24         val_positions=val_pc.positions,
+     25         val_labels=val_pc.labels,
+     26         epochs=LATENT_SHAPE_AE_EPOCHS,
+     27         batch_size=LATENT_SHAPE_AE_BATCH_SIZE,
+     28         lr=LATENT_SHAPE_AE_LR,
+     29         weight_decay=WEIGHT_DECAY,
+     30         raster_loss=LATENT_SHAPE_AE_RASTER_LOSS,
+     31         positive_weight=LATENT_SHAPE_AE_POSITIVE_WEIGHT,
+     32         dice_weight=LATENT_SHAPE_AE_DICE_WEIGHT,
+     33         blur_steps=LATENT_SHAPE_AE_BLUR_STEPS,
+     34         latent_variance_weight=LATENT_SHAPE_AE_VARIANCE_WEIGHT,
+     35         latent_covariance_weight=LATENT_SHAPE_AE_COVARIANCE_WEIGHT,
+     36         latent_variance_target=LATENT_SHAPE_AE_VARIANCE_TARGET,
+     37         latent_classification_weight=LATENT_SHAPE_AE_CLASS_WEIGHT,
+     38         early_stopping_patience=LATENT_SHAPE_AE_EARLY_STOPPING_PATIENCE,
+     39         device=DEVICE,
+     40         verbose=True,
+     41         show_progress=SHOW_PROGRESS,
+     42         progress_desc="latent shape AE",
+     43         dataloader_num_workers=DATALOADER_NUM_WORKERS,
+     44         pin_memory=PIN_MEMORY,
+     45         use_amp=USE_MIXED_PRECISION,
+     46     )
+     47     latent_shape_ae_metrics = evaluate_latent_shape_autoencoder(
+     48         latent_shape_autoencoder,
+     49         val_pc.masses,
+   (...)
+     53         device=DEVICE,
+     54     )
+     55     print("latent shape autoencoder validation metrics")
+
+File /workspace/condition_df/mnist/target_conditioned_score.py:1491, in train_latent_shape_autoencoder(model, masses, positions, labels, val_masses, val_positions, val_labels, epochs, batch_size, lr, weight_decay, raster_loss, positive_weight, dice_weight, blur_steps, latent_variance_weight, latent_covariance_weight, latent_variance_target, latent_classification_weight, max_grad_norm, early_stopping_patience, device, verbose, show_progress, progress_desc, dataloader_num_workers, pin_memory, use_amp)
+   1489 epoch_iter = _optional_tqdm(range(int(epochs)), enabled=show_progress, desc=progress_desc)
+   1490 for epoch in epoch_iter:
+-> 1491     train_metrics = _run(loader, train=True, epoch_label=f"{progress_desc} train {epoch + 1}/{epochs}")
+   1492     if val_loader is not None:
+   1493         with torch.no_grad():
+
+File /workspace/condition_df/mnist/target_conditioned_score.py:1452, in train_latent_shape_autoencoder.<locals>._run(loader_obj, train, epoch_label)
+   1450 batch_labels = batch_labels.to(model_device)
+   1451 with _amp_autocast_context(model_device, use_amp):
+-> 1452     loss_value, metrics = latent_shape_autoencoder_loss(
+   1453         model,
+   1454         batch_masses,
+   1455         batch_positions,
+   1456         batch_labels,
+   1457         raster_loss=raster_loss,
+   1458         positive_weight=positive_weight,
+   1459         dice_weight=dice_weight,
+   1460         blur_steps=blur_steps,
+   1461         latent_variance_weight=latent_variance_weight,
+   1462         latent_covariance_weight=latent_covariance_weight,
+   1463         latent_variance_target=latent_variance_target,
+   1464         latent_classification_weight=latent_classification_weight,
+   1465     )
+   1466 if train:
+   1467     optimizer.zero_grad(set_to_none=True)
+
+File /workspace/condition_df/mnist/target_conditioned_score.py:1342, in latent_shape_autoencoder_loss(model, masses, positions, labels, raster_loss, positive_weight, dice_weight, blur_steps, latent_variance_weight, latent_covariance_weight, latent_variance_target, latent_classification_weight)
+   1334 target = rasterize_target_for_latent_autoencoder(
+   1335     masses,
+   1336     positions,
+   (...)
+   1339     blur_steps=blur_steps,
+   1340 ).to(device=positions.device, dtype=positions.dtype)
+   1341 pred = pred.clamp(1e-6, 1.0 - 1e-6)
+-> 1342 bce = F.binary_cross_entropy(pred, target)
+   1343 dice = positions.new_tensor(0.0)
+   1344 if raster_loss == "mse":
+
+File /usr/local/lib/python3.11/dist-packages/torch/nn/functional.py:3172, in binary_cross_entropy(input, target, weight, size_average, reduce, reduction)
+   3169     new_size = _infer_size(target.size(), weight.size())
+   3170     weight = weight.expand(new_size)
+-> 3172 return torch._C._nn.binary_cross_entropy(input, target, weight, reduction_enum)
+
+RuntimeError: torch.nn.functional.binary_cross_entropy and torch.nn.BCELoss are unsafe to autocast.
+Many models use a sigmoid layer right before the binary cross entropy layer.
+In this case, combine the two layers using torch.nn.functional.binary_cross_entropy_with_logits
+or torch.nn.BCEWithLogitsLoss.  binary_cross_entropy_with_logits and BCEWithLogits are
+safe to autocast.
+
+============================================================
+FAILED with status 1 at 2026-05-07T09:53:44+00:00
