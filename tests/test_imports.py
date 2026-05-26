@@ -11,6 +11,7 @@ import core.wasserstein_conditioning_algorithms as wasserstein_conditioning_algo
 import examples.eulerian_image_bridge as eulerian_image_bridge
 import mnist.conditioned_diffusion as mnist_conditioned_diffusion
 import mnist.experiment6_fixes as mnist_experiment6_fixes
+import mnist.eulerian_flux_mnist as mnist_eulerian_flux_mnist
 import mnist.experiment6_hyperparameter_search as mnist_experiment6_hyperparameter_search
 import mnist.mnist_cp as mnist_cp
 import mnist.score_matching as mnist_score_matching
@@ -32,6 +33,7 @@ def test_direct_package_imports() -> None:
     _assert_alias(eulerian_image_bridge, "examples.eulerian_image_bridge")
     _assert_alias(mnist_weighted_point_cloud, "mnist.weighted_point_cloud")
     _assert_alias(mnist_conditioned_diffusion, "mnist.conditioned_diffusion")
+    _assert_alias(mnist_eulerian_flux_mnist, "mnist.eulerian_flux_mnist")
     _assert_alias(mnist_experiment6_fixes, "mnist.experiment6_fixes")
     _assert_alias(
         mnist_experiment6_hyperparameter_search,
@@ -42,6 +44,7 @@ def test_direct_package_imports() -> None:
 
     assert hasattr(eulerian_image_bridge, "simulate_conditioned_image_bridge")
     assert hasattr(mnist_score_matching, "train_score_model")
+    assert hasattr(mnist_eulerian_flux_mnist, "train_direct_flux_model")
     assert hasattr(mnist_conditioned_diffusion, "generate_guided_point_clouds")
     assert hasattr(mnist_cp, "load_mnist_cp_splits")
     assert hasattr(wasserstein_conditioning_algorithms, "simulate_wasserstein_mc_sinkhorn_em")

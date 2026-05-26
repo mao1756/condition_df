@@ -38,6 +38,30 @@ train a positive CNN surrogate for the Feynman--Kac heat potential from free
 Eulerian rollouts, then simulate the terminally conditioned conservative
 edge-flux dynamics.
 
+## Example 10: MNIST direct edge-flux generation
+
+`mnist/eulerian_flux_mnist.py` implements the laptop-friendly MNIST generation
+experiment based on the Eulerian conditioning formula, but learns the two
+conditioning-flux channels directly instead of learning a scalar heat potential.
+The model is a small label-conditioned U-Net that predicts horizontal and
+vertical edge fluxes, and the sampler applies them with conservative incidence
+updates so total mass stays on the 28x28 simplex.
+
+Run a quick RTX-laptop-sized experiment with ETA progress bars:
+
+```powershell
+.venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
+  --data-root mnist_data `
+  --examples-per-class 1000 `
+  --train-steps 1200 `
+  --batch-size 256 `
+  --base-channels 32 `
+  --num-samples 64
+```
+
+For a very quick smoke run, reduce `--train-steps` to 100--300. Outputs are
+written to `artifacts/experiment10_mnist_flux/` by default.
+
 ## Smoke Tests
 
 Use the virtual environment Python on Windows:
