@@ -1,43 +1,34 @@
 from __future__ import annotations
 
-r"""Example 10: MNIST generation with a directly learned Eulerian edge flux.
+r"""Example 10/10b: MNIST generation with directly learned Eulerian edge fluxes.
 
-The manuscript's terminal conditioning formula adds the conservative edge flux
+The manuscript's fixed-grid h-transform adds a conservative edge flux
 
     J_e^u(t, s) = (2 / h) theta_e(s) partial_e^h log u_t^h(s)
 
-on top of the free harmonic-mobility finite-volume dynamics.  Example 9 learns
-``u_t^h`` and differentiates it.  This module implements the smaller and faster
-Experiment 10 variant: learn the two edge-flux channels directly.
+on top of the free harmonic-mobility finite-volume dynamics.  Example 10 keeps
+that Eulerian object, but learns the two edge-flux channels directly:
 
-A state is a ``28 x 28`` probability vector.  The neural network sees the current
-state, remaining time, and digit label, and returns two flux images:
+* channel 0: horizontal flux from pixel ``(row, col)`` to ``(row, col + 1)``;
+* channel 1: vertical flux from pixel ``(row, col)`` to ``(row + 1, col)``.
 
-* channel 0: horizontal edge flux from pixel ``(row, col)`` to ``(row, col + 1)``;
-* channel 1: vertical edge flux from pixel ``(row, col)`` to ``(row + 1, col)``.
-
-The simulator updates masses by conservative incidence: incoming flux minus
-outgoing flux.  Therefore total mass is conserved exactly before the optional
-small positivity floor/renormalization used to protect explicit Euler steps.
-
-The training target is a cheap laptop-friendly proxy for the theoretical
-conditioning flux: draw a real MNIST target image of the requested label, form a
-blurred positive Gibbs terminal score ``g_h(s | x)``, compute the analytic
-terminal log-score flux
-
-    (2 / h) theta_e(s) partial_e^h log g_h(s | x),
-
-and regress the U-Net directly onto that two-channel field.  Because the target
-image is not an input, the population minimizer is the label-conditional average
-conditioning flux.  This is intentionally a small proof-of-concept rather than a
-large diffusion model.
+The original terminal-score proxy is still available with
+``--target-mode terminal-score``.  The default is now the safer laptop-friendly
+``poisson-flow`` setting used for debugging generation: sample a source measure
+``z``, an MNIST target ``x``, interpolate ``s_tau = (tau/T) z + (1 - tau/T) x``,
+and train the network to predict the minimum-energy periodic edge flux whose
+conservative divergence equals ``(x - z) / T``.  This is a direct two-channel
+supervised bridge target and is much less likely to be overwhelmed by the free
+SDE terms.  The sampler defaults to learned-only deterministic dynamics
+(``free_weight = noise_weight = 0``, ``learned_weight = 1``), while the full
+free/noisy SDE can be reintroduced from the command line.
 """
 
 import argparse
 import math
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator, Sequence
 
@@ -53,6 +44,9 @@ from mnist.weighted_point_cloud import load_mnist_arrays, normalize_images_to_me
 FloatArray = NDArray[np.float64]
 IntArray = NDArray[np.int64]
 
+TARGET_MODES = ("poisson-flow", "class-mean-flow", "terminal-score")
+SOURCE_MODES = ("lowfreq", "uniform-plus-lowfreq", "blurred-dirichlet", "dirichlet")
+
 __all__ = [
     "DirectFluxMNISTConfig",
     "MNISTMeasureDataset",
@@ -64,12 +58,15 @@ __all__ = [
     "sample_flux_training_batch",
     "terminal_potential_and_log_gradient_torch",
     "terminal_conditioning_flux_torch",
+    "poisson_flux_from_velocity_torch",
+    "training_target_flux_torch",
     "flux_divergence_torch",
     "eulerian_flux_step_torch",
     "direct_flux_matching_loss",
     "train_direct_flux_model",
     "simulate_direct_flux_generation",
     "save_flux_samples_grid",
+    "save_flux_preview_panel",
     "main",
 ]
 
@@ -78,8 +75,10 @@ __all__ = [
 class DirectFluxMNISTConfig:
     """Configuration for the direct-flux MNIST experiment.
 
-    Defaults are intentionally modest: they are meant to fit comfortably on an
-    8 GB laptop GPU while still producing useful progress-bar ETAs.
+    Defaults are intentionally modest and designed for an 8 GB laptop GPU.  The
+    default 10b path uses a low-frequency source and learned-only deterministic
+    sampling so that the first debugging run tests the learned conservative flux
+    before reintroducing the free harmonic drift/noise.
     """
 
     grid_size: int = 28
@@ -87,18 +86,29 @@ class DirectFluxMNISTConfig:
     horizon_scale: float = 1.0
     num_steps: int = 192
     limiter_fraction: float = 0.25
+
+    target_mode: str = "poisson-flow"
+    source_mode: str = "lowfreq"
+    source_lowfreq_size: int = 7
+    source_blur_sigma: float = 1.0
+
+    free_weight: float = 0.0
+    noise_weight: float = 0.0
+    learned_weight: float = 1.0
+
     terminal_lambda: float = 3.0
     terminal_floor: float = 1e-3
     blur_sigmas: tuple[float, ...] = (0.75, 1.5)
     blur_weights: tuple[float, ...] = (0.5, 0.5)
+
     mass_floor: float = 1e-8
     source_concentration: float = 1.0
     source_uniform_mix: float = 0.15
-    state_jitter_weight: float = 0.02
+    state_jitter_weight: float = 0.0
     bridge_power: float = 1.0
-    flux_scale: float = 100.0
-    target_flux_clip: float = 5.0
-    divergence_loss_weight: float = 0.05
+    flux_scale: float = 20.0
+    target_flux_clip: float = 10.0
+    divergence_loss_weight: float = 0.10
 
     def __post_init__(self) -> None:
         if self.grid_size <= 1:
@@ -115,6 +125,20 @@ class DirectFluxMNISTConfig:
             raise ValueError("num_steps must be positive")
         if not (0.0 < self.limiter_fraction <= 1.0):
             raise ValueError("limiter_fraction must be in (0, 1]")
+        if self.target_mode not in TARGET_MODES:
+            raise ValueError(f"target_mode must be one of {TARGET_MODES}")
+        if self.source_mode not in SOURCE_MODES:
+            raise ValueError(f"source_mode must be one of {SOURCE_MODES}")
+        if not (2 <= self.source_lowfreq_size <= self.grid_size):
+            raise ValueError("source_lowfreq_size must be between 2 and grid_size")
+        if self.source_blur_sigma < 0.0 or not math.isfinite(self.source_blur_sigma):
+            raise ValueError("source_blur_sigma must be non-negative and finite")
+        if self.free_weight < 0.0 or not math.isfinite(self.free_weight):
+            raise ValueError("free_weight must be non-negative and finite")
+        if self.noise_weight < 0.0 or not math.isfinite(self.noise_weight):
+            raise ValueError("noise_weight must be non-negative and finite")
+        if self.learned_weight < 0.0 or not math.isfinite(self.learned_weight):
+            raise ValueError("learned_weight must be non-negative and finite")
         if self.terminal_lambda < 0.0 or not math.isfinite(self.terminal_lambda):
             raise ValueError("terminal_lambda must be non-negative and finite")
         if not (0.0 < self.terminal_floor < 1.0):
@@ -176,6 +200,7 @@ class FluxTrainingBatch:
     states: Tensor
     labels: Tensor
     targets: Tensor
+    sources: Tensor
 
 
 @dataclass(frozen=True)
@@ -186,6 +211,7 @@ class FluxGenerationResult:
     labels: IntArray
     trajectory: FloatArray | None
     clipping_fraction: float
+    sources: FloatArray | None = None
 
 
 @dataclass(frozen=True)
@@ -248,8 +274,6 @@ class _SimpleProgress:
             else:
                 pieces.append(f"{key}={value}")
         self.postfix = " ".join(pieces)
-
-
 
 
 def _make_cuda_grad_scaler(enabled: bool):
@@ -495,7 +519,7 @@ class DirectFluxUNet(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Terminal proxy and direct flux target
+# Terminal proxy, Poisson-flow targets, and direct flux target
 # ---------------------------------------------------------------------------
 
 
@@ -601,12 +625,58 @@ def flux_divergence_torch(flux: Tensor) -> Tensor:
     return torch.roll(fx, shifts=1, dims=-1) - fx + torch.roll(fy, shifts=1, dims=-2) - fy
 
 
+def poisson_flux_from_velocity_torch(velocity: Tensor, *, grid_size: int | None = None) -> Tensor:
+    """Return minimum-energy periodic edge flux with ``div flux = velocity``.
+
+    ``velocity`` may have shape ``(B, H * W)`` or ``(B, H, W)`` and must have
+    approximately zero spatial mean.  The zero mode is removed explicitly.
+    """
+    if velocity.ndim == 2:
+        if grid_size is None:
+            side = int(round(math.sqrt(int(velocity.shape[1]))))
+            if side * side != int(velocity.shape[1]):
+                raise ValueError("grid_size is required when velocity is not square")
+            grid_size = side
+        v = velocity.reshape(-1, int(grid_size), int(grid_size))
+    elif velocity.ndim == 3:
+        v = velocity
+        if grid_size is not None and v.shape[1:] != (int(grid_size), int(grid_size)):
+            raise ValueError("velocity has the wrong grid size")
+    else:
+        raise ValueError("velocity must have shape (B, N) or (B, H, W)")
+    h, w = int(v.shape[-2]), int(v.shape[-1])
+    if h != w:
+        raise ValueError("only square grids are supported")
+    v = v - v.mean(dim=(-2, -1), keepdim=True)
+    v_hat = torch.fft.rfft2(v)
+    ky = torch.arange(h, device=v.device, dtype=v.dtype).view(h, 1)
+    kx = torch.arange(w // 2 + 1, device=v.device, dtype=v.dtype).view(1, w // 2 + 1)
+    two_pi = 2.0 * math.pi
+    denom = 2.0 * torch.cos(two_pi * kx / float(w)) - 2.0
+    denom = denom + 2.0 * torch.cos(two_pi * ky / float(h)) - 2.0
+    safe_denom = denom.clamp(max=-1e-12)
+    psi_hat = torch.zeros_like(v_hat)
+    psi_hat[..., 0, 0] = 0.0
+    psi_hat[..., 1:, :] = v_hat[..., 1:, :] / safe_denom[1:, :]
+    if w // 2 + 1 > 1:
+        psi_hat[..., 0, 1:] = v_hat[..., 0, 1:] / safe_denom[0, 1:]
+    psi = torch.fft.irfft2(psi_hat, s=(h, w))
+    fx = psi - torch.roll(psi, shifts=-1, dims=-1)
+    fy = psi - torch.roll(psi, shifts=-1, dims=-2)
+    return torch.stack([fx, fy], dim=1)
+
+
 # ---------------------------------------------------------------------------
-# Training batches, loss, and simulator
+# Training batches, source distributions, loss, and simulator
 # ---------------------------------------------------------------------------
 
 
-def _sample_simplex_noise(
+def _renormalize_masses(samples: Tensor, *, floor: float) -> Tensor:
+    samples = samples.clamp_min(float(floor))
+    return samples / samples.sum(dim=1, keepdim=True).clamp_min(float(floor))
+
+
+def _sample_dirichlet_source(
     batch_size: int,
     num_pixels: int,
     config: DirectFluxMNISTConfig,
@@ -621,14 +691,68 @@ def _sample_simplex_noise(
         dtype=dtype,
     )
     samples = torch.distributions.Gamma(concentration, torch.ones_like(concentration)).sample()
-    samples = samples.clamp_min(float(config.mass_floor))
-    samples = samples / samples.sum(dim=1, keepdim=True).clamp_min(float(config.mass_floor))
+    samples = _renormalize_masses(samples, floor=float(config.mass_floor))
     if config.source_uniform_mix > 0.0:
         uniform = torch.full_like(samples, 1.0 / float(num_pixels))
-        samples = (1.0 - float(config.source_uniform_mix)) * samples + float(
-            config.source_uniform_mix
-        ) * uniform
-    return samples / samples.sum(dim=1, keepdim=True).clamp_min(float(config.mass_floor))
+        samples = (1.0 - float(config.source_uniform_mix)) * samples + float(config.source_uniform_mix) * uniform
+    return _renormalize_masses(samples, floor=float(config.mass_floor))
+
+
+def _sample_source_masses_torch(
+    batch_size: int,
+    config: DirectFluxMNISTConfig,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tensor:
+    """Sample source measures for training and generation."""
+    n = int(config.grid_size)
+    num_pixels = n * n
+    mode = str(config.source_mode)
+    if mode == "dirichlet":
+        return _sample_dirichlet_source(batch_size, num_pixels, config, device=device, dtype=dtype)
+
+    if mode == "blurred-dirichlet":
+        flat = _sample_dirichlet_source(batch_size, num_pixels, config, device=device, dtype=dtype)
+        image = flat.reshape(batch_size, 1, n, n)
+        blurred = _periodic_gaussian_blur_torch(image, sigma=float(config.source_blur_sigma))
+        return _renormalize_masses(blurred.reshape(batch_size, num_pixels), floor=float(config.mass_floor))
+
+    k = int(config.source_lowfreq_size)
+    coarse_conc = torch.full(
+        (batch_size, 1, k, k),
+        float(config.source_concentration),
+        device=device,
+        dtype=dtype,
+    )
+    coarse = torch.distributions.Gamma(coarse_conc, torch.ones_like(coarse_conc)).sample()
+    upsampled = F.interpolate(coarse, size=(n, n), mode="bilinear", align_corners=False)
+    if config.source_blur_sigma > 0.0:
+        upsampled = _periodic_gaussian_blur_torch(upsampled, sigma=float(config.source_blur_sigma))
+    samples = _renormalize_masses(upsampled.reshape(batch_size, num_pixels), floor=float(config.mass_floor))
+    uniform = torch.full_like(samples, 1.0 / float(num_pixels))
+    if mode == "uniform-plus-lowfreq":
+        mix = max(float(config.source_uniform_mix), 0.65)
+    else:
+        mix = float(config.source_uniform_mix)
+    samples = (1.0 - mix) * samples + mix * uniform
+    return _renormalize_masses(samples, floor=float(config.mass_floor))
+
+
+def _compute_class_mean_measures(images: np.ndarray, labels: np.ndarray, grid_size: int) -> FloatArray:
+    images_arr = np.asarray(images, dtype=np.float64)
+    labels_arr = np.asarray(labels, dtype=np.int64)
+    if images_arr.ndim != 3 or images_arr.shape[1:] != (grid_size, grid_size):
+        raise ValueError(f"images must have shape (N, {grid_size}, {grid_size})")
+    means = np.zeros((10, grid_size, grid_size), dtype=np.float64)
+    global_mean = images_arr.mean(axis=0)
+    for digit in range(10):
+        cls = images_arr[labels_arr == digit]
+        means[digit] = cls.mean(axis=0) if cls.size else global_mean
+    flat = means.reshape(10, -1)
+    flat = np.maximum(flat, 1e-12)
+    flat = flat / flat.sum(axis=1, keepdims=True)
+    return flat.reshape(10, grid_size, grid_size).astype(np.float64)
 
 
 def sample_flux_training_batch(
@@ -640,8 +764,9 @@ def sample_flux_training_batch(
     device: str | torch.device,
     rng: np.random.Generator | None = None,
     dtype: torch.dtype = torch.float32,
+    class_means: np.ndarray | None = None,
 ) -> FluxTrainingBatch:
-    """Sample states on noisy source-to-target bridges for direct flux regression."""
+    """Sample states on source-to-target bridges for direct flux regression."""
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     rng = np.random.default_rng() if rng is None else rng
@@ -653,41 +778,34 @@ def sample_flux_training_batch(
     if labels_arr.shape != (images_arr.shape[0],):
         raise ValueError("labels must have shape (N,)")
     idx = rng.integers(0, images_arr.shape[0], size=int(batch_size))
+    batch_labels_np = labels_arr[idx]
+    if config.target_mode == "class-mean-flow":
+        means = _compute_class_mean_measures(images_arr, labels_arr, n) if class_means is None else class_means
+        target_np = np.asarray(means, dtype=np.float64)[batch_labels_np]
+    else:
+        target_np = images_arr[idx]
     resolved_device = torch.device(device)
-    target = torch.as_tensor(
-        images_arr[idx].reshape(int(batch_size), n * n),
-        dtype=dtype,
-        device=resolved_device,
-    )
-    target = target.clamp_min(float(config.mass_floor))
-    target = target / target.sum(dim=1, keepdim=True).clamp_min(float(config.mass_floor))
-    batch_labels = torch.as_tensor(labels_arr[idx], dtype=torch.long, device=resolved_device)
-    tau = torch.rand((int(batch_size),), dtype=dtype, device=resolved_device) * float(
-        natural_horizon(config)
-    )
+    target = torch.as_tensor(target_np.reshape(int(batch_size), n * n), dtype=dtype, device=resolved_device)
+    target = _renormalize_masses(target, floor=float(config.mass_floor))
+    batch_labels = torch.as_tensor(batch_labels_np, dtype=torch.long, device=resolved_device)
+    tau = torch.rand((int(batch_size),), dtype=dtype, device=resolved_device) * float(natural_horizon(config))
     mix = (tau / max(natural_horizon(config), 1e-12)).pow(float(config.bridge_power)).view(-1, 1)
-    source = _sample_simplex_noise(
-        int(batch_size),
-        n * n,
-        config,
-        device=resolved_device,
-        dtype=dtype,
-    )
+    source = _sample_source_masses_torch(int(batch_size), config, device=resolved_device, dtype=dtype)
     states = (1.0 - mix) * target + mix * source
     if config.state_jitter_weight > 0.0:
-        jitter = _sample_simplex_noise(
-            int(batch_size),
-            n * n,
-            config,
-            device=resolved_device,
-            dtype=dtype,
-        )
-        states = (1.0 - float(config.state_jitter_weight)) * states + float(
-            config.state_jitter_weight
-        ) * jitter
-    states = states.clamp_min(float(config.mass_floor))
-    states = states / states.sum(dim=1, keepdim=True).clamp_min(float(config.mass_floor))
-    return FluxTrainingBatch(tau=tau, states=states, labels=batch_labels, targets=target)
+        jitter = _sample_source_masses_torch(int(batch_size), config, device=resolved_device, dtype=dtype)
+        states = (1.0 - float(config.state_jitter_weight)) * states + float(config.state_jitter_weight) * jitter
+    states = _renormalize_masses(states, floor=float(config.mass_floor))
+    return FluxTrainingBatch(tau=tau, states=states, labels=batch_labels, targets=target, sources=source)
+
+
+def training_target_flux_torch(batch: FluxTrainingBatch, config: DirectFluxMNISTConfig) -> Tensor:
+    """Return the physical two-channel target flux for the configured target mode."""
+    if config.target_mode == "terminal-score":
+        return terminal_conditioning_flux_torch(batch.states, batch.targets, config)
+    horizon = max(natural_horizon(config), 1e-12)
+    velocity = (batch.targets - batch.sources) / float(horizon)
+    return poisson_flux_from_velocity_torch(velocity, grid_size=int(config.grid_size))
 
 
 def direct_flux_matching_loss(
@@ -698,7 +816,7 @@ def direct_flux_matching_loss(
     config = model.config
     pred_norm = model(batch.tau, batch.states, batch.labels)
     with torch.no_grad():
-        target_flux = terminal_conditioning_flux_torch(batch.states, batch.targets, config)
+        target_flux = training_target_flux_torch(batch, config)
         target_norm = (target_flux / float(config.flux_scale)).clamp(
             -float(config.target_flux_clip), float(config.target_flux_clip)
         )
@@ -710,13 +828,34 @@ def direct_flux_matching_loss(
     with torch.no_grad():
         pred_rms = pred_norm.square().mean().sqrt()
         target_rms = target_norm.square().mean().sqrt()
+        flat_pred = pred_div.flatten(1)
+        flat_target = target_div.flatten(1)
+        numerator = (flat_pred * flat_target).sum(dim=1)
+        denominator = flat_pred.square().sum(dim=1).sqrt() * flat_target.square().sum(dim=1).sqrt()
+        div_cos = (numerator / denominator.clamp_min(1e-12)).mean()
     return loss, {
         "loss": float(loss.detach().cpu()),
         "flux_loss": float(flux_loss.detach().cpu()),
         "div_loss": float(div_loss.detach().cpu()),
+        "div_cos": float(div_cos.detach().cpu()),
         "pred_rms": float(pred_rms.detach().cpu()),
         "target_rms": float(target_rms.detach().cpu()),
     }
+
+
+def _mass_entropy_torch(states: Tensor) -> Tensor:
+    states = states.clamp_min(1e-30)
+    return -(states * states.log()).sum(dim=1)
+
+
+def _label_sequence_tensor(count: int, *, device: torch.device) -> Tensor:
+    return torch.arange(count, device=device, dtype=torch.long) % 10
+
+
+def _disable_mkldnn_for_cpu_if_needed(device: torch.device) -> None:
+    """Avoid rare CPU convolution backward hangs seen with MKL-DNN on sparse MNIST masses."""
+    if device.type == "cpu" and hasattr(torch.backends, "mkldnn"):
+        torch.backends.mkldnn.enabled = False
 
 
 def train_direct_flux_model(
@@ -733,13 +872,18 @@ def train_direct_flux_model(
     seed: int = 0,
     use_amp: bool = True,
     show_progress: bool = True,
+    preview_dir: str | Path | None = None,
+    preview_every: int = 0,
+    preview_sample_steps: int = 64,
+    preview_num_samples: int = 16,
 ) -> dict[str, list[float]]:
-    """Train the direct-flux U-Net with an ETA progress bar."""
+    """Train the direct-flux U-Net with an ETA progress bar and optional previews."""
     if train_steps <= 0 or batch_size <= 0:
         raise ValueError("train_steps and batch_size must be positive")
     resolved_device = torch.device(
         "cuda" if device is None and torch.cuda.is_available() else "cpu" if device is None else device
     )
+    _disable_mkldnn_for_cpu_if_needed(resolved_device)
     rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
     model.to(resolved_device)
@@ -747,16 +891,22 @@ def train_direct_flux_model(
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
     amp_enabled = bool(use_amp and resolved_device.type == "cuda")
     scaler = _make_cuda_grad_scaler(enabled=amp_enabled)
+    class_means = _compute_class_mean_measures(images, labels, int(model.config.grid_size))
     history: dict[str, list[float]] = {
         "loss": [],
         "flux_loss": [],
         "div_loss": [],
+        "div_cos": [],
         "pred_rms": [],
         "target_rms": [],
     }
 
+    preview_path = None if preview_dir is None or preview_every <= 0 else Path(preview_dir)
+    if preview_path is not None:
+        preview_path.mkdir(parents=True, exist_ok=True)
+
     bar = _progress(range(int(train_steps)), total=int(train_steps), desc="train flux", disable=not show_progress)
-    for _ in bar:
+    for step_index in bar:
         batch = sample_flux_training_batch(
             images,
             labels,
@@ -764,6 +914,7 @@ def train_direct_flux_model(
             batch_size=int(batch_size),
             device=resolved_device,
             rng=rng,
+            class_means=class_means,
         )
         optimizer.zero_grad(set_to_none=True)
         context = _cuda_autocast(enabled=True) if amp_enabled else nullcontext()
@@ -778,12 +929,52 @@ def train_direct_flux_model(
         for key in history:
             history[key].append(metrics[key])
         if hasattr(bar, "set_postfix"):
-            bar.set_postfix(loss=metrics["loss"], flux=metrics["flux_loss"])
+            bar.set_postfix(
+                loss=metrics["loss"],
+                div_cos=metrics["div_cos"],
+                pred=metrics["pred_rms"],
+                tgt=metrics["target_rms"],
+            )
+
+        step_num = int(step_index) + 1
+        if preview_path is not None and (step_num % int(preview_every) == 0 or step_num == int(train_steps)):
+            try:
+                preview_labels = [idx % 10 for idx in range(int(preview_num_samples))]
+                preview = simulate_direct_flux_generation(
+                    model,
+                    preview_labels,
+                    num_steps=int(preview_sample_steps),
+                    deterministic=True,
+                    device=resolved_device,
+                    seed=int(seed) + 1000 + step_num,
+                    use_amp=use_amp,
+                    show_progress=False,
+                )
+                refs = class_means[np.asarray(preview_labels, dtype=np.int64)].reshape(len(preview_labels), -1)
+                save_flux_preview_panel(
+                    preview.sources if preview.sources is not None else preview.samples,
+                    preview.samples,
+                    refs,
+                    preview.labels,
+                    preview_path / f"preview_step_{step_num:06d}.png",
+                    grid_size=int(model.config.grid_size),
+                )
+            except RuntimeError:
+                pass
+            finally:
+                model.train()
     return history
+
+
+_EDGE_CLASS_CACHE: dict[tuple[int, str], list[_TorchEdgeClass]] = {}
 
 
 def _edge_classes_torch(grid_size: int, device: torch.device) -> list[_TorchEdgeClass]:
     n = int(grid_size)
+    key = (n, str(device))
+    cached = _EDGE_CLASS_CACHE.get(key)
+    if cached is not None:
+        return cached
     classes: list[list[tuple[int, int, int]]] = [[], [], [], []]
     for row in range(n):
         for col in range(n):
@@ -801,6 +992,7 @@ def _edge_classes_torch(grid_size: int, device: torch.device) -> list[_TorchEdge
                 flux_indices=torch.tensor([edge[2] for edge in edges], dtype=torch.long, device=device),
             )
         )
+    _EDGE_CLASS_CACHE[key] = result
     return result
 
 
@@ -811,6 +1003,9 @@ def eulerian_flux_step_torch(
     config: DirectFluxMNISTConfig,
     *,
     deterministic: bool = False,
+    free_weight: float | None = None,
+    noise_weight: float | None = None,
+    learned_weight: float | None = None,
 ) -> tuple[Tensor, int, int]:
     """One conservative four-color Euler step with learned conditioning flux."""
     if states.ndim != 2:
@@ -826,6 +1021,9 @@ def eulerian_flux_step_torch(
         raise ValueError("states have the wrong number of pixels")
     if conditioning_flux.shape[2:] != (n, n):
         raise ValueError("conditioning_flux has the wrong grid size")
+    free_w = float(config.free_weight if free_weight is None else free_weight)
+    noise_w = float(config.noise_weight if noise_weight is None else noise_weight)
+    learned_w = float(config.learned_weight if learned_weight is None else learned_weight)
     out = states.clone()
     inv_h2 = float(n * n)
     alpha = float(config.alpha)
@@ -847,9 +1045,9 @@ def eulerian_flux_step_torch(
         theta = ((2.0 * alpha + 1.0) / alpha) * harmonic
         free_flux = (2.0 * alpha + 1.0) * inv_h2 * ratio
         learned_flux = flat_flux[:, edge_class.flux_indices]
-        d_flux = (free_flux + learned_flux) * float(dt)
-        if not deterministic:
-            noise_std = torch.sqrt((2.0 * theta * inv_h2 * float(dt)).clamp_min(0.0))
+        d_flux = (free_w * free_flux + learned_w * learned_flux) * float(dt)
+        if (not deterministic) and noise_w > 0.0:
+            noise_std = noise_w * torch.sqrt((2.0 * theta * inv_h2 * float(dt)).clamp_min(0.0))
             d_flux = d_flux + noise_std * torch.randn_like(noise_std)
         pos_clip = d_flux > float(config.limiter_fraction) * a
         neg_clip = d_flux < -float(config.limiter_fraction) * b
@@ -888,6 +1086,7 @@ def simulate_direct_flux_generation(
     resolved_device = torch.device(
         "cuda" if device is None and torch.cuda.is_available() else "cpu" if device is None else device
     )
+    _disable_mkldnn_for_cpu_if_needed(resolved_device)
     torch.manual_seed(seed)
     model.to(resolved_device)
     model.eval()
@@ -899,13 +1098,8 @@ def simulate_direct_flux_generation(
         raise ValueError("num_steps must be positive")
     horizon = natural_horizon(cfg)
     dt = horizon / float(steps)
-    states = _sample_simplex_noise(
-        batch_size,
-        n * n,
-        cfg,
-        device=resolved_device,
-        dtype=torch.float32,
-    )
+    states = _sample_source_masses_torch(batch_size, cfg, device=resolved_device, dtype=torch.float32)
+    initial_states = states.detach().cpu().numpy().astype(np.float64)
     trajectory: list[np.ndarray] = []
     if save_every > 0:
         trajectory.append(states.detach().cpu().numpy().astype(np.float64))
@@ -929,7 +1123,9 @@ def simulate_direct_flux_generation(
         clipped += c_step
         proposed += p_step
         if hasattr(bar, "set_postfix"):
-            bar.set_postfix(clip=0.0 if proposed == 0 else clipped / proposed)
+            ent = float(_mass_entropy_torch(states).mean().detach().cpu())
+            max_mass = float(states.max(dim=1).values.mean().detach().cpu())
+            bar.set_postfix(ent=ent, max=max_mass, clip=0.0 if proposed == 0 else clipped / proposed)
         if save_every > 0 and ((step + 1) % int(save_every) == 0 or step + 1 == steps):
             trajectory.append(states.detach().cpu().numpy().astype(np.float64))
     return FluxGenerationResult(
@@ -937,12 +1133,18 @@ def simulate_direct_flux_generation(
         labels=labels_t.detach().cpu().numpy().astype(np.int64),
         trajectory=None if save_every <= 0 else np.stack(trajectory, axis=0),
         clipping_fraction=0.0 if proposed == 0 else float(clipped) / float(proposed),
+        sources=initial_states,
     )
 
 
 # ---------------------------------------------------------------------------
 # Output helpers and CLI
 # ---------------------------------------------------------------------------
+
+
+def _normalize_for_display(image: np.ndarray) -> np.ndarray:
+    image = np.asarray(image, dtype=np.float64)
+    return image / max(float(image.max()), 1e-12)
 
 
 def save_flux_samples_grid(
@@ -955,6 +1157,8 @@ def save_flux_samples_grid(
 ) -> None:
     """Save a simple preview grid of generated probability-mass images."""
     try:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
     except Exception as exc:  # pragma: no cover - optional plotting dependency.
         raise RuntimeError("matplotlib is required to save a sample grid") from exc
@@ -968,12 +1172,54 @@ def save_flux_samples_grid(
     for ax in axes.reshape(-1):
         ax.axis("off")
     for idx in range(count):
-        image = arr[idx]
-        image = image / max(float(image.max()), 1e-12)
+        image = _normalize_for_display(arr[idx])
         ax = axes[idx // cols, idx % cols]
         ax.imshow(image, cmap="gray", interpolation="nearest")
         ax.set_title(str(int(labels_arr[idx])), fontsize=8)
         ax.axis("off")
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout(pad=0.15)
+    fig.savefig(output, dpi=180)
+    plt.close(fig)
+
+
+def save_flux_preview_panel(
+    sources: np.ndarray,
+    generated: np.ndarray,
+    references: np.ndarray,
+    labels: Sequence[int] | np.ndarray,
+    output_path: str | Path,
+    *,
+    grid_size: int = 28,
+    max_images: int = 16,
+) -> None:
+    """Save source/generated/reference rows for early training diagnostics."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover - optional plotting dependency.
+        raise RuntimeError("matplotlib is required to save a preview panel") from exc
+
+    labels_arr = np.asarray(labels, dtype=np.int64).reshape(-1)
+    src = np.asarray(sources, dtype=np.float64).reshape(-1, grid_size, grid_size)
+    gen = np.asarray(generated, dtype=np.float64).reshape(-1, grid_size, grid_size)
+    ref = np.asarray(references, dtype=np.float64).reshape(-1, grid_size, grid_size)
+    count = min(int(max_images), gen.shape[0])
+    fig, axes = plt.subplots(3, count, figsize=(1.15 * count, 3.7), squeeze=False)
+    row_names = ("source", "generated", "reference")
+    rows = (src, gen, ref)
+    for row_idx, row in enumerate(rows):
+        for col_idx in range(count):
+            ax = axes[row_idx, col_idx]
+            ax.imshow(_normalize_for_display(row[col_idx]), cmap="gray", interpolation="nearest")
+            if row_idx == 0:
+                ax.set_title(str(int(labels_arr[col_idx])), fontsize=8)
+            if col_idx == 0:
+                ax.set_ylabel(row_names[row_idx], fontsize=8)
+            ax.set_xticks([])
+            ax.set_yticks([])
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout(pad=0.15)
@@ -990,20 +1236,51 @@ def _parse_label_sequence(text: str, count: int) -> list[int]:
     return [values[idx % len(values)] for idx in range(count)]
 
 
+def _samples_stats(samples: np.ndarray) -> tuple[float, float]:
+    arr = np.asarray(samples, dtype=np.float64)
+    ent = -np.sum(arr * np.log(np.maximum(arr, 1e-30)), axis=1).mean()
+    max_mass = arr.max(axis=1).mean()
+    return float(ent), float(max_mass)
+
+
+def _serializable_args(args: argparse.Namespace) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for key, value in vars(args).items():
+        out[key] = str(value) if isinstance(value, Path) else value
+    return out
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=Path("mnist_data"))
     parser.add_argument("--download", action="store_true", help="Download IDX MNIST if no ARFF file is present.")
     parser.add_argument("--examples-per-class", type=int, default=1000)
     parser.add_argument("--max-train", type=int, default=None)
-    parser.add_argument("--train-steps", type=int, default=1200)
+    parser.add_argument("--train-steps", type=int, default=3000)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--num-samples", type=int, default=64)
-    parser.add_argument("--sample-steps", type=int, default=None)
+    parser.add_argument("--sample-steps", type=int, default=128)
     parser.add_argument("--labels", type=str, default="cycle", help="'cycle' or comma-separated labels, e.g. 0,1,2")
+    parser.add_argument("--target-mode", choices=TARGET_MODES, default="poisson-flow")
+    parser.add_argument("--source-mode", choices=SOURCE_MODES, default="lowfreq")
+    parser.add_argument("--source-lowfreq-size", type=int, default=7)
+    parser.add_argument("--source-blur-sigma", type=float, default=1.0)
+    parser.add_argument("--source-uniform-mix", type=float, default=0.15)
+    parser.add_argument("--free-weight", type=float, default=0.0)
+    parser.add_argument("--noise-weight", type=float, default=0.0)
+    parser.add_argument("--learned-weight", type=float, default=1.0)
+    parser.add_argument("--flux-scale", type=float, default=20.0)
+    parser.add_argument("--target-flux-clip", type=float, default=10.0)
+    parser.add_argument("--divergence-loss-weight", type=float, default=0.10)
+    parser.add_argument("--horizon-scale", type=float, default=1.0)
+    parser.add_argument("--alpha", type=float, default=1.0)
+    parser.add_argument("--terminal-lambda", type=float, default=3.0)
     parser.add_argument("--deterministic-sampling", action="store_true")
+    parser.add_argument("--preview-every", type=int, default=500)
+    parser.add_argument("--preview-sample-steps", type=int, default=64)
+    parser.add_argument("--preview-num-samples", type=int, default=16)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--no-progress", action="store_true")
@@ -1011,15 +1288,33 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--out-dir", type=Path, default=Path("artifacts/experiment10_mnist_flux"))
     args = parser.parse_args(argv)
 
-    config = DirectFluxMNISTConfig()
+    config = DirectFluxMNISTConfig(
+        alpha=float(args.alpha),
+        horizon_scale=float(args.horizon_scale),
+        num_steps=int(args.sample_steps),
+        target_mode=str(args.target_mode),
+        source_mode=str(args.source_mode),
+        source_lowfreq_size=int(args.source_lowfreq_size),
+        source_blur_sigma=float(args.source_blur_sigma),
+        source_uniform_mix=float(args.source_uniform_mix),
+        free_weight=float(args.free_weight),
+        noise_weight=float(args.noise_weight),
+        learned_weight=float(args.learned_weight),
+        flux_scale=float(args.flux_scale),
+        target_flux_clip=float(args.target_flux_clip),
+        divergence_loss_weight=float(args.divergence_loss_weight),
+        terminal_lambda=float(args.terminal_lambda),
+    )
     device = torch.device(
         "cuda" if args.device is None and torch.cuda.is_available() else "cpu" if args.device is None else args.device
     )
-    print(f"Experiment 10 direct-flux MNIST on device={device}")
+    print(f"Experiment 10b direct-flux MNIST on device={device}")
     print(
-        "Laptop-friendly defaults: "
-        f"steps={args.train_steps}, batch={args.batch_size}, base_channels={args.base_channels}, "
-        f"horizon={natural_horizon(config):.3e}, sample_steps={args.sample_steps or config.num_steps}"
+        "Laptop-friendly settings: "
+        f"target_mode={config.target_mode}, source_mode={config.source_mode}, "
+        f"train_steps={args.train_steps}, batch={args.batch_size}, base_channels={args.base_channels}, "
+        f"horizon={natural_horizon(config):.3e}, sample_steps={args.sample_steps}, "
+        f"weights=(free={config.free_weight}, noise={config.noise_weight}, learned={config.learned_weight})"
     )
     dataset = load_mnist_measure_dataset(
         args.data_root,
@@ -1031,6 +1326,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"Loaded {dataset.train_images.shape[0]} training images")
 
     model = DirectFluxUNet(config, base_channels=int(args.base_channels))
+    preview_dir = args.out_dir / "previews" if int(args.preview_every) > 0 else None
     history = train_direct_flux_model(
         model,
         dataset.train_images,
@@ -1042,13 +1338,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         seed=int(args.seed),
         use_amp=not bool(args.no_amp),
         show_progress=not bool(args.no_progress),
+        preview_dir=preview_dir,
+        preview_every=int(args.preview_every),
+        preview_sample_steps=int(args.preview_sample_steps),
+        preview_num_samples=int(args.preview_num_samples),
     )
 
+    print("Training complete; starting generation")
     labels = _parse_label_sequence(args.labels, int(args.num_samples))
     result = simulate_direct_flux_generation(
         model,
         labels,
-        num_steps=args.sample_steps,
+        num_steps=int(args.sample_steps),
         deterministic=bool(args.deterministic_sampling),
         device=device,
         seed=int(args.seed) + 1,
@@ -1056,6 +1357,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         show_progress=not bool(args.no_progress),
     )
 
+    print("Generation complete; saving artifacts")
     args.out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = args.out_dir / "experiment10_direct_flux_mnist.pt"
     samples_path = args.out_dir / "experiment10_samples.npz"
@@ -1063,7 +1365,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     torch.save(
         {
             "model_state_dict": model.state_dict(),
-            "config": config,
+            "config": asdict(config),
+            "args": _serializable_args(args),
             "history": history,
             "labels": result.labels,
             "clipping_fraction": result.clipping_fraction,
@@ -1074,6 +1377,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         samples_path,
         samples=result.samples,
         labels=result.labels,
+        sources=result.sources,
         clipping_fraction=np.asarray([result.clipping_fraction], dtype=np.float64),
     )
     try:
@@ -1081,9 +1385,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(f"Saved preview: {png_path}")
     except RuntimeError as exc:
         print(f"Skipping PNG preview: {exc}")
+    ent, max_mass = _samples_stats(result.samples)
     print(f"Saved checkpoint: {ckpt_path}")
     print(f"Saved samples: {samples_path}")
     print(f"Final clipping fraction: {result.clipping_fraction:.4f}")
+    print(f"Final sample entropy: {ent:.4f}; mean max pixel mass: {max_mass:.4f}")
 
 
 if __name__ == "__main__":

@@ -45,6 +45,7 @@ def test_direct_package_imports() -> None:
     assert hasattr(eulerian_image_bridge, "simulate_conditioned_image_bridge")
     assert hasattr(mnist_score_matching, "train_score_model")
     assert hasattr(mnist_eulerian_flux_mnist, "train_direct_flux_model")
+    assert hasattr(mnist_eulerian_flux_mnist, "poisson_flux_from_velocity_torch")
     assert hasattr(mnist_conditioned_diffusion, "generate_guided_point_clouds")
     assert hasattr(mnist_cp, "load_mnist_cp_splits")
     assert hasattr(wasserstein_conditioning_algorithms, "simulate_wasserstein_mc_sinkhorn_em")

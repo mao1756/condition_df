@@ -38,7 +38,7 @@ train a positive CNN surrogate for the Feynman--Kac heat potential from free
 Eulerian rollouts, then simulate the terminally conditioned conservative
 edge-flux dynamics.
 
-## Example 10: MNIST direct edge-flux generation
+## Example 10b: MNIST direct edge-flux generation
 
 `mnist/eulerian_flux_mnist.py` implements the laptop-friendly MNIST generation
 experiment based on the Eulerian conditioning formula, but learns the two
@@ -47,17 +47,51 @@ The model is a small label-conditioned U-Net that predicts horizontal and
 vertical edge fluxes, and the sampler applies them with conservative incidence
 updates so total mass stays on the 28x28 simplex.
 
-Run a quick RTX-laptop-sized experiment with ETA progress bars:
+The default path is now a diagnostic **Poisson-flow** bridge.  It samples a
+smooth low-frequency source measure, interpolates toward a label-matched MNIST
+image, and trains the network on the minimum-energy two-channel periodic edge
+flux whose divergence equals the desired image velocity.  Sampling defaults to
+learned-only deterministic dynamics (`--free-weight 0 --noise-weight 0`) so the
+first run tests the learned conservative flux before adding the free harmonic
+SDE terms back in.
+
+First sanity check: class-mean flow should produce blurry recognizable digits.
 
 ```powershell
 .venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
   --data-root mnist_data `
-  --examples-per-class 1000 `
-  --train-steps 1200 `
+  --target-mode class-mean-flow `
+  --source-mode lowfreq `
+  --free-weight 0 `
+  --noise-weight 0 `
+  --train-steps 1500 `
   --batch-size 256 `
   --base-channels 32 `
+  --sample-steps 96 `
   --num-samples 64
 ```
+
+Then run the real stochastic-target Poisson-flow version:
+
+```powershell
+.venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
+  --data-root mnist_data `
+  --target-mode poisson-flow `
+  --source-mode lowfreq `
+  --free-weight 0 `
+  --noise-weight 0 `
+  --train-steps 3000 `
+  --batch-size 256 `
+  --base-channels 32 `
+  --sample-steps 128 `
+  --num-samples 64
+```
+
+The progress bar reports loss, divergence cosine, predicted/target RMS, sample
+entropy, max pixel mass, clipping fraction, and ETA.  Training previews are saved
+under `artifacts/experiment10_mnist_flux/previews/` every `--preview-every`
+steps.  To reproduce the older terminal-score proxy, pass
+`--target-mode terminal-score --free-weight 1 --noise-weight 1`.
 
 For a very quick smoke run, reduce `--train-steps` to 100--300. Outputs are
 written to `artifacts/experiment10_mnist_flux/` by default.
