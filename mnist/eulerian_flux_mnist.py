@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-r"""Example 10/10b/10c: MNIST generation with directly learned Eulerian edge fluxes.
+r"""Example 10/10b/10c/10d/10e: MNIST generation with directly learned Eulerian edge fluxes.
 
 The manuscript's fixed-grid h-transform adds a conservative edge flux
 
@@ -13,14 +13,20 @@ that Eulerian object, but learns the two edge-flux channels directly:
 * channel 1: vertical flux from pixel ``(row, col)`` to ``(row + 1, col)``.
 
 The original terminal-score proxy is still available with
-``--target-mode terminal-score``.  The default is now the Experiment 10c
+``--target-mode terminal-score``.  The default is now the Experiment 10e
 ``poisson-ot-flow`` setting: sample a source measure ``z``, choose a digit label,
-match sources to same-label MNIST targets by a tiny classwise mini-batch OT
-assignment in blurred low-resolution features, interpolate
+match sources to same-label MNIST targets by a stable nearest-neighbour rule
+in blurred low-resolution features, interpolate
 ``s_tau = (tau/T) z + (1 - tau/T) x``, and train the network to predict the
 minimum-energy periodic edge flux whose conservative divergence equals
-``(x - z) / T``.  The sampler still gets only the current mass image, bridge time,
-and digit label.  The sampler defaults to learned-only deterministic dynamics
+``(x - z) / T``.  On-policy batches instead use the residual correction
+``(x - s_tau) / tau`` at states actually visited by the current sampler.  The
+sampler gets the current mass image, bridge time, digit label, and by default
+the initial source/latent mass as persistent conditioning.  It never receives
+the target MNIST image at generation time.  Experiment 10e adds stable
+nearest/top-k source-target matching, on-policy correction, limiter-aware
+one-step losses, node-velocity losses, and adaptive sampling.
+The sampler defaults to learned-only deterministic dynamics
 (``free_weight = noise_weight = 0``, ``learned_weight = 1``), while the full
 free/noisy SDE can be reintroduced from the command line.
 """
@@ -46,16 +52,20 @@ FloatArray = NDArray[np.float64]
 IntArray = NDArray[np.int64]
 
 TARGET_MODES = ("poisson-flow", "poisson-ot-flow", "class-mean-flow", "terminal-score")
-SOURCE_MODES = ("lowfreq", "uniform-plus-lowfreq", "blurred-dirichlet", "dirichlet", "class-lowres-prior")
+SOURCE_MODES = ("lowfreq", "uniform-plus-lowfreq", "blurred-dirichlet", "dirichlet", "class-lowres-prior", "target-lowres-prior")
+VELOCITY_TARGET_MODES = ("constant", "residual")
 TAU_SAMPLING_MODES = ("uniform", "endpoint-mixture")
 OT_COST_MODES = ("lowres", "pixel")
+OT_MATCH_MODES = ("minibatch", "nearest", "topk")
 
 __all__ = [
     "DirectFluxMNISTConfig",
     "MNISTMeasureDataset",
+    "SourceBatch",
     "FluxTrainingBatch",
     "FluxGenerationResult",
     "ClasswiseOTCache",
+    "OT_MATCH_MODES",
     "DirectFluxUNet",
     "natural_horizon",
     "load_mnist_measure_dataset",
@@ -65,15 +75,19 @@ __all__ = [
     "poisson_flux_from_velocity_torch",
     "build_classwise_ot_cache",
     "training_target_flux_torch",
+    "make_on_policy_training_batch",
     "flux_divergence_torch",
     "eulerian_flux_step_torch",
+    "eulerian_flux_step_differentiable_torch",
     "direct_flux_matching_loss",
     "train_direct_flux_model",
     "simulate_direct_flux_generation",
     "simulate_teacher_flux_rollout",
+    "source_batch_diagnostics",
     "nearest_class_mean_metrics",
     "save_flux_samples_grid",
     "save_flux_preview_panel",
+    "source_diversity_metrics",
     "main",
 ]
 
@@ -83,31 +97,37 @@ class DirectFluxMNISTConfig:
     """Configuration for the direct-flux MNIST experiment.
 
     Defaults are intentionally modest and designed for an 8 GB laptop GPU.  The
-    default 10c path uses OT-coupled Poisson-flow, a low-frequency source, and
-    learned-only deterministic sampling so that the first serious run tests the
-    learned conservative flux before reintroducing the free harmonic drift/noise.
+    default 10e path uses stable nearest-matched Poisson-flow, a low-frequency
+    source, persistent source conditioning, constant source-target velocity,
+    on-policy corrections, limiter-aware losses, and learned-only deterministic
+    sampling so that the first serious run tests the learned conservative flux
+    before reintroducing the free harmonic drift/noise.
     """
 
     grid_size: int = 28
     alpha: float = 1.0
     horizon_scale: float = 1.0
-    num_steps: int = 192
+    num_steps: int = 256
     limiter_fraction: float = 0.25
 
     target_mode: str = "poisson-ot-flow"
     source_mode: str = "lowfreq"
     source_lowfreq_size: int = 7
     source_blur_sigma: float = 1.0
+    condition_on_source: bool = True
 
-    # Experiment 10c: make random-target flow learnable by coupling sources
-    # and same-label targets inside each mini-batch.  The mean-flow anchor keeps
-    # the label signal strong without making the class mean dominate training.
+    # Experiment 10e: the default target matching is stable across batches.
+    # ``nearest`` chooses a same-label target by global low-resolution features;
+    # ``topk`` samples among the nearest few; ``minibatch`` keeps the older 10c
+    # classwise assignment.
     ot_cost_mode: str = "lowres"
+    ot_match_mode: str = "nearest"
+    ot_nearest_top_k: int = 1
     ot_lowres_size: int = 7
     ot_blur_sigma: float = 1.0
     ot_com_weight: float = 0.25
-    mean_flow_prob: float = 0.20
-    mean_flow_warmup_prob: float = 0.25
+    mean_flow_prob: float = 0.15
+    mean_flow_warmup_prob: float = 0.20
     mean_flow_warmup_steps: int = 1000
 
     # Generation starts at the source end, so the default time sampler spends
@@ -129,10 +149,22 @@ class DirectFluxMNISTConfig:
     source_concentration: float = 1.0
     source_uniform_mix: float = 0.15
     state_jitter_weight: float = 0.0
+    velocity_target: str = "constant"
+    min_tau_fraction: float = 0.03
     bridge_power: float = 1.0
     flux_scale: float = 20.0
     target_flux_clip: float = 10.0
-    divergence_loss_weight: float = 0.10
+    divergence_loss_weight: float = 0.50
+    node_loss_weight: float = 1.0
+    step_loss_weight: float = 0.25
+
+    on_policy_prob: float = 0.25
+    on_policy_warmup_steps: int = 1500
+    on_policy_prefix_steps: int = 16
+
+    adaptive_sampling: bool = False
+    clip_target: float = 0.03
+    max_substeps: int = 4
 
     def __post_init__(self) -> None:
         if self.grid_size <= 1:
@@ -159,6 +191,10 @@ class DirectFluxMNISTConfig:
             raise ValueError("source_blur_sigma must be non-negative and finite")
         if self.ot_cost_mode not in OT_COST_MODES:
             raise ValueError(f"ot_cost_mode must be one of {OT_COST_MODES}")
+        if self.ot_match_mode not in OT_MATCH_MODES:
+            raise ValueError(f"ot_match_mode must be one of {OT_MATCH_MODES}")
+        if self.ot_nearest_top_k <= 0:
+            raise ValueError("ot_nearest_top_k must be positive")
         if not (2 <= self.ot_lowres_size <= self.grid_size):
             raise ValueError("ot_lowres_size must be between 2 and grid_size")
         if self.ot_blur_sigma < 0.0 or not math.isfinite(self.ot_blur_sigma):
@@ -205,8 +241,14 @@ class DirectFluxMNISTConfig:
             raise ValueError("source_concentration must be positive")
         if not (0.0 <= self.source_uniform_mix < 1.0):
             raise ValueError("source_uniform_mix must be in [0, 1)")
+        if not isinstance(self.condition_on_source, bool):
+            raise ValueError("condition_on_source must be a bool")
         if not (0.0 <= self.state_jitter_weight < 1.0):
             raise ValueError("state_jitter_weight must be in [0, 1)")
+        if self.velocity_target not in VELOCITY_TARGET_MODES:
+            raise ValueError(f"velocity_target must be one of {VELOCITY_TARGET_MODES}")
+        if not (0.0 < self.min_tau_fraction <= 1.0):
+            raise ValueError("min_tau_fraction must be in (0, 1]")
         if self.bridge_power <= 0.0:
             raise ValueError("bridge_power must be positive")
         if self.flux_scale <= 0.0:
@@ -215,6 +257,22 @@ class DirectFluxMNISTConfig:
             raise ValueError("target_flux_clip must be positive")
         if self.divergence_loss_weight < 0.0:
             raise ValueError("divergence_loss_weight must be non-negative")
+        if self.node_loss_weight < 0.0:
+            raise ValueError("node_loss_weight must be non-negative")
+        if self.step_loss_weight < 0.0:
+            raise ValueError("step_loss_weight must be non-negative")
+        if not (0.0 <= self.on_policy_prob <= 1.0):
+            raise ValueError("on_policy_prob must be in [0, 1]")
+        if self.on_policy_warmup_steps < 0:
+            raise ValueError("on_policy_warmup_steps must be non-negative")
+        if self.on_policy_prefix_steps < 0:
+            raise ValueError("on_policy_prefix_steps must be non-negative")
+        if not isinstance(self.adaptive_sampling, bool):
+            raise ValueError("adaptive_sampling must be a bool")
+        if not (0.0 <= self.clip_target <= 1.0):
+            raise ValueError("clip_target must be in [0, 1]")
+        if self.max_substeps <= 0:
+            raise ValueError("max_substeps must be positive")
 
 
 @dataclass(frozen=True)
@@ -239,6 +297,15 @@ class MNISTMeasureDataset:
 
 
 @dataclass(frozen=True)
+class SourceBatch:
+    """A sampled source/latent batch plus optional provenance."""
+
+    masses: Tensor
+    indices: IntArray | None = None
+    labels: IntArray | None = None
+
+
+@dataclass(frozen=True)
 class FluxTrainingBatch:
     """One direct-flux regression batch."""
 
@@ -247,6 +314,10 @@ class FluxTrainingBatch:
     labels: Tensor
     targets: Tensor
     sources: Tensor
+    source_indices: IntArray | None = None
+    source_labels: IntArray | None = None
+    target_indices: IntArray | None = None
+    target_velocity_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -258,6 +329,12 @@ class FluxGenerationResult:
     trajectory: FloatArray | None
     clipping_fraction: float
     sources: FloatArray | None = None
+    source_indices: IntArray | None = None
+    source_labels: IntArray | None = None
+    source_unique_count: int | None = None
+    source_diversity_l2: float | None = None
+    source_pair_l2: float | None = None
+    source_label_match_rate: float | None = None
 
 
 @dataclass(frozen=True)
@@ -511,6 +588,8 @@ class DirectFluxUNet(nn.Module):
         self.num_classes = int(num_classes)
         channels = int(base_channels)
         in_channels = 1 + 1 + 1 + self.num_classes
+        if bool(config.condition_on_source):
+            in_channels += 2
         self.enc1 = _ConvBlock(in_channels, channels)
         self.down1 = nn.Conv2d(channels, 2 * channels, kernel_size=4, stride=2, padding=1)
         self.enc2 = _ConvBlock(2 * channels, 2 * channels)
@@ -522,13 +601,25 @@ class DirectFluxUNet(nn.Module):
         self.dec1 = _ConvBlock(2 * channels, channels)
         self.out = nn.Conv2d(channels, 2, kernel_size=3, padding=1, padding_mode="circular")
 
-    def _inputs(self, tau: Tensor | float, masses: Tensor, labels: Tensor) -> Tensor:
+    def _inputs(
+        self,
+        tau: Tensor | float,
+        masses: Tensor,
+        labels: Tensor,
+        source_masses: Tensor | None = None,
+    ) -> Tensor:
         if masses.ndim != 2:
             raise ValueError("masses must have shape (B, N)")
         batch_size = int(masses.shape[0])
         n = int(self.config.grid_size)
         if masses.shape[1] != n * n:
             raise ValueError("masses have the wrong number of pixels")
+        if bool(self.config.condition_on_source):
+            if source_masses is None:
+                # Backwards-compatible fallback for direct calls.  Training and
+                # generation pass the persistent initial source explicitly.
+                source_masses = masses
+            source_masses = source_masses.to(device=masses.device, dtype=masses.dtype).reshape(batch_size, n * n)
         labels = labels.to(device=masses.device, dtype=torch.long).reshape(batch_size)
         if torch.any((labels < 0) | (labels >= self.num_classes)):
             raise ValueError("labels are outside the configured class range")
@@ -546,11 +637,24 @@ class DirectFluxUNet(nn.Module):
         label_planes = label_planes.view(batch_size, self.num_classes, 1, 1).expand(
             batch_size, self.num_classes, n, n
         )
-        return torch.cat([density, log_density, tau_channel, label_planes], dim=1)
+        pieces = [density, log_density]
+        if bool(self.config.condition_on_source):
+            assert source_masses is not None
+            source_density = source_masses.reshape(batch_size, 1, n, n) * float(n * n)
+            source_log_density = torch.log(source_density.clamp_min(float(self.config.mass_floor)))
+            pieces.extend([source_density, source_log_density])
+        pieces.extend([tau_channel, label_planes])
+        return torch.cat(pieces, dim=1)
 
-    def forward(self, tau: Tensor | float, masses: Tensor, labels: Tensor) -> Tensor:
+    def forward(
+        self,
+        tau: Tensor | float,
+        masses: Tensor,
+        labels: Tensor,
+        source_masses: Tensor | None = None,
+    ) -> Tensor:
         """Return normalized flux channels with shape ``(B, 2, H, W)``."""
-        x1 = self.enc1(self._inputs(tau, masses, labels))
+        x1 = self.enc1(self._inputs(tau, masses, labels, source_masses))
         x2 = self.enc2(F.silu(self.down1(x1)))
         x3 = self.mid(F.silu(self.down2(x2)))
         y2 = self.up2(x3)
@@ -559,9 +663,15 @@ class DirectFluxUNet(nn.Module):
         y1 = self.dec1(torch.cat([y1, x1], dim=1))
         return self.out(y1)
 
-    def predict_flux(self, tau: Tensor | float, masses: Tensor, labels: Tensor) -> Tensor:
+    def predict_flux(
+        self,
+        tau: Tensor | float,
+        masses: Tensor,
+        labels: Tensor,
+        source_masses: Tensor | None = None,
+    ) -> Tensor:
         """Return physical flux rates, not normalized training targets."""
-        return float(self.config.flux_scale) * self.forward(tau, masses, labels)
+        return float(self.config.flux_scale) * self.forward(tau, masses, labels, source_masses)
 
 
 # ---------------------------------------------------------------------------
@@ -744,7 +854,7 @@ def _sample_dirichlet_source(
     return _renormalize_masses(samples, floor=float(config.mass_floor))
 
 
-def _sample_source_masses_torch(
+def _sample_source_batch_torch(
     batch_size: int,
     config: DirectFluxMNISTConfig,
     *,
@@ -755,15 +865,15 @@ def _sample_source_masses_torch(
     source_labels: np.ndarray | None = None,
     rng: np.random.Generator | None = None,
     class_indices: tuple[NDArray[np.int64], ...] | None = None,
-) -> Tensor:
-    """Sample source measures for training and generation."""
+) -> SourceBatch:
+    """Sample source measures for training/generation and keep provenance when available."""
     n = int(config.grid_size)
     num_pixels = n * n
     mode = str(config.source_mode)
-    if mode == "class-lowres-prior":
+    if mode in {"class-lowres-prior", "target-lowres-prior"}:
         if label_tensor is None:
-            raise ValueError("class-lowres-prior source mode requires labels")
-        return _sample_class_lowres_prior_torch(
+            raise ValueError(f"{mode} source mode requires labels")
+        return _sample_class_lowres_prior_batch_torch(
             label_tensor,
             source_images,
             source_labels,
@@ -774,13 +884,15 @@ def _sample_source_masses_torch(
             class_indices=class_indices,
         )
     if mode == "dirichlet":
-        return _sample_dirichlet_source(batch_size, num_pixels, config, device=device, dtype=dtype)
+        masses = _sample_dirichlet_source(batch_size, num_pixels, config, device=device, dtype=dtype)
+        return SourceBatch(masses=masses)
 
     if mode == "blurred-dirichlet":
         flat = _sample_dirichlet_source(batch_size, num_pixels, config, device=device, dtype=dtype)
         image = flat.reshape(batch_size, 1, n, n)
         blurred = _periodic_gaussian_blur_torch(image, sigma=float(config.source_blur_sigma))
-        return _renormalize_masses(blurred.reshape(batch_size, num_pixels), floor=float(config.mass_floor))
+        masses = _renormalize_masses(blurred.reshape(batch_size, num_pixels), floor=float(config.mass_floor))
+        return SourceBatch(masses=masses)
 
     k = int(config.source_lowfreq_size)
     coarse_conc = torch.full(
@@ -800,8 +912,33 @@ def _sample_source_masses_torch(
     else:
         mix = float(config.source_uniform_mix)
     samples = (1.0 - mix) * samples + mix * uniform
-    return _renormalize_masses(samples, floor=float(config.mass_floor))
+    return SourceBatch(masses=_renormalize_masses(samples, floor=float(config.mass_floor)))
 
+
+def _sample_source_masses_torch(
+    batch_size: int,
+    config: DirectFluxMNISTConfig,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    label_tensor: Tensor | None = None,
+    source_images: np.ndarray | None = None,
+    source_labels: np.ndarray | None = None,
+    rng: np.random.Generator | None = None,
+    class_indices: tuple[NDArray[np.int64], ...] | None = None,
+) -> Tensor:
+    """Compatibility wrapper returning only source masses."""
+    return _sample_source_batch_torch(
+        batch_size,
+        config,
+        device=device,
+        dtype=dtype,
+        label_tensor=label_tensor,
+        source_images=source_images,
+        source_labels=source_labels,
+        rng=rng,
+        class_indices=class_indices,
+    ).masses
 
 def _compute_class_mean_measures(images: np.ndarray, labels: np.ndarray, grid_size: int) -> FloatArray:
     images_arr = np.asarray(images, dtype=np.float64)
@@ -926,11 +1063,19 @@ def _ot_coupled_target_indices(
     rng: np.random.Generator,
     ot_cache: ClasswiseOTCache | None,
 ) -> NDArray[np.int64]:
-    """Assign each source to a same-label target by tiny per-class OT problems."""
+    """Assign each source to a same-label target.
+
+    ``minibatch`` keeps the 10c behavior: draw a same-size candidate set and
+    solve a tiny assignment.  ``nearest`` and ``topk`` are the 10e defaults: the
+    target is chosen from the full same-label pool using fixed low-resolution
+    features, making the approximate map ``(source, label) -> target`` stable
+    across batches.
+    """
     labels_arr = np.asarray(labels, dtype=np.int64)
     cache = ot_cache if ot_cache is not None else build_classwise_ot_cache(images, labels_arr, config)
     source_features = _lowres_features_np(source_np, config)
     assigned = np.empty((source_np.shape[0],), dtype=np.int64)
+    mode = str(config.ot_match_mode)
     for digit in range(10):
         rows = np.flatnonzero(batch_labels_np == digit)
         if rows.size == 0:
@@ -938,14 +1083,32 @@ def _ot_coupled_target_indices(
         available = cache.class_indices[digit]
         if available.size == 0:
             available = np.arange(labels_arr.shape[0], dtype=np.int64)
-        replace = bool(available.size < rows.size)
-        candidates = rng.choice(available, size=rows.size, replace=replace).astype(np.int64)
+
+        if mode == "minibatch":
+            replace = bool(available.size < rows.size)
+            candidates = rng.choice(available, size=rows.size, replace=replace).astype(np.int64)
+            src_feat = source_features[rows]
+            tgt_feat = cache.target_features[candidates]
+            diff = src_feat[:, None, :] - tgt_feat[None, :, :]
+            cost = np.sum(diff * diff, axis=2)
+            assignment = _linear_assignment(cost)
+            assigned[rows] = candidates[assignment]
+            continue
+
         src_feat = source_features[rows]
-        tgt_feat = cache.target_features[candidates]
+        tgt_feat = cache.target_features[available]
         diff = src_feat[:, None, :] - tgt_feat[None, :, :]
         cost = np.sum(diff * diff, axis=2)
-        assignment = _linear_assignment(cost)
-        assigned[rows] = candidates[assignment]
+        if mode == "nearest" or int(config.ot_nearest_top_k) <= 1:
+            assigned[rows] = available[np.argmin(cost, axis=1)]
+        elif mode == "topk":
+            k = min(int(config.ot_nearest_top_k), int(available.size))
+            # argpartition is much cheaper than sorting the entire class pool.
+            top_cols = np.argpartition(cost, kth=k - 1, axis=1)[:, :k]
+            choices = rng.integers(0, k, size=rows.size)
+            assigned[rows] = available[top_cols[np.arange(rows.size), choices]]
+        else:  # Defensive guard; config validation should make this unreachable.
+            raise ValueError(f"unknown ot_match_mode: {mode}")
     return assigned
 
 
@@ -966,7 +1129,46 @@ def _sample_tau_torch(batch_size: int, config: DirectFluxMNISTConfig, *, device:
     return u.clamp(0.0, 1.0) * horizon
 
 
-def _sample_class_lowres_prior_torch(
+def _coarsen_images_to_source_torch(
+    selected: np.ndarray,
+    config: DirectFluxMNISTConfig,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tensor:
+    """Convert full-resolution measures to coarse source/latent measures."""
+    n = int(config.grid_size)
+    arr = np.asarray(selected, dtype=np.float64).reshape(-1, n, n)
+    with torch.no_grad():
+        source = torch.as_tensor(arr[:, None], dtype=dtype, device=device)
+        k = int(config.source_lowfreq_size)
+        source = F.interpolate(source, size=(k, k), mode="area")
+        source = F.interpolate(source, size=(n, n), mode="bilinear", align_corners=False)
+        blur_sigma = max(float(config.source_blur_sigma), 1.0)
+        source = _periodic_gaussian_blur_torch(source, sigma=blur_sigma)
+        flat = _renormalize_masses(source.reshape(arr.shape[0], n * n), floor=float(config.mass_floor))
+        uniform = torch.full_like(flat, 1.0 / float(n * n))
+        mix = max(float(config.source_uniform_mix), 0.35)
+        flat = (1.0 - mix) * flat + mix * uniform
+        return _renormalize_masses(flat, floor=float(config.mass_floor))
+
+
+def _source_batch_from_images_torch(
+    selected: np.ndarray,
+    config: DirectFluxMNISTConfig,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    indices: np.ndarray | None = None,
+    labels: np.ndarray | None = None,
+) -> SourceBatch:
+    masses = _coarsen_images_to_source_torch(selected, config, device=device, dtype=dtype)
+    idx_arr = None if indices is None else np.asarray(indices, dtype=np.int64).reshape(-1).copy()
+    lab_arr = None if labels is None else np.asarray(labels, dtype=np.int64).reshape(-1).copy()
+    return SourceBatch(masses=masses, indices=idx_arr, labels=lab_arr)
+
+
+def _sample_class_lowres_prior_batch_torch(
     label_tensor: Tensor,
     images: np.ndarray | None,
     labels: np.ndarray | None,
@@ -976,10 +1178,10 @@ def _sample_class_lowres_prior_torch(
     dtype: torch.dtype,
     rng: np.random.Generator | None,
     class_indices: tuple[NDArray[np.int64], ...] | None = None,
-) -> Tensor:
-    """Sample a coarse class-matched source image, then heavily blur/mix it."""
+) -> SourceBatch:
+    """Sample a coarse class-matched source image and record provenance."""
     if images is None or labels is None:
-        raise ValueError("source_mode='class-lowres-prior' requires source images and labels")
+        raise ValueError("class-lowres-prior source mode requires source images and labels")
     rng = np.random.default_rng() if rng is None else rng
     labels_np = label_tensor.detach().cpu().numpy().astype(np.int64).reshape(-1)
     labels_arr = np.asarray(labels, dtype=np.int64)
@@ -993,22 +1195,39 @@ def _sample_class_lowres_prior_torch(
         if available.size == 0:
             available = np.arange(labels_arr.shape[0], dtype=np.int64)
         chosen[rows] = rng.choice(available, size=rows.size, replace=True)
-    n = int(config.grid_size)
-    selected = np.asarray(images, dtype=np.float64)[chosen].reshape(labels_np.shape[0], n, n)
-    with torch.no_grad():
-        source = torch.as_tensor(selected[:, None], dtype=dtype, device=device)
-        # Destroy fine details by going through a small latent grid; this is a diagnostic
-        # source prior, not a hidden full target image.
-        k = int(config.source_lowfreq_size)
-        source = F.interpolate(source, size=(k, k), mode="area")
-        source = F.interpolate(source, size=(n, n), mode="bilinear", align_corners=False)
-        blur_sigma = max(float(config.source_blur_sigma), 1.0)
-        source = _periodic_gaussian_blur_torch(source, sigma=blur_sigma)
-        flat = _renormalize_masses(source.reshape(labels_np.shape[0], n * n), floor=float(config.mass_floor))
-        uniform = torch.full_like(flat, 1.0 / float(n * n))
-        mix = max(float(config.source_uniform_mix), 0.35)
-        flat = (1.0 - mix) * flat + mix * uniform
-        return _renormalize_masses(flat, floor=float(config.mass_floor))
+    selected = np.asarray(images, dtype=np.float64)[chosen]
+    return _source_batch_from_images_torch(
+        selected,
+        config,
+        device=device,
+        dtype=dtype,
+        indices=chosen,
+        labels=labels_arr[chosen],
+    )
+
+
+def _sample_class_lowres_prior_torch(
+    label_tensor: Tensor,
+    images: np.ndarray | None,
+    labels: np.ndarray | None,
+    config: DirectFluxMNISTConfig,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    rng: np.random.Generator | None,
+    class_indices: tuple[NDArray[np.int64], ...] | None = None,
+) -> Tensor:
+    """Compatibility wrapper returning only source masses."""
+    return _sample_class_lowres_prior_batch_torch(
+        label_tensor,
+        images,
+        labels,
+        config,
+        device=device,
+        dtype=dtype,
+        rng=rng,
+        class_indices=class_indices,
+    ).masses
 
 
 def sample_flux_training_batch(
@@ -1027,11 +1246,10 @@ def sample_flux_training_batch(
 ) -> FluxTrainingBatch:
     """Sample states on source-to-target bridges for direct flux regression.
 
-    ``poisson-ot-flow`` differs from the earlier random-pairing ``poisson-flow``:
-    after sampling labels and source measures, it solves tiny same-label assignment
-    problems inside the mini-batch and pairs each source with a nearby MNIST target
-    in a blurred low-resolution feature space.  This makes the supervised flux
-    closer to a deterministic map from ``(source, label)`` to a digit style.
+    Experiment 10d keeps the 10c OT-coupled target but optionally gives the
+    network persistent access to the initial source/latent.  In
+    ``source_mode='target-lowres-prior'`` the source is a coarse version of the
+    same target image, which is a diagnostic upper bound for the flux/sampler.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -1045,7 +1263,9 @@ def sample_flux_training_batch(
         raise ValueError("labels must have shape (N,)")
 
     cache = ot_cache
-    if cache is None and (config.target_mode == "poisson-ot-flow" or config.source_mode == "class-lowres-prior"):
+    if cache is None and (
+        config.target_mode == "poisson-ot-flow" or config.source_mode in {"class-lowres-prior", "target-lowres-prior"}
+    ):
         cache = build_classwise_ot_cache(images_arr, labels_arr, config)
     means = _compute_class_mean_measures(images_arr, labels_arr, n) if class_means is None else class_means
 
@@ -1053,19 +1273,23 @@ def sample_flux_training_batch(
     batch_labels_np = labels_arr[base_idx]
     resolved_device = torch.device(device)
     batch_labels = torch.as_tensor(batch_labels_np, dtype=torch.long, device=resolved_device)
-    source = _sample_source_masses_torch(
-        int(batch_size),
-        config,
-        device=resolved_device,
-        dtype=dtype,
-        label_tensor=batch_labels,
-        source_images=images_arr,
-        source_labels=labels_arr,
-        rng=rng,
-        class_indices=None if cache is None else cache.class_indices,
-    )
+
+    source_batch: SourceBatch | None = None
+    if config.source_mode != "target-lowres-prior":
+        source_batch = _sample_source_batch_torch(
+            int(batch_size),
+            config,
+            device=resolved_device,
+            dtype=dtype,
+            label_tensor=batch_labels,
+            source_images=images_arr,
+            source_labels=labels_arr,
+            rng=rng,
+            class_indices=None if cache is None else cache.class_indices,
+        )
 
     target_np = np.empty((int(batch_size), n, n), dtype=np.float64)
+    target_indices = np.full((int(batch_size),), -1, dtype=np.int64)
     if config.target_mode == "class-mean-flow":
         target_np[:] = np.asarray(means, dtype=np.float64)[batch_labels_np]
     else:
@@ -1082,8 +1306,17 @@ def sample_flux_training_batch(
             target_np[mean_mask] = np.asarray(means, dtype=np.float64)[batch_labels_np[mean_mask]]
         non_mean = np.flatnonzero(~mean_mask)
         if non_mean.size:
-            if config.target_mode == "poisson-ot-flow":
-                source_np = source.detach().cpu().numpy().astype(np.float64).reshape(int(batch_size), n, n)
+            if config.source_mode == "target-lowres-prior":
+                # Coupled diagnostic: the latent source is a coarse version of the
+                # same full target.  This tests whether the flux model/sampler can
+                # refine a coarse latent into a clean digit.
+                target_np[non_mean] = images_arr[base_idx[non_mean]]
+                target_indices[non_mean] = base_idx[non_mean]
+            elif config.target_mode == "poisson-ot-flow":
+                assert source_batch is not None
+                source_np = source_batch.masses.detach().cpu().numpy().astype(np.float64).reshape(
+                    int(batch_size), n, n
+                )
                 assigned_idx = _ot_coupled_target_indices(
                     source_np[non_mean],
                     batch_labels_np[non_mean],
@@ -1094,10 +1327,24 @@ def sample_flux_training_batch(
                     ot_cache=cache,
                 )
                 target_np[non_mean] = images_arr[assigned_idx]
+                target_indices[non_mean] = assigned_idx
             else:
                 # ``poisson-flow`` and ``terminal-score`` keep the older independent
-                # same-label target sampling behavior.
+                # same-label target sampling behavior, except for target-lowres-prior above.
                 target_np[non_mean] = images_arr[base_idx[non_mean]]
+                target_indices[non_mean] = base_idx[non_mean]
+
+    if config.source_mode == "target-lowres-prior":
+        source_batch = _source_batch_from_images_torch(
+            target_np,
+            config,
+            device=resolved_device,
+            dtype=dtype,
+            indices=target_indices,
+            labels=batch_labels_np,
+        )
+    assert source_batch is not None
+    source = source_batch.masses
 
     target = torch.as_tensor(target_np.reshape(int(batch_size), n * n), dtype=dtype, device=resolved_device)
     target = _renormalize_masses(target, floor=float(config.mass_floor))
@@ -1118,15 +1365,31 @@ def sample_flux_training_batch(
         )
         states = (1.0 - float(config.state_jitter_weight)) * states + float(config.state_jitter_weight) * jitter
     states = _renormalize_masses(states, floor=float(config.mass_floor))
-    return FluxTrainingBatch(tau=tau, states=states, labels=batch_labels, targets=target, sources=source)
-
+    return FluxTrainingBatch(
+        tau=tau,
+        states=states,
+        labels=batch_labels,
+        targets=target,
+        sources=source,
+        source_indices=source_batch.indices,
+        source_labels=source_batch.labels,
+        target_indices=target_indices,
+    )
 
 def training_target_flux_torch(batch: FluxTrainingBatch, config: DirectFluxMNISTConfig) -> Tensor:
     """Return the physical two-channel target flux for the configured target mode."""
     if config.target_mode == "terminal-score":
         return terminal_conditioning_flux_torch(batch.states, batch.targets, config)
     horizon = max(natural_horizon(config), 1e-12)
-    velocity = (batch.targets - batch.sources) / float(horizon)
+    velocity_mode = batch.target_velocity_mode or config.velocity_target
+    if velocity_mode == "residual":
+        remaining = batch.tau.clamp_min(float(config.min_tau_fraction) * float(horizon)).view(-1, 1)
+        velocity = (batch.targets - batch.states) / remaining
+    elif velocity_mode == "constant":
+        velocity = (batch.targets - batch.sources) / float(horizon)
+    else:
+        raise ValueError(f"unknown velocity target mode: {velocity_mode}")
+    velocity = velocity - velocity.mean(dim=1, keepdim=True)
     return poisson_flux_from_velocity_torch(velocity, grid_size=int(config.grid_size))
 
 
@@ -1136,7 +1399,7 @@ def direct_flux_matching_loss(
 ) -> tuple[Tensor, dict[str, float]]:
     """Return the direct-flux regression loss and scalar diagnostics."""
     config = model.config
-    pred_norm = model(batch.tau, batch.states, batch.labels)
+    pred_norm = model(batch.tau, batch.states, batch.labels, batch.sources)
     with torch.no_grad():
         target_flux = training_target_flux_torch(batch, config)
         target_norm = (target_flux / float(config.flux_scale)).clamp(
@@ -1145,8 +1408,28 @@ def direct_flux_matching_loss(
     flux_loss = F.smooth_l1_loss(pred_norm, target_norm)
     pred_div = flux_divergence_torch(pred_norm)
     target_div = flux_divergence_torch(target_norm)
-    div_loss = F.mse_loss(pred_div, target_div)
-    loss = flux_loss + float(config.divergence_loss_weight) * div_loss
+    div_loss = F.smooth_l1_loss(pred_div, target_div)
+    node_loss = F.mse_loss(pred_div, target_div)
+
+    step_loss = pred_norm.new_tensor(0.0)
+    if float(config.step_loss_weight) > 0.0:
+        dt = natural_horizon(config) / float(max(int(config.num_steps), 1))
+        pred_next = eulerian_flux_step_differentiable_torch(
+            batch.states, pred_norm * float(config.flux_scale), dt, config
+        )
+        with torch.no_grad():
+            target_next = eulerian_flux_step_differentiable_torch(
+                batch.states, target_norm * float(config.flux_scale), dt, config
+            )
+        density_scale = float(config.grid_size * config.grid_size)
+        step_loss = F.mse_loss(pred_next * density_scale, target_next * density_scale)
+
+    loss = (
+        flux_loss
+        + float(config.divergence_loss_weight) * div_loss
+        + float(config.node_loss_weight) * node_loss
+        + float(config.step_loss_weight) * step_loss
+    )
     with torch.no_grad():
         pred_rms = pred_norm.square().mean().sqrt()
         target_rms = target_norm.square().mean().sqrt()
@@ -1159,10 +1442,103 @@ def direct_flux_matching_loss(
         "loss": float(loss.detach().cpu()),
         "flux_loss": float(flux_loss.detach().cpu()),
         "div_loss": float(div_loss.detach().cpu()),
+        "node_loss": float(node_loss.detach().cpu()),
+        "step_loss": float(step_loss.detach().cpu()),
         "div_cos": float(div_cos.detach().cpu()),
         "pred_rms": float(pred_rms.detach().cpu()),
         "target_rms": float(target_rms.detach().cpu()),
     }
+
+
+@torch.no_grad()
+def make_on_policy_training_batch(
+    model: DirectFluxUNet,
+    images: np.ndarray,
+    labels: np.ndarray,
+    config: DirectFluxMNISTConfig,
+    *,
+    batch_size: int,
+    device: str | torch.device,
+    rng: np.random.Generator | None = None,
+    dtype: torch.dtype = torch.float32,
+    class_means: np.ndarray | None = None,
+    ot_cache: ClasswiseOTCache | None = None,
+    step_index: int | None = None,
+) -> FluxTrainingBatch:
+    """Sample a batch from states visited by the current sampler.
+
+    The batch keeps the same assigned source/target pair as the ordinary teacher
+    batch, but replaces the interpolated state by a short no-gradient prefix
+    rollout of the current model.  Its target velocity is forced to residual so
+    the model learns to correct its own off-path states.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    resolved_device = torch.device(device)
+    base = sample_flux_training_batch(
+        images,
+        labels,
+        config,
+        batch_size=int(batch_size),
+        device=resolved_device,
+        rng=rng,
+        dtype=dtype,
+        class_means=class_means,
+        ot_cache=ot_cache,
+        step_index=step_index,
+    )
+    max_prefix = min(int(config.on_policy_prefix_steps), int(config.num_steps) - 1)
+    if max_prefix <= 0:
+        return FluxTrainingBatch(
+            tau=base.tau,
+            states=base.states,
+            labels=base.labels,
+            targets=base.targets,
+            sources=base.sources,
+            source_indices=base.source_indices,
+            source_labels=base.source_labels,
+            target_indices=base.target_indices,
+            target_velocity_mode="residual",
+        )
+    prefix_steps = int(rng.integers(1, max_prefix + 1))
+    horizon = float(natural_horizon(config))
+    dt = horizon / float(max(int(config.num_steps), 1))
+    states = base.sources.clone()
+    source_condition = base.sources.clone()
+    model_was_training = bool(model.training)
+    model.eval()
+    for prefix_idx in range(prefix_steps):
+        tau_value = max(horizon - float(prefix_idx) * dt, 0.0)
+        tau = torch.full((int(batch_size),), tau_value, dtype=states.dtype, device=resolved_device)
+        flux = model.predict_flux(tau, states, base.labels, source_condition)
+        states, _, _ = eulerian_flux_step_torch(
+            states,
+            flux.float(),
+            dt,
+            config,
+            deterministic=True,
+            free_weight=0.0,
+            noise_weight=0.0,
+            learned_weight=1.0,
+        )
+    if model_was_training:
+        model.train()
+    tau_remaining = torch.full(
+        (int(batch_size),),
+        max(horizon - float(prefix_steps) * dt, 0.0),
+        dtype=states.dtype,
+        device=resolved_device,
+    )
+    return FluxTrainingBatch(
+        tau=tau_remaining,
+        states=states.detach(),
+        labels=base.labels,
+        targets=base.targets,
+        sources=base.sources,
+        source_indices=base.source_indices,
+        source_labels=base.source_labels,
+        target_indices=base.target_indices,
+        target_velocity_mode="residual",
+    )
 
 
 def _mass_entropy_torch(states: Tensor) -> Tensor:
@@ -1219,6 +1595,9 @@ def train_direct_flux_model(
         "loss": [],
         "flux_loss": [],
         "div_loss": [],
+        "node_loss": [],
+        "step_loss": [],
+        "on_policy": [],
         "div_cos": [],
         "pred_rms": [],
         "target_rms": [],
@@ -1230,21 +1609,41 @@ def train_direct_flux_model(
 
     bar = _progress(range(int(train_steps)), total=int(train_steps), desc="train flux", disable=not show_progress)
     for step_index in bar:
-        batch = sample_flux_training_batch(
-            images,
-            labels,
-            model.config,
-            batch_size=int(batch_size),
-            device=resolved_device,
-            rng=rng,
-            class_means=class_means,
-            ot_cache=ot_cache,
-            step_index=int(step_index),
+        use_on_policy = (
+            int(step_index) >= int(model.config.on_policy_warmup_steps)
+            and float(model.config.on_policy_prob) > 0.0
+            and rng.random() < float(model.config.on_policy_prob)
         )
+        if use_on_policy:
+            batch = make_on_policy_training_batch(
+                model,
+                images,
+                labels,
+                model.config,
+                batch_size=int(batch_size),
+                device=resolved_device,
+                rng=rng,
+                class_means=class_means,
+                ot_cache=ot_cache,
+                step_index=int(step_index),
+            )
+        else:
+            batch = sample_flux_training_batch(
+                images,
+                labels,
+                model.config,
+                batch_size=int(batch_size),
+                device=resolved_device,
+                rng=rng,
+                class_means=class_means,
+                ot_cache=ot_cache,
+                step_index=int(step_index),
+            )
         optimizer.zero_grad(set_to_none=True)
         context = _cuda_autocast(enabled=True) if amp_enabled else nullcontext()
         with context:
             loss, metrics = direct_flux_matching_loss(model, batch)
+        metrics["on_policy"] = 1.0 if use_on_policy else 0.0
         scaler.scale(loss).backward()
         if grad_clip > 0.0:
             scaler.unscale_(optimizer)
@@ -1262,8 +1661,10 @@ def train_direct_flux_model(
             bar.set_postfix(
                 loss=metrics["loss"],
                 div_cos=metrics["div_cos"],
+                step_l=metrics.get("step_loss", 0.0),
                 pred=metrics["pred_rms"],
                 tgt=metrics["target_rms"],
+                onp=metrics.get("on_policy", 0.0),
                 mean_p=float(anchor_prob) if model.config.target_mode in {"poisson-flow", "poisson-ot-flow"} else 0.0,
             )
 
@@ -1349,6 +1750,53 @@ def _edge_classes_torch(grid_size: int, device: torch.device) -> list[_TorchEdge
         )
     _EDGE_CLASS_CACHE[key] = result
     return result
+
+
+def eulerian_flux_step_differentiable_torch(
+    states: Tensor,
+    conditioning_flux: Tensor,
+    dt: float,
+    config: DirectFluxMNISTConfig,
+) -> Tensor:
+    """Differentiable learned-only version of the four-color limited step.
+
+    This is used by the limiter-aware one-step loss.  It mirrors the production
+    sampler's conservative edge incidence and edge clipping, but omits free
+    drift/noise and avoids scalar diagnostic counters.
+    """
+    if states.ndim != 2:
+        raise ValueError("states must have shape (B, N)")
+    if conditioning_flux.ndim != 4 or conditioning_flux.shape[1] != 2:
+        raise ValueError("conditioning_flux must have shape (B, 2, H, W)")
+    n = int(config.grid_size)
+    if states.shape[1] != n * n or conditioning_flux.shape[2:] != (n, n):
+        raise ValueError("states/flux have incompatible grid sizes")
+    if dt < 0.0 or not math.isfinite(dt):
+        raise ValueError("dt must be non-negative and finite")
+    if dt == 0.0:
+        return states.clone()
+    out = states
+    flat_flux = torch.cat(
+        [conditioning_flux[:, 0].reshape(states.shape[0], -1), conditioning_flux[:, 1].reshape(states.shape[0], -1)],
+        dim=1,
+    )
+    tiny = float(config.mass_floor)
+    for edge_class in _edge_classes_torch(n, states.device):
+        tails = edge_class.tails
+        heads = edge_class.heads
+        a = out[:, tails]
+        b = out[:, heads]
+        d_flux = flat_flux[:, edge_class.flux_indices] * float(dt)
+        d_flux = torch.minimum(d_flux, float(config.limiter_fraction) * a)
+        d_flux = torch.maximum(d_flux, -float(config.limiter_fraction) * b)
+        delta = torch.zeros_like(out)
+        batch_tails = tails.view(1, -1).expand(out.shape[0], -1)
+        batch_heads = heads.view(1, -1).expand(out.shape[0], -1)
+        delta.scatter_add_(1, batch_tails, -d_flux)
+        delta.scatter_add_(1, batch_heads, d_flux)
+        out = (out + delta).clamp_min(tiny)
+        out = out / out.sum(dim=1, keepdim=True).clamp_min(tiny)
+    return out
 
 
 def eulerian_flux_step_torch(
@@ -1457,8 +1905,10 @@ def simulate_direct_flux_generation(
     horizon = natural_horizon(cfg)
     dt = horizon / float(steps)
     rng = np.random.default_rng(int(seed))
+    source_indices: IntArray | None = None
+    sampled_source_labels: IntArray | None = None
     if initial_states is None:
-        states = _sample_source_masses_torch(
+        source_batch = _sample_source_batch_torch(
             batch_size,
             cfg,
             device=resolved_device,
@@ -1468,9 +1918,13 @@ def simulate_direct_flux_generation(
             source_labels=source_labels,
             rng=rng,
         )
+        states = source_batch.masses
+        source_indices = source_batch.indices
+        sampled_source_labels = source_batch.labels
     else:
         states = torch.as_tensor(initial_states, dtype=torch.float32, device=resolved_device).reshape(batch_size, n * n)
         states = _renormalize_masses(states, floor=float(cfg.mass_floor))
+    source_condition = states.clone()
     initial_states = states.detach().cpu().numpy().astype(np.float64)
     trajectory: list[np.ndarray] = []
     if save_every > 0:
@@ -1481,17 +1935,40 @@ def simulate_direct_flux_generation(
     bar = _progress(range(steps), total=steps, desc="sample flux", disable=not show_progress)
     for step in bar:
         tau_value = max(horizon - float(step) * dt, 0.0)
-        tau = torch.full((batch_size,), tau_value, dtype=states.dtype, device=resolved_device)
-        context = _cuda_autocast(enabled=True) if amp_enabled else nullcontext()
-        with context:
-            flux = model.predict_flux(tau, states, labels_t)
-        states, c_step, p_step = eulerian_flux_step_torch(
-            states,
-            flux.float(),
-            dt,
-            cfg,
-            deterministic=deterministic,
-        )
+
+        def advance_with_substeps(start_states: Tensor, substeps: int) -> tuple[Tensor, int, int]:
+            local_states = start_states
+            local_clipped = 0
+            local_proposed = 0
+            sub_dt = dt / float(substeps)
+            for sub_idx in range(int(substeps)):
+                sub_tau_value = max(tau_value - float(sub_idx) * sub_dt, 0.0)
+                tau = torch.full((batch_size,), sub_tau_value, dtype=local_states.dtype, device=resolved_device)
+                context = _cuda_autocast(enabled=True) if amp_enabled else nullcontext()
+                with context:
+                    flux = model.predict_flux(tau, local_states, labels_t, source_condition)
+                local_states, c_step, p_step = eulerian_flux_step_torch(
+                    local_states,
+                    flux.float(),
+                    sub_dt,
+                    cfg,
+                    deterministic=deterministic,
+                )
+                local_clipped += c_step
+                local_proposed += p_step
+            return local_states, local_clipped, local_proposed
+
+        if bool(cfg.adaptive_sampling):
+            substeps = 1
+            while True:
+                candidate, c_step, p_step = advance_with_substeps(states, substeps)
+                local_clip = 0.0 if p_step == 0 else float(c_step) / float(p_step)
+                if local_clip <= float(cfg.clip_target) or substeps >= int(cfg.max_substeps):
+                    states = candidate
+                    break
+                substeps = min(int(cfg.max_substeps), substeps * 2)
+        else:
+            states, c_step, p_step = advance_with_substeps(states, 1)
         clipped += c_step
         proposed += p_step
         if hasattr(bar, "set_postfix"):
@@ -1500,12 +1977,30 @@ def simulate_direct_flux_generation(
             bar.set_postfix(ent=ent, max=max_mass, clip=0.0 if proposed == 0 else clipped / proposed)
         if save_every > 0 and ((step + 1) % int(save_every) == 0 or step + 1 == steps):
             trajectory.append(states.detach().cpu().numpy().astype(np.float64))
+    diagnostics = source_batch_diagnostics(
+        initial_states,
+        requested_labels=labels_t.detach().cpu().numpy().astype(np.int64),
+        source_indices=source_indices,
+        source_labels=sampled_source_labels,
+    )
+    if cfg.source_mode in {"class-lowres-prior", "target-lowres-prior"} and batch_size > 1:
+        if int(diagnostics["source_unique_count"]) <= 1:
+            raise RuntimeError(
+                f"{cfg.source_mode} collapsed to a single source for a batch of {batch_size}; "
+                "check source sampling/provenance."
+            )
     return FluxGenerationResult(
         samples=states.detach().cpu().numpy().astype(np.float64),
         labels=labels_t.detach().cpu().numpy().astype(np.int64),
         trajectory=None if save_every <= 0 else np.stack(trajectory, axis=0),
         clipping_fraction=0.0 if proposed == 0 else float(clipped) / float(proposed),
         sources=initial_states,
+        source_indices=source_indices,
+        source_labels=sampled_source_labels,
+        source_unique_count=int(diagnostics["source_unique_count"]),
+        source_diversity_l2=float(diagnostics["source_diversity_l2"]),
+        source_pair_l2=float(diagnostics["source_pair_l2"]),
+        source_label_match_rate=float(diagnostics["source_label_match_rate"]),
     )
 
 
@@ -1550,21 +2045,36 @@ def simulate_teacher_flux_rollout(
                 learned_weight=1.0,
             )
     else:
-        # Use the source-to-target velocity, not the changing residual; this is
-        # the constant teacher used by the straight-line flow-matching target.
-        velocity = (target - source0) / horizon
-        flux = poisson_flux_from_velocity_torch(velocity, grid_size=n)
-        for _ in range(steps):
-            states, _, _ = eulerian_flux_step_torch(
-                states,
-                flux,
-                dt,
-                config,
-                deterministic=True,
-                free_weight=0.0,
-                noise_weight=0.0,
-                learned_weight=1.0,
-            )
+        if config.velocity_target == "constant":
+            velocity = (target - source0) / horizon
+            flux = poisson_flux_from_velocity_torch(velocity, grid_size=n)
+            for _ in range(steps):
+                states, _, _ = eulerian_flux_step_torch(
+                    states,
+                    flux,
+                    dt,
+                    config,
+                    deterministic=True,
+                    free_weight=0.0,
+                    noise_weight=0.0,
+                    learned_weight=1.0,
+                )
+        else:
+            for step in range(steps):
+                remaining = max(horizon - float(step) * dt, float(config.min_tau_fraction) * horizon)
+                velocity = (target - states) / remaining
+                velocity = velocity - velocity.mean(dim=1, keepdim=True)
+                flux = poisson_flux_from_velocity_torch(velocity, grid_size=n)
+                states, _, _ = eulerian_flux_step_torch(
+                    states,
+                    flux,
+                    dt,
+                    config,
+                    deterministic=True,
+                    free_weight=0.0,
+                    noise_weight=0.0,
+                    learned_weight=1.0,
+                )
     return states
 
 
@@ -1680,6 +2190,85 @@ def _samples_stats(samples: np.ndarray) -> tuple[float, float]:
     return float(ent), float(max_mass)
 
 
+def source_diversity_metrics(
+    sources: np.ndarray | None,
+    *,
+    requested_labels: Sequence[int] | np.ndarray | None = None,
+    source_labels: Sequence[int] | np.ndarray | None = None,
+    source_indices: Sequence[int] | np.ndarray | None = None,
+) -> dict[str, float | int | None]:
+    """Return cheap source/latent diversity and provenance diagnostics.
+
+    The unique count prefers recorded dataset indices when they are available;
+    otherwise it falls back to rounded source rows.  A zero diversity value is a
+    red flag for source-prior diagnostics because every generated sample is
+    starting from exactly the same latent/source image.
+    """
+    if sources is None:
+        return {
+            "source_unique_count": 0,
+            "source_diversity_l2": 0.0,
+            "source_pair_l2": 0.0,
+            "source_label_match_rate": float("nan"),
+            "source_index_unique_count": -1,
+        }
+    src = np.asarray(sources, dtype=np.float64).reshape(np.asarray(sources).shape[0], -1)
+    if src.shape[0] == 0:
+        return {
+            "source_unique_count": 0,
+            "source_diversity_l2": 0.0,
+            "source_pair_l2": 0.0,
+            "source_label_match_rate": float("nan"),
+            "source_index_unique_count": -1,
+        }
+    rounded_unique_count = int(np.unique(np.round(src, decimals=12), axis=0).shape[0])
+    source_index_unique_count: int | None = None
+    if source_indices is not None:
+        idx = np.asarray(source_indices, dtype=np.int64).reshape(-1)
+        valid = idx >= 0
+        if np.any(valid):
+            source_index_unique_count = int(np.unique(idx[valid]).size)
+    unique_count = rounded_unique_count if source_index_unique_count is None else source_index_unique_count
+    centered = src - src.mean(axis=0, keepdims=True)
+    diversity_l2 = float(np.sqrt(np.sum(centered * centered, axis=1)).mean())
+    pair_l2 = (
+        float(np.sqrt(np.sum((src[1:] - src[:-1]) ** 2, axis=1)).mean())
+        if src.shape[0] > 1
+        else 0.0
+    )
+    match_rate: float = float("nan")
+    if requested_labels is not None and source_labels is not None:
+        req = np.asarray(requested_labels, dtype=np.int64).reshape(-1)
+        lab = np.asarray(source_labels, dtype=np.int64).reshape(-1)
+        if req.shape == lab.shape and req.size > 0:
+            valid = lab >= 0
+            match_rate = float(np.mean(req[valid] == lab[valid])) if np.any(valid) else float("nan")
+    return {
+        "source_unique_count": unique_count,
+        "source_diversity_l2": diversity_l2,
+        "source_pair_l2": pair_l2,
+        "source_label_match_rate": match_rate,
+        "source_index_unique_count": -1 if source_index_unique_count is None else source_index_unique_count,
+    }
+
+
+def source_batch_diagnostics(
+    sources: np.ndarray | None,
+    *,
+    labels: Sequence[int] | np.ndarray | None = None,
+    requested_labels: Sequence[int] | np.ndarray | None = None,
+    source_indices: Sequence[int] | np.ndarray | None = None,
+    source_labels: Sequence[int] | np.ndarray | None = None,
+) -> dict[str, float | int | None]:
+    """Backward-compatible wrapper for ``source_diversity_metrics``."""
+    return source_diversity_metrics(
+        sources,
+        requested_labels=requested_labels if requested_labels is not None else labels,
+        source_labels=source_labels,
+        source_indices=source_indices,
+    )
+
+
 def nearest_class_mean_metrics(
     samples: np.ndarray,
     labels: Sequence[int] | np.ndarray,
@@ -1718,24 +2307,28 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--download", action="store_true", help="Download IDX MNIST if no ARFF file is present.")
     parser.add_argument("--examples-per-class", type=int, default=1000)
     parser.add_argument("--max-train", type=int, default=None)
-    parser.add_argument("--train-steps", type=int, default=3000)
+    parser.add_argument("--train-steps", type=int, default=8000)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--num-samples", type=int, default=64)
-    parser.add_argument("--sample-steps", type=int, default=128)
+    parser.add_argument("--sample-steps", type=int, default=256)
     parser.add_argument("--labels", type=str, default="cycle", help="'cycle' or comma-separated labels, e.g. 0,1,2")
     parser.add_argument("--target-mode", choices=TARGET_MODES, default="poisson-ot-flow")
     parser.add_argument("--source-mode", choices=SOURCE_MODES, default="lowfreq")
     parser.add_argument("--source-lowfreq-size", type=int, default=7)
     parser.add_argument("--source-blur-sigma", type=float, default=1.0)
     parser.add_argument("--source-uniform-mix", type=float, default=0.15)
+    parser.add_argument("--condition-on-source", dest="condition_on_source", action="store_true", default=True)
+    parser.add_argument("--no-condition-on-source", dest="condition_on_source", action="store_false")
     parser.add_argument("--ot-cost-mode", choices=OT_COST_MODES, default="lowres")
+    parser.add_argument("--ot-match-mode", choices=OT_MATCH_MODES, default="nearest")
+    parser.add_argument("--ot-nearest-top-k", type=int, default=1)
     parser.add_argument("--ot-lowres-size", type=int, default=7)
     parser.add_argument("--ot-blur-sigma", type=float, default=1.0)
     parser.add_argument("--ot-com-weight", type=float, default=0.25)
-    parser.add_argument("--mean-flow-prob", type=float, default=0.20)
-    parser.add_argument("--mean-flow-warmup-prob", type=float, default=0.25)
+    parser.add_argument("--mean-flow-prob", type=float, default=0.15)
+    parser.add_argument("--mean-flow-warmup-prob", type=float, default=0.20)
     parser.add_argument("--mean-flow-warmup-steps", type=int, default=1000)
     parser.add_argument("--tau-sampling", choices=TAU_SAMPLING_MODES, default="endpoint-mixture")
     parser.add_argument("--tau-source-prob", type=float, default=0.35)
@@ -1745,10 +2338,21 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--learned-weight", type=float, default=1.0)
     parser.add_argument("--flux-scale", type=float, default=20.0)
     parser.add_argument("--target-flux-clip", type=float, default=10.0)
-    parser.add_argument("--divergence-loss-weight", type=float, default=0.10)
+    parser.add_argument("--divergence-loss-weight", type=float, default=0.50)
+    parser.add_argument("--node-loss-weight", type=float, default=1.0)
+    parser.add_argument("--step-loss-weight", type=float, default=0.25)
+    parser.add_argument("--state-jitter-weight", type=float, default=0.0)
+    parser.add_argument("--velocity-target", choices=VELOCITY_TARGET_MODES, default="constant")
+    parser.add_argument("--min-tau-fraction", type=float, default=0.03)
     parser.add_argument("--horizon-scale", type=float, default=1.0)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--terminal-lambda", type=float, default=3.0)
+    parser.add_argument("--on-policy-prob", type=float, default=0.25)
+    parser.add_argument("--on-policy-warmup-steps", type=int, default=1500)
+    parser.add_argument("--on-policy-prefix-steps", type=int, default=16)
+    parser.add_argument("--adaptive-sampling", action="store_true")
+    parser.add_argument("--clip-target", type=float, default=0.03)
+    parser.add_argument("--max-substeps", type=int, default=4)
     parser.add_argument("--deterministic-sampling", action="store_true")
     parser.add_argument("--preview-every", type=int, default=500)
     parser.add_argument("--preview-sample-steps", type=int, default=64)
@@ -1769,7 +2373,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         source_lowfreq_size=int(args.source_lowfreq_size),
         source_blur_sigma=float(args.source_blur_sigma),
         source_uniform_mix=float(args.source_uniform_mix),
+        condition_on_source=bool(args.condition_on_source),
         ot_cost_mode=str(args.ot_cost_mode),
+        ot_match_mode=str(args.ot_match_mode),
+        ot_nearest_top_k=int(args.ot_nearest_top_k),
         ot_lowres_size=int(args.ot_lowres_size),
         ot_blur_sigma=float(args.ot_blur_sigma),
         ot_com_weight=float(args.ot_com_weight),
@@ -1785,16 +2392,29 @@ def main(argv: Sequence[str] | None = None) -> None:
         flux_scale=float(args.flux_scale),
         target_flux_clip=float(args.target_flux_clip),
         divergence_loss_weight=float(args.divergence_loss_weight),
+        node_loss_weight=float(args.node_loss_weight),
+        step_loss_weight=float(args.step_loss_weight),
+        state_jitter_weight=float(args.state_jitter_weight),
+        velocity_target=str(args.velocity_target),
+        min_tau_fraction=float(args.min_tau_fraction),
         terminal_lambda=float(args.terminal_lambda),
+        on_policy_prob=float(args.on_policy_prob),
+        on_policy_warmup_steps=int(args.on_policy_warmup_steps),
+        on_policy_prefix_steps=int(args.on_policy_prefix_steps),
+        adaptive_sampling=bool(args.adaptive_sampling),
+        clip_target=float(args.clip_target),
+        max_substeps=int(args.max_substeps),
     )
     device = torch.device(
         "cuda" if args.device is None and torch.cuda.is_available() else "cpu" if args.device is None else args.device
     )
-    print(f"Experiment 10c direct-flux MNIST on device={device}")
+    print(f"Experiment 10e direct-flux MNIST on device={device}")
     print(
         "Laptop-friendly settings: "
         f"target_mode={config.target_mode}, source_mode={config.source_mode}, "
-        f"ot={config.ot_cost_mode}/{config.ot_lowres_size}, tau={config.tau_sampling}, "
+        f"ot={config.ot_cost_mode}/{config.ot_lowres_size}, match={config.ot_match_mode}, tau={config.tau_sampling}, "
+        f"source_cond={config.condition_on_source}, velocity={config.velocity_target}, "
+        f"on_policy={config.on_policy_prob}, step_loss={config.step_loss_weight}, adaptive={config.adaptive_sampling}, "
         f"train_steps={args.train_steps}, batch={args.batch_size}, base_channels={args.base_channels}, "
         f"horizon={natural_horizon(config):.3e}, sample_steps={args.sample_steps}, "
         f"weights=(free={config.free_weight}, noise={config.noise_weight}, learned={config.learned_weight})"
@@ -1849,6 +2469,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     samples_path = args.out_dir / "experiment10_samples.npz"
     png_path = args.out_dir / "experiment10_samples.png"
     final_metrics = nearest_class_mean_metrics(result.samples, result.labels, final_class_means)
+    source_metrics = source_batch_diagnostics(
+        result.sources if result.sources is not None else result.samples,
+        requested_labels=result.labels,
+        source_indices=result.source_indices,
+        source_labels=result.source_labels,
+    )
+    source_label_match_value = (
+        float("nan")
+        if source_metrics.get("source_label_match_rate") is None
+        else float(source_metrics["source_label_match_rate"])
+    )
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -1858,6 +2489,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "labels": result.labels,
             "clipping_fraction": result.clipping_fraction,
             "final_metrics": final_metrics,
+            "source_metrics": source_metrics,
         },
         ckpt_path,
     )
@@ -1866,6 +2498,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         samples=result.samples,
         labels=result.labels,
         sources=result.sources,
+        source_indices=np.asarray([] if result.source_indices is None else result.source_indices, dtype=np.int64),
+        source_labels=np.asarray([] if result.source_labels is None else result.source_labels, dtype=np.int64),
+        source_unique_count=np.asarray([source_metrics["source_unique_count"]], dtype=np.float64),
+        source_diversity_l2=np.asarray([source_metrics["source_diversity_l2"]], dtype=np.float64),
+        source_pair_l2=np.asarray([source_metrics["source_pair_l2"]], dtype=np.float64),
+        source_label_match_rate=np.asarray([source_label_match_value], dtype=np.float64),
         clipping_fraction=np.asarray([result.clipping_fraction], dtype=np.float64),
         nearest_mean_acc=np.asarray([final_metrics["nearest_mean_acc"]], dtype=np.float64),
         correct_mean_dist=np.asarray([final_metrics["correct_mean_dist"]], dtype=np.float64),
@@ -1881,6 +2519,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"Saved samples: {samples_path}")
     print(f"Final clipping fraction: {result.clipping_fraction:.4f}")
     print(f"Final sample entropy: {ent:.4f}; mean max pixel mass: {max_mass:.4f}")
+    print(
+        "Source diagnostics: "
+        f"unique={source_metrics['source_unique_count']:.0f}, "
+        f"div_l2={source_metrics['source_diversity_l2']:.4g}, "
+        f"pair_l2={source_metrics['source_pair_l2']:.4g}, "
+        f"label_match={source_label_match_value:.3f}"
+    )
     print(
         "Nearest class-mean diagnostics: "
         f"acc={final_metrics['nearest_mean_acc']:.3f}, "

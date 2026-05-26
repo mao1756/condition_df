@@ -38,7 +38,7 @@ train a positive CNN surrogate for the Feynman--Kac heat potential from free
 Eulerian rollouts, then simulate the terminally conditioned conservative
 edge-flux dynamics.
 
-## Example 10c: MNIST direct edge-flux generation
+## Example 10e: MNIST direct edge-flux generation
 
 `mnist/eulerian_flux_mnist.py` implements the laptop-friendly MNIST generation
 experiment based on the Eulerian conditioning formula, but learns the two
@@ -47,20 +47,18 @@ The model is a small label-conditioned U-Net that predicts horizontal and
 vertical edge fluxes, and the sampler applies them with conservative incidence
 updates so total mass stays on the 28x28 simplex.
 
-The default path is now **OT-coupled Poisson-flow**:
+The default path is now **stable nearest-matched Poisson-flow with persistent source conditioning and on-policy correction**:
 
 - sample a smooth low-frequency source measure;
 - sample a digit label;
-- assign each source to a same-label MNIST target by a tiny per-class
-  mini-batch optimal-transport problem in blurred low-resolution features;
-- train on the minimum-energy two-channel periodic edge flux whose divergence
-  equals the source-to-target velocity.
+- assign each source to a same-label MNIST target by global nearest-neighbour matching in blurred low-resolution features;
+- train on the minimum-energy two-channel periodic edge flux whose divergence equals the source-to-target velocity;
+- after warmup, train some batches on states visited by the current sampler, using a residual corrective teacher;
+- include a limiter-aware one-step loss so training sees the same edge clipping rule used during rollout.
 
-This keeps the direct two-channel flux object from Example 10b, but avoids the
-independent random pairing that made the learned MSE flux average over
-incompatible same-label target digits.  Sampling still receives only the current
-mass image, bridge time, and digit label; the target image is used only to build
-the supervised training flux.
+The sampler receives the current mass image, bridge time, digit label, and the
+initial random source/latent at every step. It still does not receive the target
+MNIST image; the target image is used only to build the supervised training flux.
 
 First sanity check: class-mean flow should produce blurry recognizable digits.
 
@@ -78,39 +76,45 @@ First sanity check: class-mean flow should produce blurry recognizable digits.
   --num-samples 64
 ```
 
-Then run the OT-coupled stochastic-target version:
+Then run the stable nearest-matched low-frequency source version:
 
 ```powershell
 .venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
   --data-root mnist_data `
   --target-mode poisson-ot-flow `
   --source-mode lowfreq `
-  --ot-cost-mode lowres `
-  --ot-lowres-size 7 `
-  --ot-blur-sigma 1.0 `
-  --mean-flow-prob 0.20 `
-  --tau-sampling endpoint-mixture `
+  --condition-on-source `
+  --ot-match-mode nearest `
+  --ot-nearest-top-k 1 `
+  --velocity-target constant `
+  --state-jitter-weight 0 `
+  --on-policy-prob 0.25 `
+  --on-policy-warmup-steps 1500 `
+  --on-policy-prefix-steps 16 `
+  --step-loss-weight 0.25 `
+  --divergence-loss-weight 0.5 `
+  --node-loss-weight 1.0 `
   --free-weight 0 `
   --noise-weight 0 `
-  --train-steps 5000 `
+  --train-steps 8000 `
   --batch-size 256 `
   --base-channels 32 `
-  --sample-steps 128 `
+  --sample-steps 256 `
   --num-samples 64
 ```
 
-A useful diagnostic upper-bound run is the coarse class prior.  It does not give
-the full target image, but it starts from a heavily downsampled/blurred same-class
-source skeleton so you can distinguish source-prior issues from flux-rollout
-issues.
+For a faster first check, use `--train-steps 3000 --sample-steps 192 --on-policy-prob 0.15 --on-policy-prefix-steps 8`.
+
+A useful diagnostic upper-bound run is the coupled target-lowres prior. It does not give the full target image to the model, but during training it builds the source as a heavily downsampled/blurred version of the same target image. This distinguishes source-prior ambiguity from flux-rollout issues.
 
 ```powershell
 .venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
   --data-root mnist_data `
   --target-mode poisson-flow `
-  --source-mode class-lowres-prior `
-  --source-lowfreq-size 7 `
-  --source-blur-sigma 1.25 `
+  --source-mode target-lowres-prior `
+  --condition-on-source `
+  --velocity-target residual `
+  --state-jitter-weight 0.05 `
   --free-weight 0 `
   --noise-weight 0 `
   --train-steps 3000 `
@@ -120,30 +124,18 @@ issues.
   --num-samples 64
 ```
 
-The progress bar reports loss, divergence cosine, predicted/target RMS,
-mean-anchor probability, sample entropy, max pixel mass, clipping fraction, and
-ETA.  Training previews are saved under
-`artifacts/experiment10_mnist_flux/previews/` every `--preview-every` steps.  The
-preview panel has rows for source, generated sample, assigned target, exact
-teacher rollout, and class mean.  To reproduce the older independent random
-pairing, pass `--target-mode poisson-flow`.  To reproduce the older terminal-score
-proxy, pass `--target-mode terminal-score --free-weight 1 --noise-weight 1`.
+The progress bar reports loss, divergence cosine, predicted/target RMS, step
+loss, on-policy usage, mean-anchor probability, sample entropy, max pixel mass,
+clipping fraction, and ETA. Final artifacts also save `source_indices`,
+`source_labels`, `source_unique_count`, `source_diversity_l2`, and
+source-label match diagnostics so source-prior collapse is visible immediately.
+Training previews are saved under `artifacts/experiment10_mnist_flux/previews/`
+every `--preview-every` steps. The preview panel has rows for source, generated
+sample, assigned target, exact teacher rollout, and class mean. To reproduce the
+older mini-batch OT pairing, pass `--ot-match-mode minibatch`; to sample among
+several stable neighbours, use `--ot-match-mode topk --ot-nearest-top-k K`. To
+reproduce the older independent random pairing, pass `--target-mode poisson-flow`.
+To ablate the persistent source channel, pass `--no-condition-on-source`. To
+reproduce the older terminal-score proxy, pass `--target-mode terminal-score
+--free-weight 1 --noise-weight 1`.
 
-For a very quick smoke run, reduce `--train-steps` to 100--300. Outputs are
-written to `artifacts/experiment10_mnist_flux/` by default.
-
-## Smoke Tests
-
-Use the virtual environment Python on Windows:
-
-```powershell
-.venv\Scripts\python.exe -m tests.test_imports
-.venv\Scripts\python.exe -m tests.test_smoke_wasserstein_conditioning_algorithms
-.venv\Scripts\python.exe -m tests.test_smoke_mnist_conditioned_diffusion
-.venv\Scripts\python.exe -m tests.test_smoke_mnist_score_matching
-.venv\Scripts\python.exe -m tests.test_smoke_mnist_cp
-.venv\Scripts\python.exe -m tests.test_smoke_mnist_experiment6_hyperparameter_search
-```
-
-The system `python` launcher on this machine may resolve to the Windows Store
-alias, so prefer `.venv\Scripts\python.exe` inside this repo.

@@ -16,14 +16,17 @@ except RuntimeError:
 from mnist.eulerian_flux_mnist import (
     DirectFluxMNISTConfig,
     DirectFluxUNet,
+    _ot_coupled_target_indices,
     build_classwise_ot_cache,
     direct_flux_matching_loss,
     flux_divergence_torch,
+    make_on_policy_training_batch,
     poisson_flux_from_velocity_torch,
     nearest_class_mean_metrics,
     sample_flux_training_batch,
     simulate_direct_flux_generation,
     simulate_teacher_flux_rollout,
+    source_batch_diagnostics,
     terminal_conditioning_flux_torch,
     train_direct_flux_model,
     training_target_flux_torch,
@@ -57,6 +60,40 @@ def test_poisson_flux_divergence_matches_velocity() -> None:
     div = flux_divergence_torch(flux)
     assert flux.shape == (3, 2, 8, 8)
     assert torch.allclose(div, velocity, atol=2e-5, rtol=2e-5)
+
+
+def test_nearest_ot_matching_is_stable_for_identical_sources() -> None:
+    rng = np.random.default_rng(7)
+    config = DirectFluxMNISTConfig(
+        grid_size=8,
+        horizon_scale=0.2,
+        target_mode="poisson-ot-flow",
+        source_mode="lowfreq",
+        source_lowfreq_size=4,
+        ot_match_mode="nearest",
+        ot_lowres_size=4,
+        ot_blur_sigma=0.5,
+        flux_scale=10.0,
+    )
+    images, labels = _toy_digit_measures(num_samples=40, grid_size=config.grid_size)
+    cache = build_classwise_ot_cache(images, labels, config)
+    repeated_source_0 = np.repeat(images[0:1], 3, axis=0)
+    repeated_source_1 = np.repeat(images[1:2], 3, axis=0)
+    source_np = np.concatenate([repeated_source_0, repeated_source_1], axis=0)
+    batch_labels = np.asarray([0, 0, 0, 1, 1, 1], dtype=np.int64)
+    assigned = _ot_coupled_target_indices(
+        source_np,
+        batch_labels,
+        images,
+        labels,
+        config,
+        rng=rng,
+        ot_cache=cache,
+    )
+    assert np.unique(assigned[:3]).size == 1
+    assert np.unique(assigned[3:]).size == 1
+    assert np.all(labels[assigned[:3]] == 0)
+    assert np.all(labels[assigned[3:]] == 1)
 
 
 
@@ -112,6 +149,49 @@ def test_poisson_ot_and_class_lowres_prior_smoke() -> None:
     assert set(metrics) == {"nearest_mean_acc", "correct_mean_dist", "wrong_mean_margin"}
     assert 0.0 <= metrics["nearest_mean_acc"] <= 1.0
 
+
+
+def test_target_lowres_prior_is_coupled_and_audited() -> None:
+    rng = np.random.default_rng(321)
+    config = DirectFluxMNISTConfig(
+        grid_size=8,
+        horizon_scale=0.2,
+        num_steps=3,
+        target_mode="poisson-flow",
+        source_mode="target-lowres-prior",
+        source_lowfreq_size=4,
+        source_blur_sigma=0.5,
+        mean_flow_prob=0.0,
+        mean_flow_warmup_prob=0.0,
+        state_jitter_weight=0.0,
+        velocity_target="residual",
+        flux_scale=10.0,
+    )
+    images, labels = _toy_digit_measures(num_samples=40, grid_size=config.grid_size)
+    batch = sample_flux_training_batch(
+        images,
+        labels,
+        config,
+        batch_size=8,
+        device="cpu",
+        rng=rng,
+    )
+    assert batch.source_indices is not None
+    assert batch.target_indices is not None
+    assert np.array_equal(batch.source_indices, batch.target_indices)
+    assert batch.source_labels is not None
+    assert np.array_equal(batch.source_labels, batch.labels.cpu().numpy())
+    assert np.unique(batch.source_indices).size > 1
+    diag = source_batch_diagnostics(
+        batch.sources.cpu().numpy(),
+        requested_labels=batch.labels.cpu().numpy(),
+        source_indices=batch.source_indices,
+        source_labels=batch.source_labels,
+    )
+    assert diag["source_unique_count"] > 1
+    assert diag["source_diversity_l2"] > 0.0
+    assert diag["source_label_match_rate"] == 1.0
+
 def test_direct_flux_teacher_model_and_sampler_smoke() -> None:
     torch.manual_seed(0)
     rng = np.random.default_rng(0)
@@ -157,6 +237,17 @@ def test_direct_flux_teacher_model_and_sampler_smoke() -> None:
     assert torch.isfinite(loss)
     assert metrics["loss"] >= 0.0
     assert "div_cos" in metrics
+
+    on_policy_batch = make_on_policy_training_batch(
+        model,
+        images,
+        labels,
+        config,
+        batch_size=4,
+        device="cpu",
+        rng=rng,
+    )
+    assert on_policy_batch.target_velocity_mode == "residual"
 
     history = train_direct_flux_model(
         model,

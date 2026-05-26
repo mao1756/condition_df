@@ -48,6 +48,7 @@ def test_direct_package_imports() -> None:
     assert hasattr(mnist_eulerian_flux_mnist, "poisson_flux_from_velocity_torch")
     assert hasattr(mnist_eulerian_flux_mnist, "build_classwise_ot_cache")
     assert hasattr(mnist_eulerian_flux_mnist, "simulate_teacher_flux_rollout")
+    assert hasattr(mnist_eulerian_flux_mnist, "source_batch_diagnostics")
     assert hasattr(mnist_conditioned_diffusion, "generate_guided_point_clouds")
     assert hasattr(mnist_cp, "load_mnist_cp_splits")
     assert hasattr(wasserstein_conditioning_algorithms, "simulate_wasserstein_mc_sinkhorn_em")
