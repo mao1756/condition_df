@@ -38,7 +38,7 @@ train a positive CNN surrogate for the Feynman--Kac heat potential from free
 Eulerian rollouts, then simulate the terminally conditioned conservative
 edge-flux dynamics.
 
-## Example 10b: MNIST direct edge-flux generation
+## Example 10c: MNIST direct edge-flux generation
 
 `mnist/eulerian_flux_mnist.py` implements the laptop-friendly MNIST generation
 experiment based on the Eulerian conditioning formula, but learns the two
@@ -47,13 +47,20 @@ The model is a small label-conditioned U-Net that predicts horizontal and
 vertical edge fluxes, and the sampler applies them with conservative incidence
 updates so total mass stays on the 28x28 simplex.
 
-The default path is now a diagnostic **Poisson-flow** bridge.  It samples a
-smooth low-frequency source measure, interpolates toward a label-matched MNIST
-image, and trains the network on the minimum-energy two-channel periodic edge
-flux whose divergence equals the desired image velocity.  Sampling defaults to
-learned-only deterministic dynamics (`--free-weight 0 --noise-weight 0`) so the
-first run tests the learned conservative flux before adding the free harmonic
-SDE terms back in.
+The default path is now **OT-coupled Poisson-flow**:
+
+- sample a smooth low-frequency source measure;
+- sample a digit label;
+- assign each source to a same-label MNIST target by a tiny per-class
+  mini-batch optimal-transport problem in blurred low-resolution features;
+- train on the minimum-energy two-channel periodic edge flux whose divergence
+  equals the source-to-target velocity.
+
+This keeps the direct two-channel flux object from Example 10b, but avoids the
+independent random pairing that made the learned MSE flux average over
+incompatible same-label target digits.  Sampling still receives only the current
+mass image, bridge time, and digit label; the target image is used only to build
+the supervised training flux.
 
 First sanity check: class-mean flow should produce blurry recognizable digits.
 
@@ -71,13 +78,39 @@ First sanity check: class-mean flow should produce blurry recognizable digits.
   --num-samples 64
 ```
 
-Then run the real stochastic-target Poisson-flow version:
+Then run the OT-coupled stochastic-target version:
+
+```powershell
+.venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
+  --data-root mnist_data `
+  --target-mode poisson-ot-flow `
+  --source-mode lowfreq `
+  --ot-cost-mode lowres `
+  --ot-lowres-size 7 `
+  --ot-blur-sigma 1.0 `
+  --mean-flow-prob 0.20 `
+  --tau-sampling endpoint-mixture `
+  --free-weight 0 `
+  --noise-weight 0 `
+  --train-steps 5000 `
+  --batch-size 256 `
+  --base-channels 32 `
+  --sample-steps 128 `
+  --num-samples 64
+```
+
+A useful diagnostic upper-bound run is the coarse class prior.  It does not give
+the full target image, but it starts from a heavily downsampled/blurred same-class
+source skeleton so you can distinguish source-prior issues from flux-rollout
+issues.
 
 ```powershell
 .venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
   --data-root mnist_data `
   --target-mode poisson-flow `
-  --source-mode lowfreq `
+  --source-mode class-lowres-prior `
+  --source-lowfreq-size 7 `
+  --source-blur-sigma 1.25 `
   --free-weight 0 `
   --noise-weight 0 `
   --train-steps 3000 `
@@ -87,11 +120,14 @@ Then run the real stochastic-target Poisson-flow version:
   --num-samples 64
 ```
 
-The progress bar reports loss, divergence cosine, predicted/target RMS, sample
-entropy, max pixel mass, clipping fraction, and ETA.  Training previews are saved
-under `artifacts/experiment10_mnist_flux/previews/` every `--preview-every`
-steps.  To reproduce the older terminal-score proxy, pass
-`--target-mode terminal-score --free-weight 1 --noise-weight 1`.
+The progress bar reports loss, divergence cosine, predicted/target RMS,
+mean-anchor probability, sample entropy, max pixel mass, clipping fraction, and
+ETA.  Training previews are saved under
+`artifacts/experiment10_mnist_flux/previews/` every `--preview-every` steps.  The
+preview panel has rows for source, generated sample, assigned target, exact
+teacher rollout, and class mean.  To reproduce the older independent random
+pairing, pass `--target-mode poisson-flow`.  To reproduce the older terminal-score
+proxy, pass `--target-mode terminal-score --free-weight 1 --noise-weight 1`.
 
 For a very quick smoke run, reduce `--train-steps` to 100--300. Outputs are
 written to `artifacts/experiment10_mnist_flux/` by default.

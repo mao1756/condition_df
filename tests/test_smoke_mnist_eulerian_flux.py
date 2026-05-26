@@ -16,11 +16,14 @@ except RuntimeError:
 from mnist.eulerian_flux_mnist import (
     DirectFluxMNISTConfig,
     DirectFluxUNet,
+    build_classwise_ot_cache,
     direct_flux_matching_loss,
     flux_divergence_torch,
     poisson_flux_from_velocity_torch,
+    nearest_class_mean_metrics,
     sample_flux_training_batch,
     simulate_direct_flux_generation,
+    simulate_teacher_flux_rollout,
     terminal_conditioning_flux_torch,
     train_direct_flux_model,
     training_target_flux_torch,
@@ -55,6 +58,59 @@ def test_poisson_flux_divergence_matches_velocity() -> None:
     assert flux.shape == (3, 2, 8, 8)
     assert torch.allclose(div, velocity, atol=2e-5, rtol=2e-5)
 
+
+
+def test_poisson_ot_and_class_lowres_prior_smoke() -> None:
+    torch.manual_seed(0)
+    rng = np.random.default_rng(123)
+    config = DirectFluxMNISTConfig(
+        grid_size=8,
+        horizon_scale=0.2,
+        num_steps=3,
+        target_mode="poisson-ot-flow",
+        source_mode="class-lowres-prior",
+        source_lowfreq_size=4,
+        source_blur_sigma=0.5,
+        ot_lowres_size=4,
+        ot_blur_sigma=0.5,
+        mean_flow_prob=0.0,
+        mean_flow_warmup_prob=0.0,
+        tau_sampling="endpoint-mixture",
+        tau_source_prob=0.25,
+        tau_data_prob=0.25,
+        flux_scale=10.0,
+    )
+    images, labels = _toy_digit_measures(num_samples=30, grid_size=config.grid_size)
+    cache = build_classwise_ot_cache(images, labels, config)
+    batch = sample_flux_training_batch(
+        images,
+        labels,
+        config,
+        batch_size=6,
+        device="cpu",
+        rng=rng,
+        class_means=cache.class_means,
+        ot_cache=cache,
+        step_index=10,
+    )
+    assert batch.sources.shape == (6, config.grid_size * config.grid_size)
+    assert batch.targets.shape == batch.sources.shape
+    assert torch.allclose(batch.sources.sum(dim=1), torch.ones(6), atol=1e-5)
+    target_flux = training_target_flux_torch(batch, config)
+    assert target_flux.shape == (6, 2, config.grid_size, config.grid_size)
+
+    teacher = simulate_teacher_flux_rollout(batch.sources, batch.targets, config, num_steps=2, device="cpu")
+    assert teacher.shape == batch.sources.shape
+    assert torch.isfinite(teacher).all()
+    assert torch.allclose(teacher.sum(dim=1), torch.ones(6), atol=1e-5)
+
+    metrics = nearest_class_mean_metrics(
+        teacher.detach().cpu().numpy(),
+        batch.labels.detach().cpu().numpy(),
+        cache.class_means,
+    )
+    assert set(metrics) == {"nearest_mean_acc", "correct_mean_dist", "wrong_mean_margin"}
+    assert 0.0 <= metrics["nearest_mean_acc"] <= 1.0
 
 def test_direct_flux_teacher_model_and_sampler_smoke() -> None:
     torch.manual_seed(0)
