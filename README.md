@@ -138,4 +138,70 @@ reproduce the older independent random pairing, pass `--target-mode poisson-flow
 To ablate the persistent source channel, pass `--no-condition-on-source`. To
 reproduce the older terminal-score proxy, pass `--target-mode terminal-score
 --free-weight 1 --noise-weight 1`.
+### Experiment 10g: stochastic-aware conditioning flux
+
+The deterministic learned-only sampler is useful for debugging, but the theory
+uses the free harmonic drift/noise plus a conditioning flux.  Experiment 10g
+therefore adds stochastic-aware training flags.  With `--free-aware-target`, the
+supervised Poisson flux is treated as a desired **total** transport flux and the
+network is trained on the conditioning part
+
+```text
+J_theta ≈ J_total - free_weight * J_free.
+```
+
+The on-policy branch and one-step loss can also use the same free/noisy weights
+as the sampler, so stochasticity is present during training rather than added
+only after training.
+
+Conservative first stochastic run:
+
+```powershell
+.venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
+  --data-root mnist_data `
+  --target-mode poisson-ot-flow `
+  --source-mode lowfreq `
+  --condition-on-source `
+  --ot-match-mode nearest `
+  --velocity-target constant `
+  --free-aware-target `
+  --sde-curriculum `
+  --sde-ramp-steps 3000 `
+  --target-free-weight 0.02 `
+  --target-noise-weight 0.003 `
+  --on-policy-use-free `
+  --on-policy-use-noise `
+  --stochastic-step-loss `
+  --on-policy-prob 0.35 `
+  --on-policy-warmup-steps 1500 `
+  --on-policy-prefix-steps 16 `
+  --step-loss-weight 0.25 `
+  --adaptive-sampling `
+  --clip-target 0.03 `
+  --max-substeps 4 `
+  --train-steps 8000 `
+  --batch-size 256 `
+  --base-channels 32 `
+  --sample-steps 256 `
+  --num-samples 64
+```
+
+The command above ramps the training free/noise weights from zero to the target
+values.  Since `--free-weight` and `--noise-weight` are omitted, sampling uses
+the same target values at the end of training.  The checkpoint and `.npz` now
+record `learned_step_rms`, `free_step_rms`, `noise_step_rms`,
+`free_to_learned_ratio`, and `noise_to_learned_ratio`; if either ratio is above
+about 0.5, the stochastic terms are already comparable to the learned
+conditioning increment.  Add `--save-ablation-samples` to save learned-only,
+free-only, and noise-only preview grids from the same initial sources.
+
+The mobility/free-SDE parameter can now be made explicit:
+
+```text
+--edge-alpha-mode legacy  # old experiments: alpha_edge = --alpha
+--edge-alpha-mode grid    # theory-style 2D grid: alpha_edge = beta / grid_size^2
+```
+
+`grid` mode is opt-in because it is much stiffer on a 28x28 grid and may need
+smaller free/noise weights or more substeps.
 

@@ -16,13 +16,18 @@ except RuntimeError:
 from mnist.eulerian_flux_mnist import (
     DirectFluxMNISTConfig,
     DirectFluxUNet,
+    EDGE_ALPHA_MODES,
+    FluxTrainingBatch,
     _ot_coupled_target_indices,
     build_classwise_ot_cache,
     direct_flux_matching_loss,
+    edge_alpha_value,
+    free_drift_flux_torch,
     flux_divergence_torch,
     make_on_policy_training_batch,
     poisson_flux_from_velocity_torch,
     nearest_class_mean_metrics,
+    step_component_rms_torch,
     sample_flux_training_batch,
     simulate_direct_flux_generation,
     simulate_teacher_flux_rollout,
@@ -60,6 +65,72 @@ def test_poisson_flux_divergence_matches_velocity() -> None:
     div = flux_divergence_torch(flux)
     assert flux.shape == (3, 2, 8, 8)
     assert torch.allclose(div, velocity, atol=2e-5, rtol=2e-5)
+
+
+
+
+def test_free_aware_target_subtracts_free_drift_and_grid_alpha() -> None:
+    rng = np.random.default_rng(11)
+    config_plain = DirectFluxMNISTConfig(
+        grid_size=8,
+        horizon_scale=0.2,
+        num_steps=4,
+        target_mode="poisson-flow",
+        source_mode="lowfreq",
+        source_lowfreq_size=4,
+        source_blur_sigma=0.25,
+        edge_alpha_mode="grid",
+        beta=2.0,
+        free_aware_target=False,
+        sde_curriculum=True,
+        target_free_weight=0.05,
+        target_noise_weight=0.01,
+        flux_scale=10.0,
+    )
+    assert EDGE_ALPHA_MODES == ("legacy", "grid")
+    assert abs(edge_alpha_value(config_plain) - 2.0 / 64.0) < 1e-12
+    config_aware = DirectFluxMNISTConfig(
+        grid_size=8,
+        horizon_scale=0.2,
+        num_steps=4,
+        target_mode="poisson-flow",
+        source_mode="lowfreq",
+        source_lowfreq_size=4,
+        source_blur_sigma=0.25,
+        edge_alpha_mode="grid",
+        beta=2.0,
+        free_aware_target=True,
+        sde_curriculum=True,
+        target_free_weight=0.05,
+        target_noise_weight=0.01,
+        flux_scale=10.0,
+    )
+    images, labels = _toy_digit_measures(grid_size=config_plain.grid_size)
+    batch_plain = sample_flux_training_batch(images, labels, config_plain, batch_size=4, device="cpu", rng=rng, step_index=999)
+    batch_aware = FluxTrainingBatch(
+        tau=batch_plain.tau,
+        states=batch_plain.states,
+        labels=batch_plain.labels,
+        targets=batch_plain.targets,
+        sources=batch_plain.sources,
+        train_free_weight=batch_plain.train_free_weight,
+        train_noise_weight=batch_plain.train_noise_weight,
+    )
+    plain_flux = training_target_flux_torch(batch_plain, config_plain)
+    aware_flux = training_target_flux_torch(batch_aware, config_aware)
+    free_flux = free_drift_flux_torch(batch_plain.states, config_plain)
+    assert torch.allclose(aware_flux, plain_flux - batch_plain.train_free_weight * free_flux, atol=1e-5, rtol=1e-5)
+    comp = step_component_rms_torch(
+        batch_plain.states,
+        plain_flux,
+        0.01,
+        config_plain,
+        free_weight=batch_plain.train_free_weight,
+        noise_weight=batch_plain.train_noise_weight,
+    )
+    assert comp["learned_step_rms"] > 0.0
+    assert comp["free_step_rms"] >= 0.0
+    assert comp["noise_step_rms"] >= 0.0
 
 
 def test_nearest_ot_matching_is_stable_for_identical_sources() -> None:

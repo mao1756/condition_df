@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-r"""Example 10/10b/10c/10d/10e: MNIST generation with directly learned Eulerian edge fluxes.
+r"""Example 10/10b/10c/10d/10e/10g: MNIST generation with directly learned Eulerian edge fluxes.
 
 The manuscript's fixed-grid h-transform adds a conservative edge flux
 
@@ -25,10 +25,13 @@ sampler gets the current mass image, bridge time, digit label, and by default
 the initial source/latent mass as persistent conditioning.  It never receives
 the target MNIST image at generation time.  Experiment 10e adds stable
 nearest/top-k source-target matching, on-policy correction, limiter-aware
-one-step losses, node-velocity losses, and adaptive sampling.
-The sampler defaults to learned-only deterministic dynamics
-(``free_weight = noise_weight = 0``, ``learned_weight = 1``), while the full
-free/noisy SDE can be reintroduced from the command line.
+one-step losses, node-velocity losses, and adaptive sampling.  Experiment
+10g adds stochastic-aware conditioning targets: the network can be trained to
+predict the h-transform conditioning flux, i.e. the desired total transport
+flux minus the free Dirichlet drift, while on-policy/step losses can use the
+same free/noisy SDE weights as the sampler.  The default remains learned-only
+for quick deterministic debugging; pass the SDE curriculum/free-aware flags to
+train and sample with stochastic dynamics.
 """
 
 import argparse
@@ -57,6 +60,7 @@ VELOCITY_TARGET_MODES = ("constant", "residual")
 TAU_SAMPLING_MODES = ("uniform", "endpoint-mixture")
 OT_COST_MODES = ("lowres", "pixel")
 OT_MATCH_MODES = ("minibatch", "nearest", "topk")
+EDGE_ALPHA_MODES = ("legacy", "grid")
 
 __all__ = [
     "DirectFluxMNISTConfig",
@@ -66,12 +70,17 @@ __all__ = [
     "FluxGenerationResult",
     "ClasswiseOTCache",
     "OT_MATCH_MODES",
+    "EDGE_ALPHA_MODES",
     "DirectFluxUNet",
+    "edge_alpha_value",
     "natural_horizon",
     "load_mnist_measure_dataset",
     "sample_flux_training_batch",
     "terminal_potential_and_log_gradient_torch",
     "terminal_conditioning_flux_torch",
+    "free_drift_flux_torch",
+    "edge_noise_std_channels",
+    "step_component_rms_torch",
     "poisson_flux_from_velocity_torch",
     "build_classwise_ot_cache",
     "training_target_flux_torch",
@@ -105,7 +114,12 @@ class DirectFluxMNISTConfig:
     """
 
     grid_size: int = 28
+    # Legacy experiments used ``alpha`` directly on every edge.  Theory uses
+    # alpha_h = beta h^d = beta / grid_size^2 on the 2D MNIST grid.  Keep
+    # legacy as the default for continuity and expose the grid mode explicitly.
     alpha: float = 1.0
+    beta: float = 1.0
+    edge_alpha_mode: str = "legacy"
     horizon_scale: float = 1.0
     num_steps: int = 256
     limiter_fraction: float = 0.25
@@ -136,9 +150,28 @@ class DirectFluxMNISTConfig:
     tau_source_prob: float = 0.35
     tau_data_prob: float = 0.15
 
+    # Sampling weights for the full h-transform-style SDE.
     free_weight: float = 0.0
     noise_weight: float = 0.0
     learned_weight: float = 1.0
+
+    # Experiment 10g: stochastic-aware training.  The Poisson teacher gives a
+    # desired total transport flux.  When ``free_aware_target`` is true, the
+    # network target is the conditioning flux ``J_total - w_free J_free`` so
+    # that adding the free drift at sampling time recovers the intended total
+    # edge transport.  ``train_*`` default to the sampling weights unless an
+    # SDE curriculum is active.
+    free_aware_target: bool = False
+    train_free_weight: float | None = None
+    train_noise_weight: float | None = None
+    on_policy_use_free: bool = False
+    on_policy_use_noise: bool = False
+    stochastic_step_loss: bool = False
+    same_noise_step_loss: bool = True
+    sde_curriculum: bool = False
+    sde_ramp_steps: int = 3000
+    target_free_weight: float = 0.02
+    target_noise_weight: float = 0.003
 
     terminal_lambda: float = 3.0
     terminal_floor: float = 1e-3
@@ -175,6 +208,10 @@ class DirectFluxMNISTConfig:
             raise ValueError("grid_size must be even for four-color edge splitting")
         if self.alpha <= 0.0 or not math.isfinite(self.alpha):
             raise ValueError("alpha must be positive and finite")
+        if self.beta <= 0.0 or not math.isfinite(self.beta):
+            raise ValueError("beta must be positive and finite")
+        if self.edge_alpha_mode not in EDGE_ALPHA_MODES:
+            raise ValueError(f"edge_alpha_mode must be one of {EDGE_ALPHA_MODES}")
         if self.horizon_scale <= 0.0 or not math.isfinite(self.horizon_scale):
             raise ValueError("horizon_scale must be positive and finite")
         if self.num_steps <= 0:
@@ -221,6 +258,28 @@ class DirectFluxMNISTConfig:
             raise ValueError("noise_weight must be non-negative and finite")
         if self.learned_weight < 0.0 or not math.isfinite(self.learned_weight):
             raise ValueError("learned_weight must be non-negative and finite")
+        if not isinstance(self.free_aware_target, bool):
+            raise ValueError("free_aware_target must be a bool")
+        if self.train_free_weight is not None and (self.train_free_weight < 0.0 or not math.isfinite(self.train_free_weight)):
+            raise ValueError("train_free_weight must be non-negative and finite when set")
+        if self.train_noise_weight is not None and (self.train_noise_weight < 0.0 or not math.isfinite(self.train_noise_weight)):
+            raise ValueError("train_noise_weight must be non-negative and finite when set")
+        if not isinstance(self.on_policy_use_free, bool):
+            raise ValueError("on_policy_use_free must be a bool")
+        if not isinstance(self.on_policy_use_noise, bool):
+            raise ValueError("on_policy_use_noise must be a bool")
+        if not isinstance(self.stochastic_step_loss, bool):
+            raise ValueError("stochastic_step_loss must be a bool")
+        if not isinstance(self.same_noise_step_loss, bool):
+            raise ValueError("same_noise_step_loss must be a bool")
+        if not isinstance(self.sde_curriculum, bool):
+            raise ValueError("sde_curriculum must be a bool")
+        if self.sde_ramp_steps < 0:
+            raise ValueError("sde_ramp_steps must be non-negative")
+        if self.target_free_weight < 0.0 or not math.isfinite(self.target_free_weight):
+            raise ValueError("target_free_weight must be non-negative and finite")
+        if self.target_noise_weight < 0.0 or not math.isfinite(self.target_noise_weight):
+            raise ValueError("target_noise_weight must be non-negative and finite")
         if self.terminal_lambda < 0.0 or not math.isfinite(self.terminal_lambda):
             raise ValueError("terminal_lambda must be non-negative and finite")
         if not (0.0 < self.terminal_floor < 1.0):
@@ -318,6 +377,8 @@ class FluxTrainingBatch:
     source_labels: IntArray | None = None
     target_indices: IntArray | None = None
     target_velocity_mode: str | None = None
+    train_free_weight: float = 0.0
+    train_noise_weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -335,6 +396,11 @@ class FluxGenerationResult:
     source_diversity_l2: float | None = None
     source_pair_l2: float | None = None
     source_label_match_rate: float | None = None
+    learned_step_rms: float | None = None
+    free_step_rms: float | None = None
+    noise_step_rms: float | None = None
+    free_to_learned_ratio: float | None = None
+    noise_to_learned_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -344,10 +410,36 @@ class _TorchEdgeClass:
     flux_indices: Tensor
 
 
+def edge_alpha_value(config: DirectFluxMNISTConfig) -> float:
+    """Return the edge Dirichlet parameter used by mobility/free SDE terms."""
+    if config.edge_alpha_mode == "grid":
+        n = float(config.grid_size)
+        return float(config.beta) / (n * n)
+    return float(config.alpha)
+
+
 def natural_horizon(config: DirectFluxMNISTConfig) -> float:
     """Return the fixed-grid bridge horizon used by the Eulerian simulator."""
     n = float(config.grid_size)
-    return float(config.horizon_scale) / ((2.0 * float(config.alpha) + 1.0) * n * n)
+    alpha_edge = edge_alpha_value(config)
+    return float(config.horizon_scale) / ((2.0 * alpha_edge + 1.0) * n * n)
+
+
+def effective_train_sde_weights(
+    config: DirectFluxMNISTConfig,
+    step_index: int | None = None,
+) -> tuple[float, float]:
+    """Return the free/noise weights used for stochastic-aware training."""
+    if bool(config.sde_curriculum):
+        if config.sde_ramp_steps <= 0:
+            ramp = 1.0
+        else:
+            step = 0 if step_index is None else max(int(step_index), 0)
+            ramp = min(1.0, float(step + 1) / float(config.sde_ramp_steps))
+        return ramp * float(config.target_free_weight), ramp * float(config.target_noise_weight)
+    free_w = float(config.free_weight if config.train_free_weight is None else config.train_free_weight)
+    noise_w = float(config.noise_weight if config.train_noise_weight is None else config.train_noise_weight)
+    return free_w, noise_w
 
 
 # ---------------------------------------------------------------------------
@@ -749,8 +841,69 @@ def harmonic_mobility_channels(masses: Tensor, config: DirectFluxMNISTConfig) ->
     tiny = float(config.mass_floor)
     hx = torch.where(a + bx > tiny, a * bx / (a + bx).clamp_min(tiny), torch.zeros_like(a))
     hy = torch.where(a + by > tiny, a * by / (a + by).clamp_min(tiny), torch.zeros_like(a))
-    kappa = (2.0 * float(config.alpha) + 1.0) / float(config.alpha)
+    alpha_edge = edge_alpha_value(config)
+    kappa = (2.0 * alpha_edge + 1.0) / alpha_edge
     return kappa * torch.stack([hx, hy], dim=1)
+
+
+def free_drift_flux_torch(masses: Tensor, config: DirectFluxMNISTConfig) -> Tensor:
+    """Return the raw free Dirichlet drift flux through each oriented edge.
+
+    The sampler multiplies this by ``free_weight`` before conservative
+    incidence.  A positive horizontal/vertical value moves mass to the right
+    or down, matching the learned flux orientation.
+    """
+    if masses.ndim != 2:
+        raise ValueError("masses must have shape (B, N)")
+    n = int(config.grid_size)
+    image = masses.reshape(-1, 1, n, n)[:, 0]
+    bx = torch.roll(image, shifts=-1, dims=-1)
+    by = torch.roll(image, shifts=-1, dims=-2)
+    tiny = float(config.mass_floor)
+    rx = torch.where(image + bx > tiny, (image - bx) / (image + bx).clamp_min(tiny), torch.zeros_like(image))
+    ry = torch.where(image + by > tiny, (image - by) / (image + by).clamp_min(tiny), torch.zeros_like(image))
+    alpha_edge = edge_alpha_value(config)
+    inv_h2 = float(n * n)
+    return (2.0 * alpha_edge + 1.0) * inv_h2 * torch.stack([rx, ry], dim=1)
+
+
+def edge_noise_std_channels(masses: Tensor, dt: float, config: DirectFluxMNISTConfig) -> Tensor:
+    """Return per-edge standard deviations for the free SDE flux increments."""
+    if dt < 0.0 or not math.isfinite(dt):
+        raise ValueError("dt must be non-negative and finite")
+    n = int(config.grid_size)
+    theta = harmonic_mobility_channels(masses, config)
+    return torch.sqrt((2.0 * theta * float(n * n) * float(dt)).clamp_min(0.0))
+
+
+def step_component_rms_torch(
+    states: Tensor,
+    conditioning_flux: Tensor,
+    dt: float,
+    config: DirectFluxMNISTConfig,
+    *,
+    free_weight: float | None = None,
+    noise_weight: float | None = None,
+    learned_weight: float | None = None,
+) -> dict[str, float]:
+    """Return RMS sizes of learned/free/noise edge increments for diagnostics."""
+    free_w = float(config.free_weight if free_weight is None else free_weight)
+    noise_w = float(config.noise_weight if noise_weight is None else noise_weight)
+    learned_w = float(config.learned_weight if learned_weight is None else learned_weight)
+    learned_inc = learned_w * conditioning_flux * float(dt)
+    free_inc = free_w * free_drift_flux_torch(states, config) * float(dt)
+    noise_inc = noise_w * edge_noise_std_channels(states, dt, config)
+    learned_rms = float(learned_inc.detach().float().square().mean().sqrt().cpu())
+    free_rms = float(free_inc.detach().float().square().mean().sqrt().cpu())
+    noise_rms = float(noise_inc.detach().float().square().mean().sqrt().cpu())
+    denom = max(learned_rms, 1e-12)
+    return {
+        "learned_step_rms": learned_rms,
+        "free_step_rms": free_rms,
+        "noise_step_rms": noise_rms,
+        "free_to_learned_ratio": free_rms / denom,
+        "noise_to_learned_ratio": noise_rms / denom,
+    }
 
 
 def terminal_conditioning_flux_torch(
@@ -1365,6 +1518,7 @@ def sample_flux_training_batch(
         )
         states = (1.0 - float(config.state_jitter_weight)) * states + float(config.state_jitter_weight) * jitter
     states = _renormalize_masses(states, floor=float(config.mass_floor))
+    train_free_weight, train_noise_weight = effective_train_sde_weights(config, step_index)
     return FluxTrainingBatch(
         tau=tau,
         states=states,
@@ -1374,6 +1528,8 @@ def sample_flux_training_batch(
         source_indices=source_batch.indices,
         source_labels=source_batch.labels,
         target_indices=target_indices,
+        train_free_weight=float(train_free_weight),
+        train_noise_weight=float(train_noise_weight),
     )
 
 def training_target_flux_torch(batch: FluxTrainingBatch, config: DirectFluxMNISTConfig) -> Tensor:
@@ -1390,7 +1546,10 @@ def training_target_flux_torch(batch: FluxTrainingBatch, config: DirectFluxMNIST
     else:
         raise ValueError(f"unknown velocity target mode: {velocity_mode}")
     velocity = velocity - velocity.mean(dim=1, keepdim=True)
-    return poisson_flux_from_velocity_torch(velocity, grid_size=int(config.grid_size))
+    total_flux = poisson_flux_from_velocity_torch(velocity, grid_size=int(config.grid_size))
+    if bool(config.free_aware_target):
+        total_flux = total_flux - float(batch.train_free_weight) * free_drift_flux_torch(batch.states, config)
+    return total_flux
 
 
 def direct_flux_matching_loss(
@@ -1414,12 +1573,31 @@ def direct_flux_matching_loss(
     step_loss = pred_norm.new_tensor(0.0)
     if float(config.step_loss_weight) > 0.0:
         dt = natural_horizon(config) / float(max(int(config.num_steps), 1))
+        step_free_weight = float(batch.train_free_weight) if bool(config.stochastic_step_loss) else 0.0
+        step_noise_weight = float(batch.train_noise_weight) if bool(config.stochastic_step_loss) else 0.0
+        noise_delta = (
+            _noise_delta_flat_torch(batch.states, dt, config, step_noise_weight)
+            if bool(config.same_noise_step_loss)
+            else None
+        )
         pred_next = eulerian_flux_step_differentiable_torch(
-            batch.states, pred_norm * float(config.flux_scale), dt, config
+            batch.states,
+            pred_norm * float(config.flux_scale),
+            dt,
+            config,
+            free_weight=step_free_weight,
+            learned_weight=1.0,
+            noise_delta_flat=noise_delta,
         )
         with torch.no_grad():
             target_next = eulerian_flux_step_differentiable_torch(
-                batch.states, target_norm * float(config.flux_scale), dt, config
+                batch.states,
+                target_norm * float(config.flux_scale),
+                dt,
+                config,
+                free_weight=step_free_weight,
+                learned_weight=1.0,
+                noise_delta_flat=noise_delta,
             )
         density_scale = float(config.grid_size * config.grid_size)
         step_loss = F.mse_loss(pred_next * density_scale, target_next * density_scale)
@@ -1438,6 +1616,15 @@ def direct_flux_matching_loss(
         numerator = (flat_pred * flat_target).sum(dim=1)
         denominator = flat_pred.square().sum(dim=1).sqrt() * flat_target.square().sum(dim=1).sqrt()
         div_cos = (numerator / denominator.clamp_min(1e-12)).mean()
+        comp = step_component_rms_torch(
+            batch.states,
+            pred_norm * float(config.flux_scale),
+            natural_horizon(config) / float(max(int(config.num_steps), 1)),
+            config,
+            free_weight=float(batch.train_free_weight),
+            noise_weight=float(batch.train_noise_weight),
+            learned_weight=1.0,
+        )
     return loss, {
         "loss": float(loss.detach().cpu()),
         "flux_loss": float(flux_loss.detach().cpu()),
@@ -1447,6 +1634,13 @@ def direct_flux_matching_loss(
         "div_cos": float(div_cos.detach().cpu()),
         "pred_rms": float(pred_rms.detach().cpu()),
         "target_rms": float(target_rms.detach().cpu()),
+        "train_free_weight": float(batch.train_free_weight),
+        "train_noise_weight": float(batch.train_noise_weight),
+        "learned_step_rms": float(comp["learned_step_rms"]),
+        "free_step_rms": float(comp["free_step_rms"]),
+        "noise_step_rms": float(comp["noise_step_rms"]),
+        "free_to_learned_ratio": float(comp["free_to_learned_ratio"]),
+        "noise_to_learned_ratio": float(comp["noise_to_learned_ratio"]),
     }
 
 
@@ -1498,6 +1692,8 @@ def make_on_policy_training_batch(
             source_labels=base.source_labels,
             target_indices=base.target_indices,
             target_velocity_mode="residual",
+            train_free_weight=base.train_free_weight,
+            train_noise_weight=base.train_noise_weight,
         )
     prefix_steps = int(rng.integers(1, max_prefix + 1))
     horizon = float(natural_horizon(config))
@@ -1510,14 +1706,16 @@ def make_on_policy_training_batch(
         tau_value = max(horizon - float(prefix_idx) * dt, 0.0)
         tau = torch.full((int(batch_size),), tau_value, dtype=states.dtype, device=resolved_device)
         flux = model.predict_flux(tau, states, base.labels, source_condition)
+        rollout_free = float(base.train_free_weight) if bool(config.on_policy_use_free) else 0.0
+        rollout_noise = float(base.train_noise_weight) if bool(config.on_policy_use_noise) else 0.0
         states, _, _ = eulerian_flux_step_torch(
             states,
             flux.float(),
             dt,
             config,
-            deterministic=True,
-            free_weight=0.0,
-            noise_weight=0.0,
+            deterministic=not bool(config.on_policy_use_noise),
+            free_weight=rollout_free,
+            noise_weight=rollout_noise,
             learned_weight=1.0,
         )
     if model_was_training:
@@ -1538,6 +1736,8 @@ def make_on_policy_training_batch(
         source_labels=base.source_labels,
         target_indices=base.target_indices,
         target_velocity_mode="residual",
+        train_free_weight=base.train_free_weight,
+        train_noise_weight=base.train_noise_weight,
     )
 
 
@@ -1601,6 +1801,13 @@ def train_direct_flux_model(
         "div_cos": [],
         "pred_rms": [],
         "target_rms": [],
+        "train_free_weight": [],
+        "train_noise_weight": [],
+        "learned_step_rms": [],
+        "free_step_rms": [],
+        "noise_step_rms": [],
+        "free_to_learned_ratio": [],
+        "noise_to_learned_ratio": [],
     }
 
     preview_path = None if preview_dir is None or preview_every <= 0 else Path(preview_dir)
@@ -1665,6 +1872,8 @@ def train_direct_flux_model(
                 pred=metrics["pred_rms"],
                 tgt=metrics["target_rms"],
                 onp=metrics.get("on_policy", 0.0),
+                free_r=metrics.get("free_to_learned_ratio", 0.0),
+                noise_r=metrics.get("noise_to_learned_ratio", 0.0),
                 mean_p=float(anchor_prob) if model.config.target_mode in {"poisson-flow", "poisson-ot-flow"} else 0.0,
             )
 
@@ -1757,12 +1966,19 @@ def eulerian_flux_step_differentiable_torch(
     conditioning_flux: Tensor,
     dt: float,
     config: DirectFluxMNISTConfig,
+    *,
+    free_weight: float = 0.0,
+    learned_weight: float = 1.0,
+    noise_delta_flat: Tensor | None = None,
 ) -> Tensor:
-    """Differentiable learned-only version of the four-color limited step.
+    """Differentiable four-color limited step used by step/rollout losses.
 
-    This is used by the limiter-aware one-step loss.  It mirrors the production
-    sampler's conservative edge incidence and edge clipping, but omits free
-    drift/noise and avoids scalar diagnostic counters.
+    It mirrors the production sampler's conservative edge incidence and edge
+    clipping.  Unlike the old training helper, it can include the same free
+    drift term as the stochastic sampler.  ``noise_delta_flat`` may contain a
+    pre-sampled edge increment with shape ``(B, 2 * H * W)``; using the same
+    tensor for predicted and teacher steps makes the noise cancel in the loss
+    while preserving limiter effects.
     """
     if states.ndim != 2:
         raise ValueError("states must have shape (B, N)")
@@ -1780,13 +1996,29 @@ def eulerian_flux_step_differentiable_torch(
         [conditioning_flux[:, 0].reshape(states.shape[0], -1), conditioning_flux[:, 1].reshape(states.shape[0], -1)],
         dim=1,
     )
+    if noise_delta_flat is not None:
+        noise_delta_flat = noise_delta_flat.to(device=states.device, dtype=states.dtype)
+        if noise_delta_flat.shape != flat_flux.shape:
+            raise ValueError("noise_delta_flat must have shape (B, 2 * H * W)")
     tiny = float(config.mass_floor)
     for edge_class in _edge_classes_torch(n, states.device):
         tails = edge_class.tails
         heads = edge_class.heads
         a = out[:, tails]
         b = out[:, heads]
-        d_flux = flat_flux[:, edge_class.flux_indices] * float(dt)
+        learned_flux = flat_flux[:, edge_class.flux_indices]
+        d_flux = float(learned_weight) * learned_flux * float(dt)
+        if float(free_weight) != 0.0:
+            free_flat = torch.cat(
+                [
+                    free_drift_flux_torch(out, config)[:, 0].reshape(out.shape[0], -1),
+                    free_drift_flux_torch(out, config)[:, 1].reshape(out.shape[0], -1),
+                ],
+                dim=1,
+            )
+            d_flux = d_flux + float(free_weight) * free_flat[:, edge_class.flux_indices] * float(dt)
+        if noise_delta_flat is not None:
+            d_flux = d_flux + noise_delta_flat[:, edge_class.flux_indices]
         d_flux = torch.minimum(d_flux, float(config.limiter_fraction) * a)
         d_flux = torch.maximum(d_flux, -float(config.limiter_fraction) * b)
         delta = torch.zeros_like(out)
@@ -1798,6 +2030,15 @@ def eulerian_flux_step_differentiable_torch(
         out = out / out.sum(dim=1, keepdim=True).clamp_min(tiny)
     return out
 
+
+def _noise_delta_flat_torch(states: Tensor, dt: float, config: DirectFluxMNISTConfig, noise_weight: float) -> Tensor | None:
+    """Sample a flat edge-noise increment for differentiable paired step losses."""
+    if float(noise_weight) <= 0.0:
+        return None
+    std = float(noise_weight) * edge_noise_std_channels(states, dt, config)
+    return torch.cat(
+        [std[:, 0].reshape(states.shape[0], -1), std[:, 1].reshape(states.shape[0], -1)], dim=1
+    ) * torch.randn(states.shape[0], 2 * int(config.grid_size) * int(config.grid_size), device=states.device, dtype=states.dtype)
 
 def eulerian_flux_step_torch(
     states: Tensor,
@@ -1829,7 +2070,7 @@ def eulerian_flux_step_torch(
     learned_w = float(config.learned_weight if learned_weight is None else learned_weight)
     out = states.clone()
     inv_h2 = float(n * n)
-    alpha = float(config.alpha)
+    alpha = edge_alpha_value(config)
     tiny = float(config.mass_floor)
     flat_flux = torch.cat(
         [conditioning_flux[:, 0].reshape(states.shape[0], -1), conditioning_flux[:, 1].reshape(states.shape[0], -1)],
@@ -1882,6 +2123,9 @@ def simulate_direct_flux_generation(
     initial_states: Tensor | np.ndarray | None = None,
     source_images: np.ndarray | None = None,
     source_labels: np.ndarray | None = None,
+    free_weight: float | None = None,
+    noise_weight: float | None = None,
+    learned_weight: float | None = None,
 ) -> FluxGenerationResult:
     """Generate MNIST-like image measures by simulating learned edge-flux dynamics."""
     cfg = model.config if config is None else config
@@ -1904,6 +2148,9 @@ def simulate_direct_flux_generation(
         raise ValueError("num_steps must be positive")
     horizon = natural_horizon(cfg)
     dt = horizon / float(steps)
+    sample_free_weight = float(cfg.free_weight if free_weight is None else free_weight)
+    sample_noise_weight = float(cfg.noise_weight if noise_weight is None else noise_weight)
+    sample_learned_weight = float(cfg.learned_weight if learned_weight is None else learned_weight)
     rng = np.random.default_rng(int(seed))
     source_indices: IntArray | None = None
     sampled_source_labels: IntArray | None = None
@@ -1931,12 +2178,21 @@ def simulate_direct_flux_generation(
         trajectory.append(states.detach().cpu().numpy().astype(np.float64))
     clipped = 0
     proposed = 0
+    component_sums = {
+        "learned_step_rms": 0.0,
+        "free_step_rms": 0.0,
+        "noise_step_rms": 0.0,
+        "free_to_learned_ratio": 0.0,
+        "noise_to_learned_ratio": 0.0,
+    }
+    component_count = 0
     amp_enabled = bool(use_amp and resolved_device.type == "cuda")
     bar = _progress(range(steps), total=steps, desc="sample flux", disable=not show_progress)
     for step in bar:
         tau_value = max(horizon - float(step) * dt, 0.0)
 
         def advance_with_substeps(start_states: Tensor, substeps: int) -> tuple[Tensor, int, int]:
+            nonlocal component_count
             local_states = start_states
             local_clipped = 0
             local_proposed = 0
@@ -1947,12 +2203,27 @@ def simulate_direct_flux_generation(
                 context = _cuda_autocast(enabled=True) if amp_enabled else nullcontext()
                 with context:
                     flux = model.predict_flux(tau, local_states, labels_t, source_condition)
+                nonlocal_component = step_component_rms_torch(
+                    local_states,
+                    flux.float(),
+                    sub_dt,
+                    cfg,
+                    free_weight=sample_free_weight,
+                    noise_weight=sample_noise_weight,
+                    learned_weight=sample_learned_weight,
+                )
+                for _key, _value in nonlocal_component.items():
+                    component_sums[_key] += float(_value)
+                component_count += 1
                 local_states, c_step, p_step = eulerian_flux_step_torch(
                     local_states,
                     flux.float(),
                     sub_dt,
                     cfg,
                     deterministic=deterministic,
+                    free_weight=sample_free_weight,
+                    noise_weight=sample_noise_weight,
+                    learned_weight=sample_learned_weight,
                 )
                 local_clipped += c_step
                 local_proposed += p_step
@@ -1989,6 +2260,16 @@ def simulate_direct_flux_generation(
                 f"{cfg.source_mode} collapsed to a single source for a batch of {batch_size}; "
                 "check source sampling/provenance."
             )
+    component_means = {
+        key: (float(value) / float(component_count) if component_count > 0 else 0.0)
+        for key, value in component_sums.items()
+    }
+    if component_means["free_to_learned_ratio"] > 0.5 or component_means["noise_to_learned_ratio"] > 0.5:
+        print(
+            "Warning: stochastic increments are comparable to the learned step: "
+            f"free/learned={component_means['free_to_learned_ratio']:.3f}, "
+            f"noise/learned={component_means['noise_to_learned_ratio']:.3f}"
+        )
     return FluxGenerationResult(
         samples=states.detach().cpu().numpy().astype(np.float64),
         labels=labels_t.detach().cpu().numpy().astype(np.int64),
@@ -2001,6 +2282,11 @@ def simulate_direct_flux_generation(
         source_diversity_l2=float(diagnostics["source_diversity_l2"]),
         source_pair_l2=float(diagnostics["source_pair_l2"]),
         source_label_match_rate=float(diagnostics["source_label_match_rate"]),
+        learned_step_rms=component_means["learned_step_rms"],
+        free_step_rms=component_means["free_step_rms"],
+        noise_step_rms=component_means["noise_step_rms"],
+        free_to_learned_ratio=component_means["free_to_learned_ratio"],
+        noise_to_learned_ratio=component_means["noise_to_learned_ratio"],
     )
 
 
@@ -2333,9 +2619,25 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--tau-sampling", choices=TAU_SAMPLING_MODES, default="endpoint-mixture")
     parser.add_argument("--tau-source-prob", type=float, default=0.35)
     parser.add_argument("--tau-data-prob", type=float, default=0.15)
-    parser.add_argument("--free-weight", type=float, default=0.0)
-    parser.add_argument("--noise-weight", type=float, default=0.0)
+    parser.add_argument("--free-weight", type=float, default=None, help="Sampling free-drift weight. Defaults to target-free-weight under --sde-curriculum, otherwise 0.")
+    parser.add_argument("--noise-weight", type=float, default=None, help="Sampling noise weight. Defaults to target-noise-weight under --sde-curriculum, otherwise 0.")
     parser.add_argument("--learned-weight", type=float, default=1.0)
+    parser.add_argument("--free-aware-target", dest="free_aware_target", action="store_true", default=None)
+    parser.add_argument("--no-free-aware-target", dest="free_aware_target", action="store_false")
+    parser.add_argument("--train-free-weight", type=float, default=None)
+    parser.add_argument("--train-noise-weight", type=float, default=None)
+    parser.add_argument("--on-policy-use-free", dest="on_policy_use_free", action="store_true", default=None)
+    parser.add_argument("--no-on-policy-use-free", dest="on_policy_use_free", action="store_false")
+    parser.add_argument("--on-policy-use-noise", dest="on_policy_use_noise", action="store_true", default=None)
+    parser.add_argument("--no-on-policy-use-noise", dest="on_policy_use_noise", action="store_false")
+    parser.add_argument("--stochastic-step-loss", dest="stochastic_step_loss", action="store_true", default=None)
+    parser.add_argument("--no-stochastic-step-loss", dest="stochastic_step_loss", action="store_false")
+    parser.add_argument("--same-noise-step-loss", dest="same_noise_step_loss", action="store_true", default=True)
+    parser.add_argument("--no-same-noise-step-loss", dest="same_noise_step_loss", action="store_false")
+    parser.add_argument("--sde-curriculum", action="store_true")
+    parser.add_argument("--sde-ramp-steps", type=int, default=3000)
+    parser.add_argument("--target-free-weight", type=float, default=0.02)
+    parser.add_argument("--target-noise-weight", type=float, default=0.003)
     parser.add_argument("--flux-scale", type=float, default=20.0)
     parser.add_argument("--target-flux-clip", type=float, default=10.0)
     parser.add_argument("--divergence-loss-weight", type=float, default=0.50)
@@ -2346,6 +2648,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--min-tau-fraction", type=float, default=0.03)
     parser.add_argument("--horizon-scale", type=float, default=1.0)
     parser.add_argument("--alpha", type=float, default=1.0)
+    parser.add_argument("--beta", type=float, default=1.0)
+    parser.add_argument("--edge-alpha-mode", choices=EDGE_ALPHA_MODES, default="legacy")
     parser.add_argument("--terminal-lambda", type=float, default=3.0)
     parser.add_argument("--on-policy-prob", type=float, default=0.25)
     parser.add_argument("--on-policy-warmup-steps", type=int, default=1500)
@@ -2361,11 +2665,29 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--save-ablation-samples", action="store_true", help="Save learned-only/free-only/noise-only/stochastic sample grids from the same sources.")
     parser.add_argument("--out-dir", type=Path, default=Path("artifacts/experiment10_mnist_flux"))
     args = parser.parse_args(argv)
 
+    sample_free_weight = (
+        float(args.target_free_weight)
+        if args.free_weight is None and bool(args.sde_curriculum)
+        else (0.0 if args.free_weight is None else float(args.free_weight))
+    )
+    sample_noise_weight = (
+        float(args.target_noise_weight)
+        if args.noise_weight is None and bool(args.sde_curriculum)
+        else (0.0 if args.noise_weight is None else float(args.noise_weight))
+    )
+    free_aware_target = bool(args.sde_curriculum) if args.free_aware_target is None else bool(args.free_aware_target)
+    on_policy_use_free = bool(args.sde_curriculum) if args.on_policy_use_free is None else bool(args.on_policy_use_free)
+    on_policy_use_noise = bool(args.sde_curriculum) if args.on_policy_use_noise is None else bool(args.on_policy_use_noise)
+    stochastic_step_loss = bool(args.sde_curriculum) if args.stochastic_step_loss is None else bool(args.stochastic_step_loss)
+
     config = DirectFluxMNISTConfig(
         alpha=float(args.alpha),
+        beta=float(args.beta),
+        edge_alpha_mode=str(args.edge_alpha_mode),
         horizon_scale=float(args.horizon_scale),
         num_steps=int(args.sample_steps),
         target_mode=str(args.target_mode),
@@ -2386,9 +2708,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         tau_sampling=str(args.tau_sampling),
         tau_source_prob=float(args.tau_source_prob),
         tau_data_prob=float(args.tau_data_prob),
-        free_weight=float(args.free_weight),
-        noise_weight=float(args.noise_weight),
+        free_weight=float(sample_free_weight),
+        noise_weight=float(sample_noise_weight),
         learned_weight=float(args.learned_weight),
+        free_aware_target=bool(free_aware_target),
+        train_free_weight=None if args.train_free_weight is None else float(args.train_free_weight),
+        train_noise_weight=None if args.train_noise_weight is None else float(args.train_noise_weight),
+        on_policy_use_free=bool(on_policy_use_free),
+        on_policy_use_noise=bool(on_policy_use_noise),
+        stochastic_step_loss=bool(stochastic_step_loss),
+        same_noise_step_loss=bool(args.same_noise_step_loss),
+        sde_curriculum=bool(args.sde_curriculum),
+        sde_ramp_steps=int(args.sde_ramp_steps),
+        target_free_weight=float(args.target_free_weight),
+        target_noise_weight=float(args.target_noise_weight),
         flux_scale=float(args.flux_scale),
         target_flux_clip=float(args.target_flux_clip),
         divergence_loss_weight=float(args.divergence_loss_weight),
@@ -2408,13 +2741,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     device = torch.device(
         "cuda" if args.device is None and torch.cuda.is_available() else "cpu" if args.device is None else args.device
     )
-    print(f"Experiment 10e direct-flux MNIST on device={device}")
+    print(f"Experiment 10g direct-flux MNIST on device={device}")
     print(
         "Laptop-friendly settings: "
         f"target_mode={config.target_mode}, source_mode={config.source_mode}, "
         f"ot={config.ot_cost_mode}/{config.ot_lowres_size}, match={config.ot_match_mode}, tau={config.tau_sampling}, "
         f"source_cond={config.condition_on_source}, velocity={config.velocity_target}, "
-        f"on_policy={config.on_policy_prob}, step_loss={config.step_loss_weight}, adaptive={config.adaptive_sampling}, "
+        f"free_aware={config.free_aware_target}, sde_curr={config.sde_curriculum}, edge_alpha={config.edge_alpha_mode}, "
+        f"on_policy={config.on_policy_prob}, onp_sde=({config.on_policy_use_free},{config.on_policy_use_noise}), "
+        f"step_loss={config.step_loss_weight}, stochastic_step={config.stochastic_step_loss}, adaptive={config.adaptive_sampling}, "
         f"train_steps={args.train_steps}, batch={args.batch_size}, base_channels={args.base_channels}, "
         f"horizon={natural_horizon(config):.3e}, sample_steps={args.sample_steps}, "
         f"weights=(free={config.free_weight}, noise={config.noise_weight}, learned={config.learned_weight})"
@@ -2490,6 +2825,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             "clipping_fraction": result.clipping_fraction,
             "final_metrics": final_metrics,
             "source_metrics": source_metrics,
+            "component_metrics": {
+                "learned_step_rms": result.learned_step_rms,
+                "free_step_rms": result.free_step_rms,
+                "noise_step_rms": result.noise_step_rms,
+                "free_to_learned_ratio": result.free_to_learned_ratio,
+                "noise_to_learned_ratio": result.noise_to_learned_ratio,
+            },
         },
         ckpt_path,
     )
@@ -2508,17 +2850,61 @@ def main(argv: Sequence[str] | None = None) -> None:
         nearest_mean_acc=np.asarray([final_metrics["nearest_mean_acc"]], dtype=np.float64),
         correct_mean_dist=np.asarray([final_metrics["correct_mean_dist"]], dtype=np.float64),
         wrong_mean_margin=np.asarray([final_metrics["wrong_mean_margin"]], dtype=np.float64),
+        learned_step_rms=np.asarray([0.0 if result.learned_step_rms is None else result.learned_step_rms], dtype=np.float64),
+        free_step_rms=np.asarray([0.0 if result.free_step_rms is None else result.free_step_rms], dtype=np.float64),
+        noise_step_rms=np.asarray([0.0 if result.noise_step_rms is None else result.noise_step_rms], dtype=np.float64),
+        free_to_learned_ratio=np.asarray([0.0 if result.free_to_learned_ratio is None else result.free_to_learned_ratio], dtype=np.float64),
+        noise_to_learned_ratio=np.asarray([0.0 if result.noise_to_learned_ratio is None else result.noise_to_learned_ratio], dtype=np.float64),
     )
     try:
         save_flux_samples_grid(result.samples, result.labels, png_path, grid_size=config.grid_size)
         print(f"Saved preview: {png_path}")
     except RuntimeError as exc:
         print(f"Skipping PNG preview: {exc}")
+
+    if bool(args.save_ablation_samples) and result.sources is not None:
+        ablations = [
+            ("learned_only", dict(free_weight=0.0, noise_weight=0.0, learned_weight=1.0, deterministic=True)),
+            ("free_only", dict(free_weight=config.free_weight, noise_weight=0.0, learned_weight=0.0, deterministic=True)),
+            ("noise_only", dict(free_weight=0.0, noise_weight=config.noise_weight, learned_weight=0.0, deterministic=False)),
+        ]
+        for name, overrides in ablations:
+            if name == "noise_only" and config.noise_weight <= 0.0:
+                continue
+            ablation = simulate_direct_flux_generation(
+                model,
+                result.labels,
+                num_steps=int(args.sample_steps),
+                deterministic=bool(overrides.pop("deterministic")),
+                device=device,
+                seed=int(args.seed) + 100 + len(name),
+                use_amp=not bool(args.no_amp),
+                show_progress=False,
+                initial_states=result.sources,
+                free_weight=float(overrides["free_weight"]),
+                noise_weight=float(overrides["noise_weight"]),
+                learned_weight=float(overrides["learned_weight"]),
+            )
+            out_png = args.out_dir / f"experiment10_samples_{name}.png"
+            try:
+                save_flux_samples_grid(ablation.samples, ablation.labels, out_png, grid_size=config.grid_size)
+                print(f"Saved ablation preview: {out_png}")
+            except RuntimeError as exc:
+                print(f"Skipping {name} ablation PNG: {exc}")
+
     ent, max_mass = _samples_stats(result.samples)
     print(f"Saved checkpoint: {ckpt_path}")
     print(f"Saved samples: {samples_path}")
     print(f"Final clipping fraction: {result.clipping_fraction:.4f}")
     print(f"Final sample entropy: {ent:.4f}; mean max pixel mass: {max_mass:.4f}")
+    print(
+        "Step component RMS: "
+        f"learned={0.0 if result.learned_step_rms is None else result.learned_step_rms:.4g}, "
+        f"free={0.0 if result.free_step_rms is None else result.free_step_rms:.4g}, "
+        f"noise={0.0 if result.noise_step_rms is None else result.noise_step_rms:.4g}, "
+        f"free/learned={0.0 if result.free_to_learned_ratio is None else result.free_to_learned_ratio:.3f}, "
+        f"noise/learned={0.0 if result.noise_to_learned_ratio is None else result.noise_to_learned_ratio:.3f}"
+    )
     print(
         "Source diagnostics: "
         f"unique={source_metrics['source_unique_count']:.0f}, "
