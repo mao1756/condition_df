@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-r"""Example 10/10b/10c/10d/10e/10g: MNIST generation with directly learned Eulerian edge fluxes.
+r"""Example 10/10b/10c/10d/10e/10g/10h: MNIST generation with directly learned Eulerian edge fluxes.
 
 The manuscript's fixed-grid h-transform adds a conservative edge flux
 
@@ -31,7 +31,7 @@ predict the h-transform conditioning flux, i.e. the desired total transport
 flux minus the free Dirichlet drift, while on-policy/step losses can use the
 same free/noisy SDE weights as the sampler.  The default remains learned-only
 for quick deterministic debugging; pass the SDE curriculum/free-aware flags to
-train and sample with stochastic dynamics.
+train and sample with stochastic dynamics.  Experiment 10h merges the rollout-sharpening machinery back into stochastic training, replaces transposed-convolution upsampling by resize-conv by default, and can project learned edge fluxes to their minimum-energy divergence-equivalent part to suppress checkerboard/curl artifacts.
 """
 
 import argparse
@@ -56,11 +56,14 @@ IntArray = NDArray[np.int64]
 
 TARGET_MODES = ("poisson-flow", "poisson-ot-flow", "class-mean-flow", "terminal-score")
 SOURCE_MODES = ("lowfreq", "uniform-plus-lowfreq", "blurred-dirichlet", "dirichlet", "class-lowres-prior", "target-lowres-prior")
-VELOCITY_TARGET_MODES = ("constant", "residual")
+VELOCITY_TARGET_MODES = ("constant", "residual", "mixed")
 TAU_SAMPLING_MODES = ("uniform", "endpoint-mixture")
 OT_COST_MODES = ("lowres", "pixel")
 OT_MATCH_MODES = ("minibatch", "nearest", "topk")
 EDGE_ALPHA_MODES = ("legacy", "grid")
+ON_POLICY_PREFIX_MODES = ("short", "uniform", "late-biased")
+UPSAMPLE_MODES = ("transpose", "resize-conv")
+FLUX_PARAMETERIZATION_MODES = ("edge", "projected")
 
 __all__ = [
     "DirectFluxMNISTConfig",
@@ -71,6 +74,9 @@ __all__ = [
     "ClasswiseOTCache",
     "OT_MATCH_MODES",
     "EDGE_ALPHA_MODES",
+    "ON_POLICY_PREFIX_MODES",
+    "UPSAMPLE_MODES",
+    "FLUX_PARAMETERIZATION_MODES",
     "DirectFluxUNet",
     "edge_alpha_value",
     "natural_horizon",
@@ -82,9 +88,18 @@ __all__ = [
     "edge_noise_std_channels",
     "step_component_rms_torch",
     "poisson_flux_from_velocity_torch",
+    "project_edge_flux_torch",
+    "flux_curl_torch",
+    "sample_total_variation_torch",
+    "sample_checkerboard_energy_torch",
     "build_classwise_ot_cache",
     "training_target_flux_torch",
     "make_on_policy_training_batch",
+    "direct_flux_rollout_consistency_loss",
+    "image_total_variation",
+    "checkerboard_energy_torch",
+    "flux_curl_torch",
+    "apply_flux_parameterization_torch",
     "flux_divergence_torch",
     "eulerian_flux_step_torch",
     "eulerian_flux_step_differentiable_torch",
@@ -129,6 +144,8 @@ class DirectFluxMNISTConfig:
     source_lowfreq_size: int = 7
     source_blur_sigma: float = 1.0
     condition_on_source: bool = True
+    upsample_mode: str = "resize-conv"
+    flux_parameterization: str = "projected"
 
     # Experiment 10e: the default target matching is stable across batches.
     # ``nearest`` chooses a same-label target by global low-resolution features;
@@ -170,8 +187,8 @@ class DirectFluxMNISTConfig:
     same_noise_step_loss: bool = True
     sde_curriculum: bool = False
     sde_ramp_steps: int = 3000
-    target_free_weight: float = 0.02
-    target_noise_weight: float = 0.003
+    target_free_weight: float = 0.015
+    target_noise_weight: float = 0.002
 
     terminal_lambda: float = 3.0
     terminal_floor: float = 1e-3
@@ -182,7 +199,9 @@ class DirectFluxMNISTConfig:
     source_concentration: float = 1.0
     source_uniform_mix: float = 0.15
     state_jitter_weight: float = 0.0
-    velocity_target: str = "constant"
+    velocity_target: str = "mixed"
+    late_residual_fraction: float = 0.25
+    late_residual_prob: float = 0.50
     min_tau_fraction: float = 0.03
     bridge_power: float = 1.0
     flux_scale: float = 20.0
@@ -190,10 +209,22 @@ class DirectFluxMNISTConfig:
     divergence_loss_weight: float = 0.50
     node_loss_weight: float = 1.0
     step_loss_weight: float = 0.25
+    rollout_loss_weight: float = 0.15
+    rollout_loss_steps: int = 8
+    rollout_loss_batch_size: int = 64
+    rollout_loss_warmup_steps: int = 1500
+    image_grad_loss_weight: float = 0.05
+    curl_loss_weight: float = 0.01
+    edge_laplacian_loss_weight: float = 0.0
+    checkerboard_loss_weight: float = 0.001
 
-    on_policy_prob: float = 0.25
+    on_policy_prob: float = 0.40
     on_policy_warmup_steps: int = 1500
     on_policy_prefix_steps: int = 16
+    on_policy_prefix_mode: str = "uniform"
+    on_policy_min_prefix_fraction: float = 0.05
+    on_policy_max_prefix_fraction: float = 0.85
+    on_policy_batch_size: int = 64
 
     adaptive_sampling: bool = False
     clip_target: float = 0.03
@@ -302,12 +333,20 @@ class DirectFluxMNISTConfig:
             raise ValueError("source_uniform_mix must be in [0, 1)")
         if not isinstance(self.condition_on_source, bool):
             raise ValueError("condition_on_source must be a bool")
+        if self.upsample_mode not in UPSAMPLE_MODES:
+            raise ValueError(f"upsample_mode must be one of {UPSAMPLE_MODES}")
+        if self.flux_parameterization not in FLUX_PARAMETERIZATION_MODES:
+            raise ValueError(f"flux_parameterization must be one of {FLUX_PARAMETERIZATION_MODES}")
         if not (0.0 <= self.state_jitter_weight < 1.0):
             raise ValueError("state_jitter_weight must be in [0, 1)")
         if self.velocity_target not in VELOCITY_TARGET_MODES:
             raise ValueError(f"velocity_target must be one of {VELOCITY_TARGET_MODES}")
         if not (0.0 < self.min_tau_fraction <= 1.0):
             raise ValueError("min_tau_fraction must be in (0, 1]")
+        if not (0.0 <= self.late_residual_fraction <= 1.0):
+            raise ValueError("late_residual_fraction must be in [0, 1]")
+        if not (0.0 <= self.late_residual_prob <= 1.0):
+            raise ValueError("late_residual_prob must be in [0, 1]")
         if self.bridge_power <= 0.0:
             raise ValueError("bridge_power must be positive")
         if self.flux_scale <= 0.0:
@@ -320,12 +359,38 @@ class DirectFluxMNISTConfig:
             raise ValueError("node_loss_weight must be non-negative")
         if self.step_loss_weight < 0.0:
             raise ValueError("step_loss_weight must be non-negative")
+        if self.image_grad_loss_weight < 0.0:
+            raise ValueError("image_grad_loss_weight must be non-negative")
+        if self.rollout_loss_weight < 0.0:
+            raise ValueError("rollout_loss_weight must be non-negative")
+        if self.rollout_loss_steps < 0:
+            raise ValueError("rollout_loss_steps must be non-negative")
+        if self.rollout_loss_batch_size <= 0:
+            raise ValueError("rollout_loss_batch_size must be positive")
+        if self.rollout_loss_warmup_steps < 0:
+            raise ValueError("rollout_loss_warmup_steps must be non-negative")
+        if self.curl_loss_weight < 0.0:
+            raise ValueError("curl_loss_weight must be non-negative")
+        if self.edge_laplacian_loss_weight < 0.0:
+            raise ValueError("edge_laplacian_loss_weight must be non-negative")
+        if self.checkerboard_loss_weight < 0.0:
+            raise ValueError("checkerboard_loss_weight must be non-negative")
         if not (0.0 <= self.on_policy_prob <= 1.0):
             raise ValueError("on_policy_prob must be in [0, 1]")
         if self.on_policy_warmup_steps < 0:
             raise ValueError("on_policy_warmup_steps must be non-negative")
         if self.on_policy_prefix_steps < 0:
             raise ValueError("on_policy_prefix_steps must be non-negative")
+        if self.on_policy_prefix_mode not in ON_POLICY_PREFIX_MODES:
+            raise ValueError(f"on_policy_prefix_mode must be one of {ON_POLICY_PREFIX_MODES}")
+        if not (0.0 <= self.on_policy_min_prefix_fraction <= 1.0):
+            raise ValueError("on_policy_min_prefix_fraction must be in [0, 1]")
+        if not (0.0 <= self.on_policy_max_prefix_fraction <= 1.0):
+            raise ValueError("on_policy_max_prefix_fraction must be in [0, 1]")
+        if self.on_policy_min_prefix_fraction > self.on_policy_max_prefix_fraction:
+            raise ValueError("on_policy_min_prefix_fraction must be <= max fraction")
+        if self.on_policy_batch_size <= 0:
+            raise ValueError("on_policy_batch_size must be positive")
         if not isinstance(self.adaptive_sampling, bool):
             raise ValueError("adaptive_sampling must be a bool")
         if not (0.0 <= self.clip_target <= 1.0):
@@ -377,6 +442,7 @@ class FluxTrainingBatch:
     source_labels: IntArray | None = None
     target_indices: IntArray | None = None
     target_velocity_mode: str | None = None
+    step_index: int | None = None
     train_free_weight: float = 0.0
     train_noise_weight: float = 0.0
 
@@ -401,6 +467,10 @@ class FluxGenerationResult:
     noise_step_rms: float | None = None
     free_to_learned_ratio: float | None = None
     noise_to_learned_ratio: float | None = None
+    sample_entropy: float | None = None
+    sample_total_variation: float | None = None
+    sample_checkerboard_energy: float | None = None
+    sample_highfreq_fraction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -661,6 +731,31 @@ class _ConvBlock(nn.Module):
         return self.net(x)
 
 
+
+
+class _UpsampleBlock(nn.Module):
+    """Anti-checkerboard upsampling block.
+
+    Transposed convolutions can inject a grid texture into generated edge fluxes.
+    The resize-conv path upsamples by interpolation and then applies an ordinary
+    circular convolution.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int, mode: str) -> None:
+        super().__init__()
+        if mode == "transpose":
+            self.net = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1)
+        elif mode == "resize-conv":
+            self.net = nn.Sequential(
+                nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+                nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode="circular"),
+            )
+        else:
+            raise ValueError(f"unknown upsample mode: {mode}")
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.net(x)
+
 class DirectFluxUNet(nn.Module):
     """Small label-conditioned U-Net that predicts normalized edge fluxes."""
 
@@ -687,9 +782,9 @@ class DirectFluxUNet(nn.Module):
         self.enc2 = _ConvBlock(2 * channels, 2 * channels)
         self.down2 = nn.Conv2d(2 * channels, 4 * channels, kernel_size=4, stride=2, padding=1)
         self.mid = _ConvBlock(4 * channels, 4 * channels)
-        self.up2 = nn.ConvTranspose2d(4 * channels, 2 * channels, kernel_size=4, stride=2, padding=1)
+        self.up2 = _UpsampleBlock(4 * channels, 2 * channels, str(config.upsample_mode))
         self.dec2 = _ConvBlock(4 * channels, 2 * channels)
-        self.up1 = nn.ConvTranspose2d(2 * channels, channels, kernel_size=4, stride=2, padding=1)
+        self.up1 = _UpsampleBlock(2 * channels, channels, str(config.upsample_mode))
         self.dec1 = _ConvBlock(2 * channels, channels)
         self.out = nn.Conv2d(channels, 2, kernel_size=3, padding=1, padding_mode="circular")
 
@@ -763,7 +858,8 @@ class DirectFluxUNet(nn.Module):
         source_masses: Tensor | None = None,
     ) -> Tensor:
         """Return physical flux rates, not normalized training targets."""
-        return float(self.config.flux_scale) * self.forward(tau, masses, labels, source_masses)
+        raw = float(self.config.flux_scale) * self.forward(tau, masses, labels, source_masses)
+        return apply_flux_parameterization_torch(raw, masses, self.config)
 
 
 # ---------------------------------------------------------------------------
@@ -934,11 +1030,40 @@ def flux_divergence_torch(flux: Tensor) -> Tensor:
     return torch.roll(fx, shifts=1, dims=-1) - fx + torch.roll(fy, shifts=1, dims=-2) - fy
 
 
+def _autocast_disabled_for(device_type: str):
+    """Return an autocast-disabled context for FFT/spectral linear algebra.
+
+    CUDA autocast can cast tensors entering ``torch.fft`` to ``float16``.  cuFFT
+    only supports half-precision FFTs for power-of-two signal sizes, so the
+    28x28 MNIST Poisson projection must opt out of autocast and run in at least
+    float32.  The helper is intentionally small and conservative so it works
+    across PyTorch versions.
+    """
+    amp_mod = getattr(torch, "amp", None)
+    autocast = getattr(amp_mod, "autocast", None)
+    if autocast is not None:
+        try:
+            return autocast(device_type=device_type, enabled=False)
+        except TypeError:
+            try:
+                return autocast(device_type, enabled=False)
+            except TypeError:
+                pass
+    if device_type == "cuda" and hasattr(torch, "cuda") and hasattr(torch.cuda, "amp"):
+        return torch.cuda.amp.autocast(enabled=False)
+    return nullcontext()
+
+
 def poisson_flux_from_velocity_torch(velocity: Tensor, *, grid_size: int | None = None) -> Tensor:
     """Return minimum-energy periodic edge flux with ``div flux = velocity``.
 
     ``velocity`` may have shape ``(B, H * W)`` or ``(B, H, W)`` and must have
     approximately zero spatial mean.  The zero mode is removed explicitly.
+
+    The spectral solve is always performed in at least float32 with autocast
+    disabled.  This is required on CUDA for the 28x28 MNIST grid: cuFFT cannot
+    compute half-precision FFTs on non-power-of-two sizes.  Half/bfloat16 inputs
+    therefore return a float32 projected flux.
     """
     if velocity.ndim == 2:
         if grid_size is None:
@@ -956,24 +1081,150 @@ def poisson_flux_from_velocity_torch(velocity: Tensor, *, grid_size: int | None 
     h, w = int(v.shape[-2]), int(v.shape[-1])
     if h != w:
         raise ValueError("only square grids are supported")
-    v = v - v.mean(dim=(-2, -1), keepdim=True)
-    v_hat = torch.fft.rfft2(v)
-    ky = torch.arange(h, device=v.device, dtype=v.dtype).view(h, 1)
-    kx = torch.arange(w // 2 + 1, device=v.device, dtype=v.dtype).view(1, w // 2 + 1)
-    two_pi = 2.0 * math.pi
-    denom = 2.0 * torch.cos(two_pi * kx / float(w)) - 2.0
-    denom = denom + 2.0 * torch.cos(two_pi * ky / float(h)) - 2.0
-    safe_denom = denom.clamp(max=-1e-12)
-    psi_hat = torch.zeros_like(v_hat)
-    psi_hat[..., 0, 0] = 0.0
-    psi_hat[..., 1:, :] = v_hat[..., 1:, :] / safe_denom[1:, :]
-    if w // 2 + 1 > 1:
-        psi_hat[..., 0, 1:] = v_hat[..., 0, 1:] / safe_denom[0, 1:]
-    psi = torch.fft.irfft2(psi_hat, s=(h, w))
-    fx = psi - torch.roll(psi, shifts=-1, dims=-1)
-    fy = psi - torch.roll(psi, shifts=-1, dims=-2)
-    return torch.stack([fx, fy], dim=1)
 
+    if v.dtype == torch.float64:
+        compute_dtype = torch.float64
+        return_dtype = torch.float64
+    else:
+        compute_dtype = torch.float32
+        return_dtype = torch.float32
+
+    with _autocast_disabled_for(v.device.type):
+        v_work = v.to(dtype=compute_dtype)
+        v_work = v_work - v_work.mean(dim=(-2, -1), keepdim=True)
+        v_hat = torch.fft.rfft2(v_work)
+        ky = torch.arange(h, device=v_work.device, dtype=compute_dtype).view(h, 1)
+        kx = torch.arange(w // 2 + 1, device=v_work.device, dtype=compute_dtype).view(1, w // 2 + 1)
+        two_pi = 2.0 * math.pi
+        denom = 2.0 * torch.cos(two_pi * kx / float(w)) - 2.0
+        denom = denom + 2.0 * torch.cos(two_pi * ky / float(h)) - 2.0
+        safe_denom = denom.clamp(max=-1e-12)
+        psi_hat = torch.zeros_like(v_hat)
+        psi_hat[..., 0, 0] = 0.0
+        psi_hat[..., 1:, :] = v_hat[..., 1:, :] / safe_denom[1:, :]
+        if w // 2 + 1 > 1:
+            psi_hat[..., 0, 1:] = v_hat[..., 0, 1:] / safe_denom[0, 1:]
+        psi = torch.fft.irfft2(psi_hat, s=(h, w))
+        fx = psi - torch.roll(psi, shifts=-1, dims=-1)
+        fy = psi - torch.roll(psi, shifts=-1, dims=-2)
+        flux = torch.stack([fx, fy], dim=1)
+    return flux.to(dtype=return_dtype)
+
+
+
+
+def apply_flux_parameterization_torch(flux: Tensor, masses: Tensor | None, config: DirectFluxMNISTConfig) -> Tensor:
+    """Apply the configured edge-flux structure.
+
+    ``edge`` returns the raw two-channel field.  ``projected`` keeps the same
+    conservative node velocity but replaces the field by the minimum-energy
+    periodic flux.  This removes arbitrary curl/gauge components that can
+    interact with noise/edge limiting and show up as checkerboard texture.
+    """
+    if str(config.flux_parameterization) == "edge":
+        return flux
+    if str(config.flux_parameterization) == "projected":
+        return poisson_flux_from_velocity_torch(flux_divergence_torch(flux), grid_size=int(config.grid_size))
+    raise ValueError(f"unknown flux_parameterization: {config.flux_parameterization}")
+
+
+def flux_curl_torch(flux: Tensor) -> Tensor:
+    """Periodic discrete curl of an edge flux field."""
+    if flux.ndim != 4 or flux.shape[1] != 2:
+        raise ValueError("flux must have shape (B, 2, H, W)")
+    fx = flux[:, 0]
+    fy = flux[:, 1]
+    return torch.roll(fy, shifts=-1, dims=-1) - fy - (torch.roll(fx, shifts=-1, dims=-2) - fx)
+
+
+def edge_laplacian_energy_torch(flux: Tensor) -> Tensor:
+    """Small smoothness penalty on edge flux channels."""
+    lap = (
+        torch.roll(flux, shifts=1, dims=-1)
+        + torch.roll(flux, shifts=-1, dims=-1)
+        + torch.roll(flux, shifts=1, dims=-2)
+        + torch.roll(flux, shifts=-1, dims=-2)
+        - 4.0 * flux
+    )
+    return lap.square().mean()
+
+
+def image_total_variation(states: Tensor, *, grid_size: int | None = None) -> Tensor:
+    """Mean anisotropic total variation of mass images."""
+    if states.ndim == 2:
+        n = int(grid_size or round(math.sqrt(int(states.shape[1]))))
+        img = states.reshape(-1, n, n)
+    elif states.ndim == 3:
+        img = states
+    else:
+        raise ValueError("states must have shape (B,N) or (B,H,W)")
+    dx = torch.roll(img, shifts=-1, dims=-1) - img
+    dy = torch.roll(img, shifts=-1, dims=-2) - img
+    return (dx.abs() + dy.abs()).flatten(1).sum(dim=1).mean()
+
+
+def image_gradient_mse_torch(a: Tensor, b: Tensor, *, grid_size: int | None = None) -> Tensor:
+    """Finite-difference image-gradient MSE for sharpening losses."""
+    if a.ndim == 2:
+        n = int(grid_size or round(math.sqrt(int(a.shape[1]))))
+        ai = a.reshape(-1, n, n)
+        bi = b.reshape(-1, n, n)
+    else:
+        ai = a
+        bi = b
+    adx = torch.roll(ai, shifts=-1, dims=-1) - ai
+    ady = torch.roll(ai, shifts=-1, dims=-2) - ai
+    bdx = torch.roll(bi, shifts=-1, dims=-1) - bi
+    bdy = torch.roll(bi, shifts=-1, dims=-2) - bi
+    return F.mse_loss(adx, bdx) + F.mse_loss(ady, bdy)
+
+
+def checkerboard_energy_torch(states: Tensor, *, grid_size: int | None = None) -> Tensor:
+    """Energy at the alternating parity pattern; high values flag checkerboard artifacts."""
+    if states.ndim == 2:
+        n = int(grid_size or round(math.sqrt(int(states.shape[1]))))
+        img = states.reshape(-1, n, n)
+    elif states.ndim == 3:
+        img = states
+        n = int(img.shape[-1])
+    else:
+        raise ValueError("states must have shape (B,N) or (B,H,W)")
+    rows = torch.arange(n, device=img.device).view(n, 1)
+    cols = torch.arange(n, device=img.device).view(1, n)
+    pattern = ((rows + cols) % 2).to(dtype=img.dtype) * 2.0 - 1.0
+    coeff = (img * pattern).flatten(1).sum(dim=1)
+    return coeff.square().mean()
+
+
+def highfreq_fraction_torch(states: Tensor, *, grid_size: int | None = None) -> Tensor:
+    """Fraction of FFT power outside the low-frequency central band."""
+    if states.ndim == 2:
+        n = int(grid_size or round(math.sqrt(int(states.shape[1]))))
+        img = states.reshape(-1, n, n)
+    else:
+        img = states
+        n = int(img.shape[-1])
+    fft = torch.fft.fft2(img)
+    power = fft.real.square() + fft.imag.square()
+    ky = torch.fft.fftfreq(n, device=img.device).abs().view(n, 1)
+    kx = torch.fft.fftfreq(n, device=img.device).abs().view(1, n)
+    high = (kx > 0.25) | (ky > 0.25)
+    return power[:, high].sum(dim=1).div(power.flatten(1).sum(dim=1).clamp_min(1e-30)).mean()
+
+
+def project_edge_flux_torch(flux: Tensor, *, grid_size: int | None = None) -> Tensor:
+    """Project an arbitrary edge flux to the minimum-energy flux with the same divergence."""
+    return poisson_flux_from_velocity_torch(flux_divergence_torch(flux), grid_size=grid_size or int(flux.shape[-1]))
+
+
+def sample_total_variation_torch(states: Tensor, *, grid_size: int | None = None) -> Tensor:
+    """Alias used by diagnostics/tests for image total variation."""
+    return image_total_variation(states, grid_size=grid_size)
+
+
+def sample_checkerboard_energy_torch(states: Tensor, *, grid_size: int | None = None) -> Tensor:
+    """Alias used by diagnostics/tests for alternating-pixel energy."""
+    return checkerboard_energy_torch(states, grid_size=grid_size)
 
 # ---------------------------------------------------------------------------
 # Training batches, source distributions, loss, and simulator
@@ -1528,6 +1779,7 @@ def sample_flux_training_batch(
         source_indices=source_batch.indices,
         source_labels=source_batch.labels,
         target_indices=target_indices,
+        step_index=None if step_index is None else int(step_index),
         train_free_weight=float(train_free_weight),
         train_noise_weight=float(train_noise_weight),
     )
@@ -1543,6 +1795,21 @@ def training_target_flux_torch(batch: FluxTrainingBatch, config: DirectFluxMNIST
         velocity = (batch.targets - batch.states) / remaining
     elif velocity_mode == "constant":
         velocity = (batch.targets - batch.sources) / float(horizon)
+    elif velocity_mode == "mixed":
+        constant_velocity = (batch.targets - batch.sources) / float(horizon)
+        remaining = batch.tau.clamp_min(float(config.min_tau_fraction) * float(horizon)).view(-1, 1)
+        residual_velocity = (batch.targets - batch.states) / remaining
+        tau_fraction = batch.tau / float(horizon)
+        late_mask = tau_fraction <= float(config.late_residual_fraction)
+        if float(config.late_residual_prob) < 1.0:
+            # Deterministic pseudo-random gate so the total teacher flux is
+            # identical for free-aware and non-free-aware configs with the same
+            # batch.  This keeps regression tests and paired losses stable while
+            # still mixing constant and residual late targets across examples.
+            seed_feature = (batch.tau / float(horizon)) * 12.9898 + batch.states[:, 0] * 78.233
+            gate = torch.frac(torch.sin(seed_feature) * 43758.5453).abs()
+            late_mask = late_mask & (gate < float(config.late_residual_prob))
+        velocity = torch.where(late_mask.view(-1, 1), residual_velocity, constant_velocity)
     else:
         raise ValueError(f"unknown velocity target mode: {velocity_mode}")
     velocity = velocity - velocity.mean(dim=1, keepdim=True)
@@ -1552,13 +1819,90 @@ def training_target_flux_torch(batch: FluxTrainingBatch, config: DirectFluxMNIST
     return total_flux
 
 
+
+def direct_flux_rollout_consistency_loss(
+    model: DirectFluxUNet,
+    batch: FluxTrainingBatch,
+    *,
+    max_items: int | None = None,
+    steps: int | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Multi-step sampler-consistency loss on a small microbatch.
+
+    The prediction is unrolled through the same differentiable conservative
+    clipped step used by the one-step loss.  The teacher branch is unrolled with
+    the corresponding supervised conditioning flux and no gradients.
+    """
+    config = model.config
+    rollout_steps = int(config.rollout_loss_steps if steps is None else steps)
+    if rollout_steps <= 0:
+        z = batch.states.new_tensor(0.0)
+        return z, z
+    count = int(batch.states.shape[0])
+    if max_items is None:
+        max_items = int(config.rollout_loss_batch_size)
+    count = min(count, int(max_items))
+    if count <= 0:
+        z = batch.states.new_tensor(0.0)
+        return z, z
+    sl = slice(0, count)
+    horizon = max(float(natural_horizon(config)), 1e-12)
+    dt = horizon / float(max(int(config.num_steps), 1))
+    pred_state = batch.states[sl]
+    teacher_state = batch.states[sl].detach()
+    labels = batch.labels[sl]
+    sources = batch.sources[sl]
+    targets = batch.targets[sl]
+    tau = batch.tau[sl]
+    free_w = float(batch.train_free_weight) if bool(config.stochastic_step_loss) else 0.0
+    endpoint_l2 = pred_state.new_tensor(0.0)
+    for _ in range(rollout_steps):
+        pred_flux = model.predict_flux(tau, pred_state, labels, sources)
+        pred_state = eulerian_flux_step_differentiable_torch(
+            pred_state,
+            pred_flux,
+            dt,
+            config,
+            free_weight=free_w,
+            learned_weight=1.0,
+        )
+        with torch.no_grad():
+            teacher_batch = FluxTrainingBatch(
+                tau=tau,
+                states=teacher_state,
+                labels=labels,
+                targets=targets,
+                sources=sources,
+                target_velocity_mode=batch.target_velocity_mode,
+                step_index=batch.step_index,
+                train_free_weight=batch.train_free_weight,
+                train_noise_weight=batch.train_noise_weight,
+            )
+            teacher_flux = training_target_flux_torch(teacher_batch, config)
+            teacher_state = eulerian_flux_step_differentiable_torch(
+                teacher_state,
+                teacher_flux,
+                dt,
+                config,
+                free_weight=free_w,
+                learned_weight=1.0,
+            )
+            tau = (tau - dt).clamp_min(0.0)
+    scale = float(config.grid_size * config.grid_size)
+    rollout_l2 = F.mse_loss(pred_state * scale, teacher_state * scale)
+    endpoint_l2 = F.mse_loss(pred_state * scale, targets * scale)
+    return rollout_l2, endpoint_l2
+
 def direct_flux_matching_loss(
     model: DirectFluxUNet,
     batch: FluxTrainingBatch,
+    *,
+    step_index: int | None = None,
 ) -> tuple[Tensor, dict[str, float]]:
     """Return the direct-flux regression loss and scalar diagnostics."""
     config = model.config
-    pred_norm = model(batch.tau, batch.states, batch.labels, batch.sources)
+    raw_pred_norm = model(batch.tau, batch.states, batch.labels, batch.sources)
+    pred_norm = apply_flux_parameterization_torch(raw_pred_norm, batch.states, config)
     with torch.no_grad():
         target_flux = training_target_flux_torch(batch, config)
         target_norm = (target_flux / float(config.flux_scale)).clamp(
@@ -1602,11 +1946,30 @@ def direct_flux_matching_loss(
         density_scale = float(config.grid_size * config.grid_size)
         step_loss = F.mse_loss(pred_next * density_scale, target_next * density_scale)
 
+    rollout_loss = pred_norm.new_tensor(0.0)
+    rollout_endpoint_l2 = pred_norm.new_tensor(0.0)
+    rollout_ready = batch.step_index is None or int(batch.step_index) >= int(config.rollout_loss_warmup_steps)
+    if rollout_ready and float(config.rollout_loss_weight) > 0.0 and int(config.rollout_loss_steps) > 0:
+        rollout_loss, rollout_endpoint_l2 = direct_flux_rollout_consistency_loss(model, batch)
+
+    image_grad_loss = pred_norm.new_tensor(0.0)
+    if float(config.image_grad_loss_weight) > 0.0 and float(config.step_loss_weight) > 0.0:
+        image_grad_loss = image_gradient_mse_torch(pred_next, target_next, grid_size=int(config.grid_size))
+
+    curl_loss = flux_curl_torch(raw_pred_norm).square().mean()
+    edge_lap_loss = edge_laplacian_energy_torch(raw_pred_norm)
+    checker_loss = checkerboard_energy_torch(pred_div, grid_size=int(config.grid_size))
+
     loss = (
         flux_loss
         + float(config.divergence_loss_weight) * div_loss
         + float(config.node_loss_weight) * node_loss
         + float(config.step_loss_weight) * step_loss
+        + float(config.rollout_loss_weight) * rollout_loss
+        + float(config.image_grad_loss_weight) * image_grad_loss
+        + float(config.curl_loss_weight) * curl_loss
+        + float(config.edge_laplacian_loss_weight) * edge_lap_loss
+        + float(config.checkerboard_loss_weight) * checker_loss
     )
     with torch.no_grad():
         pred_rms = pred_norm.square().mean().sqrt()
@@ -1631,6 +1994,12 @@ def direct_flux_matching_loss(
         "div_loss": float(div_loss.detach().cpu()),
         "node_loss": float(node_loss.detach().cpu()),
         "step_loss": float(step_loss.detach().cpu()),
+        "rollout_loss": float(rollout_loss.detach().cpu()),
+        "rollout_endpoint_l2": float(rollout_endpoint_l2.detach().cpu()),
+        "image_grad_loss": float(image_grad_loss.detach().cpu()),
+        "curl_loss": float(curl_loss.detach().cpu()),
+        "edge_laplacian_loss": float(edge_lap_loss.detach().cpu()),
+        "checkerboard_loss": float(checker_loss.detach().cpu()),
         "div_cos": float(div_cos.detach().cpu()),
         "pred_rms": float(pred_rms.detach().cpu()),
         "target_rms": float(target_rms.detach().cpu()),
@@ -1680,8 +2049,13 @@ def make_on_policy_training_batch(
         ot_cache=ot_cache,
         step_index=step_index,
     )
-    max_prefix = min(int(config.on_policy_prefix_steps), int(config.num_steps) - 1)
-    if max_prefix <= 0:
+    if str(config.on_policy_prefix_mode) == "short":
+        min_prefix = 1
+        max_prefix = min(int(config.on_policy_prefix_steps), int(config.num_steps) - 1)
+    else:
+        min_prefix = max(1, int(round(float(config.on_policy_min_prefix_fraction) * float(config.num_steps))))
+        max_prefix = min(int(config.num_steps) - 1, int(round(float(config.on_policy_max_prefix_fraction) * float(config.num_steps))))
+    if max_prefix <= 0 or max_prefix < min_prefix:
         return FluxTrainingBatch(
             tau=base.tau,
             states=base.states,
@@ -1692,10 +2066,15 @@ def make_on_policy_training_batch(
             source_labels=base.source_labels,
             target_indices=base.target_indices,
             target_velocity_mode="residual",
+            step_index=base.step_index,
             train_free_weight=base.train_free_weight,
             train_noise_weight=base.train_noise_weight,
         )
-    prefix_steps = int(rng.integers(1, max_prefix + 1))
+    if str(config.on_policy_prefix_mode) == "late-biased":
+        u = float(rng.random())
+        prefix_steps = int(round(min_prefix + (max_prefix - min_prefix) * math.sqrt(u)))
+    else:
+        prefix_steps = int(rng.integers(min_prefix, max_prefix + 1))
     horizon = float(natural_horizon(config))
     dt = horizon / float(max(int(config.num_steps), 1))
     states = base.sources.clone()
@@ -1736,6 +2115,7 @@ def make_on_policy_training_batch(
         source_labels=base.source_labels,
         target_indices=base.target_indices,
         target_velocity_mode="residual",
+        step_index=base.step_index,
         train_free_weight=base.train_free_weight,
         train_noise_weight=base.train_noise_weight,
     )
@@ -1797,7 +2177,14 @@ def train_direct_flux_model(
         "div_loss": [],
         "node_loss": [],
         "step_loss": [],
+        "rollout_loss": [],
+        "rollout_endpoint_l2": [],
+        "image_grad_loss": [],
+        "curl_loss": [],
+        "edge_laplacian_loss": [],
+        "checkerboard_loss": [],
         "on_policy": [],
+        "on_policy_tau_frac": [],
         "div_cos": [],
         "pred_rms": [],
         "target_rms": [],
@@ -1827,7 +2214,7 @@ def train_direct_flux_model(
                 images,
                 labels,
                 model.config,
-                batch_size=int(batch_size),
+                batch_size=min(int(batch_size), int(model.config.on_policy_batch_size)),
                 device=resolved_device,
                 rng=rng,
                 class_means=class_means,
@@ -1849,8 +2236,9 @@ def train_direct_flux_model(
         optimizer.zero_grad(set_to_none=True)
         context = _cuda_autocast(enabled=True) if amp_enabled else nullcontext()
         with context:
-            loss, metrics = direct_flux_matching_loss(model, batch)
+            loss, metrics = direct_flux_matching_loss(model, batch, step_index=int(step_index))
         metrics["on_policy"] = 1.0 if use_on_policy else 0.0
+        metrics["on_policy_tau_frac"] = float((batch.tau / max(natural_horizon(model.config), 1e-12)).mean().detach().cpu()) if use_on_policy else -1.0
         scaler.scale(loss).backward()
         if grad_clip > 0.0:
             scaler.unscale_(optimizer)
@@ -1869,9 +2257,13 @@ def train_direct_flux_model(
                 loss=metrics["loss"],
                 div_cos=metrics["div_cos"],
                 step_l=metrics.get("step_loss", 0.0),
+                roll=metrics.get("rollout_loss", 0.0),
+                img_g=metrics.get("image_grad_loss", 0.0),
+                curl=metrics.get("curl_loss", 0.0),
                 pred=metrics["pred_rms"],
                 tgt=metrics["target_rms"],
                 onp=metrics.get("on_policy", 0.0),
+                on_tau=metrics.get("on_policy_tau_frac", -1.0),
                 free_r=metrics.get("free_to_learned_ratio", 0.0),
                 noise_r=metrics.get("noise_to_learned_ratio", 0.0),
                 mean_p=float(anchor_prob) if model.config.target_mode in {"poisson-flow", "poisson-ot-flow"} else 0.0,
@@ -2270,6 +2662,10 @@ def simulate_direct_flux_generation(
             f"free/learned={component_means['free_to_learned_ratio']:.3f}, "
             f"noise/learned={component_means['noise_to_learned_ratio']:.3f}"
         )
+    sample_entropy = float(_mass_entropy_torch(states).mean().detach().cpu())
+    sample_tv = float(image_total_variation(states, grid_size=int(cfg.grid_size)).detach().cpu())
+    sample_checker = float(checkerboard_energy_torch(states, grid_size=int(cfg.grid_size)).detach().cpu())
+    sample_highfreq = float(highfreq_fraction_torch(states, grid_size=int(cfg.grid_size)).detach().cpu())
     return FluxGenerationResult(
         samples=states.detach().cpu().numpy().astype(np.float64),
         labels=labels_t.detach().cpu().numpy().astype(np.int64),
@@ -2287,6 +2683,10 @@ def simulate_direct_flux_generation(
         noise_step_rms=component_means["noise_step_rms"],
         free_to_learned_ratio=component_means["free_to_learned_ratio"],
         noise_to_learned_ratio=component_means["noise_to_learned_ratio"],
+        sample_entropy=sample_entropy,
+        sample_total_variation=sample_tv,
+        sample_checkerboard_energy=sample_checker,
+        sample_highfreq_fraction=sample_highfreq,
     )
 
 
@@ -2636,24 +3036,40 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--no-same-noise-step-loss", dest="same_noise_step_loss", action="store_false")
     parser.add_argument("--sde-curriculum", action="store_true")
     parser.add_argument("--sde-ramp-steps", type=int, default=3000)
-    parser.add_argument("--target-free-weight", type=float, default=0.02)
-    parser.add_argument("--target-noise-weight", type=float, default=0.003)
+    parser.add_argument("--target-free-weight", type=float, default=0.015)
+    parser.add_argument("--target-noise-weight", type=float, default=0.002)
     parser.add_argument("--flux-scale", type=float, default=20.0)
     parser.add_argument("--target-flux-clip", type=float, default=10.0)
     parser.add_argument("--divergence-loss-weight", type=float, default=0.50)
     parser.add_argument("--node-loss-weight", type=float, default=1.0)
     parser.add_argument("--step-loss-weight", type=float, default=0.25)
+    parser.add_argument("--image-grad-loss-weight", type=float, default=0.05)
+    parser.add_argument("--rollout-loss-weight", type=float, default=0.15)
+    parser.add_argument("--rollout-loss-steps", type=int, default=8)
+    parser.add_argument("--rollout-loss-batch-size", type=int, default=64)
+    parser.add_argument("--rollout-loss-warmup-steps", type=int, default=1500)
+    parser.add_argument("--curl-loss-weight", type=float, default=0.01)
+    parser.add_argument("--edge-laplacian-loss-weight", type=float, default=0.0)
+    parser.add_argument("--checkerboard-loss-weight", type=float, default=0.001)
     parser.add_argument("--state-jitter-weight", type=float, default=0.0)
-    parser.add_argument("--velocity-target", choices=VELOCITY_TARGET_MODES, default="constant")
+    parser.add_argument("--velocity-target", choices=VELOCITY_TARGET_MODES, default="mixed")
     parser.add_argument("--min-tau-fraction", type=float, default=0.03)
+    parser.add_argument("--late-residual-fraction", type=float, default=0.25)
+    parser.add_argument("--late-residual-prob", type=float, default=0.50)
     parser.add_argument("--horizon-scale", type=float, default=1.0)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--edge-alpha-mode", choices=EDGE_ALPHA_MODES, default="legacy")
+    parser.add_argument("--upsample-mode", choices=UPSAMPLE_MODES, default="resize-conv")
+    parser.add_argument("--flux-parameterization", choices=FLUX_PARAMETERIZATION_MODES, default="projected")
     parser.add_argument("--terminal-lambda", type=float, default=3.0)
-    parser.add_argument("--on-policy-prob", type=float, default=0.25)
+    parser.add_argument("--on-policy-prob", type=float, default=0.40)
     parser.add_argument("--on-policy-warmup-steps", type=int, default=1500)
     parser.add_argument("--on-policy-prefix-steps", type=int, default=16)
+    parser.add_argument("--on-policy-prefix-mode", choices=ON_POLICY_PREFIX_MODES, default="uniform")
+    parser.add_argument("--on-policy-min-prefix-fraction", type=float, default=0.05)
+    parser.add_argument("--on-policy-max-prefix-fraction", type=float, default=0.85)
+    parser.add_argument("--on-policy-batch-size", type=int, default=64)
     parser.add_argument("--adaptive-sampling", action="store_true")
     parser.add_argument("--clip-target", type=float, default=0.03)
     parser.add_argument("--max-substeps", type=int, default=4)
@@ -2696,6 +3112,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         source_blur_sigma=float(args.source_blur_sigma),
         source_uniform_mix=float(args.source_uniform_mix),
         condition_on_source=bool(args.condition_on_source),
+        upsample_mode=str(args.upsample_mode),
+        flux_parameterization=str(args.flux_parameterization),
         ot_cost_mode=str(args.ot_cost_mode),
         ot_match_mode=str(args.ot_match_mode),
         ot_nearest_top_k=int(args.ot_nearest_top_k),
@@ -2727,13 +3145,27 @@ def main(argv: Sequence[str] | None = None) -> None:
         divergence_loss_weight=float(args.divergence_loss_weight),
         node_loss_weight=float(args.node_loss_weight),
         step_loss_weight=float(args.step_loss_weight),
+        image_grad_loss_weight=float(args.image_grad_loss_weight),
+        rollout_loss_weight=float(args.rollout_loss_weight),
+        rollout_loss_steps=int(args.rollout_loss_steps),
+        rollout_loss_batch_size=int(args.rollout_loss_batch_size),
+        rollout_loss_warmup_steps=int(args.rollout_loss_warmup_steps),
+        curl_loss_weight=float(args.curl_loss_weight),
+        edge_laplacian_loss_weight=float(args.edge_laplacian_loss_weight),
+        checkerboard_loss_weight=float(args.checkerboard_loss_weight),
         state_jitter_weight=float(args.state_jitter_weight),
         velocity_target=str(args.velocity_target),
         min_tau_fraction=float(args.min_tau_fraction),
+        late_residual_fraction=float(args.late_residual_fraction),
+        late_residual_prob=float(args.late_residual_prob),
         terminal_lambda=float(args.terminal_lambda),
         on_policy_prob=float(args.on_policy_prob),
         on_policy_warmup_steps=int(args.on_policy_warmup_steps),
         on_policy_prefix_steps=int(args.on_policy_prefix_steps),
+        on_policy_prefix_mode=str(args.on_policy_prefix_mode),
+        on_policy_min_prefix_fraction=float(args.on_policy_min_prefix_fraction),
+        on_policy_max_prefix_fraction=float(args.on_policy_max_prefix_fraction),
+        on_policy_batch_size=int(args.on_policy_batch_size),
         adaptive_sampling=bool(args.adaptive_sampling),
         clip_target=float(args.clip_target),
         max_substeps=int(args.max_substeps),
@@ -2741,15 +3173,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     device = torch.device(
         "cuda" if args.device is None and torch.cuda.is_available() else "cpu" if args.device is None else args.device
     )
-    print(f"Experiment 10g direct-flux MNIST on device={device}")
+    print(f"Experiment 10h direct-flux MNIST on device={device}")
     print(
         "Laptop-friendly settings: "
         f"target_mode={config.target_mode}, source_mode={config.source_mode}, "
         f"ot={config.ot_cost_mode}/{config.ot_lowres_size}, match={config.ot_match_mode}, tau={config.tau_sampling}, "
-        f"source_cond={config.condition_on_source}, velocity={config.velocity_target}, "
+        f"source_cond={config.condition_on_source}, upsample={config.upsample_mode}, flux_param={config.flux_parameterization}, velocity={config.velocity_target}, "
         f"free_aware={config.free_aware_target}, sde_curr={config.sde_curriculum}, edge_alpha={config.edge_alpha_mode}, "
         f"on_policy={config.on_policy_prob}, onp_sde=({config.on_policy_use_free},{config.on_policy_use_noise}), "
-        f"step_loss={config.step_loss_weight}, stochastic_step={config.stochastic_step_loss}, adaptive={config.adaptive_sampling}, "
+        f"step_loss={config.step_loss_weight}, rollout={config.rollout_loss_weight}/{config.rollout_loss_steps}, img_grad={config.image_grad_loss_weight}, curl={config.curl_loss_weight}, stochastic_step={config.stochastic_step_loss}, adaptive={config.adaptive_sampling}, "
         f"train_steps={args.train_steps}, batch={args.batch_size}, base_channels={args.base_channels}, "
         f"horizon={natural_horizon(config):.3e}, sample_steps={args.sample_steps}, "
         f"weights=(free={config.free_weight}, noise={config.noise_weight}, learned={config.learned_weight})"
@@ -2832,6 +3264,12 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "free_to_learned_ratio": result.free_to_learned_ratio,
                 "noise_to_learned_ratio": result.noise_to_learned_ratio,
             },
+            "sample_quality_metrics": {
+                "sample_entropy": result.sample_entropy,
+                "sample_total_variation": result.sample_total_variation,
+                "sample_checkerboard_energy": result.sample_checkerboard_energy,
+                "sample_highfreq_fraction": result.sample_highfreq_fraction,
+            },
         },
         ckpt_path,
     )
@@ -2855,6 +3293,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         noise_step_rms=np.asarray([0.0 if result.noise_step_rms is None else result.noise_step_rms], dtype=np.float64),
         free_to_learned_ratio=np.asarray([0.0 if result.free_to_learned_ratio is None else result.free_to_learned_ratio], dtype=np.float64),
         noise_to_learned_ratio=np.asarray([0.0 if result.noise_to_learned_ratio is None else result.noise_to_learned_ratio], dtype=np.float64),
+        sample_entropy=np.asarray([0.0 if result.sample_entropy is None else result.sample_entropy], dtype=np.float64),
+        sample_total_variation=np.asarray([0.0 if result.sample_total_variation is None else result.sample_total_variation], dtype=np.float64),
+        sample_checkerboard_energy=np.asarray([0.0 if result.sample_checkerboard_energy is None else result.sample_checkerboard_energy], dtype=np.float64),
+        sample_highfreq_fraction=np.asarray([0.0 if result.sample_highfreq_fraction is None else result.sample_highfreq_fraction], dtype=np.float64),
     )
     try:
         save_flux_samples_grid(result.samples, result.labels, png_path, grid_size=config.grid_size)
@@ -2864,7 +3306,9 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if bool(args.save_ablation_samples) and result.sources is not None:
         ablations = [
-            ("learned_only", dict(free_weight=0.0, noise_weight=0.0, learned_weight=1.0, deterministic=True)),
+            ("conditioning_only", dict(free_weight=0.0, noise_weight=0.0, learned_weight=1.0, deterministic=True)),
+            ("free_plus_conditioning_no_noise", dict(free_weight=config.free_weight, noise_weight=0.0, learned_weight=1.0, deterministic=True)),
+            ("full_stochastic", dict(free_weight=config.free_weight, noise_weight=config.noise_weight, learned_weight=1.0, deterministic=False)),
             ("free_only", dict(free_weight=config.free_weight, noise_weight=0.0, learned_weight=0.0, deterministic=True)),
             ("noise_only", dict(free_weight=0.0, noise_weight=config.noise_weight, learned_weight=0.0, deterministic=False)),
         ]
@@ -2897,6 +3341,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"Saved samples: {samples_path}")
     print(f"Final clipping fraction: {result.clipping_fraction:.4f}")
     print(f"Final sample entropy: {ent:.4f}; mean max pixel mass: {max_mass:.4f}")
+    print(
+        "Artifact diagnostics: "
+        f"TV={0.0 if result.sample_total_variation is None else result.sample_total_variation:.4g}, "
+        f"checker={0.0 if result.sample_checkerboard_energy is None else result.sample_checkerboard_energy:.4g}, "
+        f"highfreq={0.0 if result.sample_highfreq_fraction is None else result.sample_highfreq_fraction:.4g}"
+    )
     print(
         "Step component RMS: "
         f"learned={0.0 if result.learned_step_rms is None else result.learned_step_rms:.4g}, "

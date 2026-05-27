@@ -17,13 +17,21 @@ from mnist.eulerian_flux_mnist import (
     DirectFluxMNISTConfig,
     DirectFluxUNet,
     EDGE_ALPHA_MODES,
+    FLUX_PARAMETERIZATION_MODES,
+    ON_POLICY_PREFIX_MODES,
+    UPSAMPLE_MODES,
     FluxTrainingBatch,
     _ot_coupled_target_indices,
+    apply_flux_parameterization_torch,
     build_classwise_ot_cache,
+    checkerboard_energy_torch,
     direct_flux_matching_loss,
+    direct_flux_rollout_consistency_loss,
     edge_alpha_value,
     free_drift_flux_torch,
+    flux_curl_torch,
     flux_divergence_torch,
+    image_total_variation,
     make_on_policy_training_batch,
     poisson_flux_from_velocity_torch,
     nearest_class_mean_metrics,
@@ -66,6 +74,17 @@ def test_poisson_flux_divergence_matches_velocity() -> None:
     assert flux.shape == (3, 2, 8, 8)
     assert torch.allclose(div, velocity, atol=2e-5, rtol=2e-5)
 
+
+def test_poisson_flux_half_precision_uses_float32_fft_on_28_grid() -> None:
+    torch.manual_seed(1)
+    velocity = torch.randn(2, 28, 28, dtype=torch.float16)
+    velocity = (velocity.float() - velocity.float().mean(dim=(1, 2), keepdim=True)).to(torch.float16)
+    velocity32 = velocity.float() - velocity.float().mean(dim=(1, 2), keepdim=True)
+    flux = poisson_flux_from_velocity_torch(velocity)
+    div = flux_divergence_torch(flux)
+    assert flux.shape == (2, 2, 28, 28)
+    assert flux.dtype == torch.float32
+    assert torch.allclose(div, velocity32, atol=2e-4, rtol=2e-4)
 
 
 
@@ -166,6 +185,49 @@ def test_nearest_ot_matching_is_stable_for_identical_sources() -> None:
     assert np.all(labels[assigned[:3]] == 0)
     assert np.all(labels[assigned[3:]] == 1)
 
+
+
+def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
+    torch.manual_seed(3)
+    config = DirectFluxMNISTConfig(
+        grid_size=8,
+        horizon_scale=0.2,
+        num_steps=4,
+        target_mode="poisson-flow",
+        source_mode="lowfreq",
+        source_lowfreq_size=4,
+        upsample_mode="resize-conv",
+        flux_parameterization="projected",
+        velocity_target="mixed",
+        late_residual_fraction=0.4,
+        late_residual_prob=1.0,
+        rollout_loss_weight=0.1,
+        rollout_loss_steps=2,
+        rollout_loss_batch_size=2,
+        image_grad_loss_weight=0.01,
+        curl_loss_weight=0.01,
+        checkerboard_loss_weight=0.001,
+        flux_scale=10.0,
+    )
+    assert UPSAMPLE_MODES == ("transpose", "resize-conv")
+    assert FLUX_PARAMETERIZATION_MODES == ("edge", "projected")
+    assert "uniform" in ON_POLICY_PREFIX_MODES
+    images, labels = _toy_digit_measures(grid_size=config.grid_size)
+    batch = sample_flux_training_batch(images, labels, config, batch_size=4, device="cpu", rng=np.random.default_rng(5), step_index=2000)
+    model = DirectFluxUNet(config, base_channels=4, num_classes=10)
+    raw = model(batch.tau, batch.states, batch.labels, batch.sources)
+    projected = apply_flux_parameterization_torch(raw, batch.states, config)
+    assert torch.allclose(flux_divergence_torch(projected), flux_divergence_torch(raw), atol=2e-5, rtol=2e-5)
+    assert flux_curl_torch(projected).square().mean() <= flux_curl_torch(raw).square().mean() + 1e-7
+    rollout_loss, endpoint_l2 = direct_flux_rollout_consistency_loss(model, batch, max_items=2, steps=1)
+    assert torch.isfinite(rollout_loss)
+    assert torch.isfinite(endpoint_l2)
+    loss, metrics = direct_flux_matching_loss(model, batch)
+    assert torch.isfinite(loss)
+    for key in ["rollout_loss", "image_grad_loss", "curl_loss", "checkerboard_loss"]:
+        assert key in metrics
+    assert image_total_variation(batch.states, grid_size=config.grid_size) >= 0
+    assert checkerboard_energy_torch(batch.states, grid_size=config.grid_size) >= 0
 
 
 def test_poisson_ot_and_class_lowres_prior_smoke() -> None:

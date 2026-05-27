@@ -205,3 +205,62 @@ The mobility/free-SDE parameter can now be made explicit:
 `grid` mode is opt-in because it is much stiffer on a 28x28 grid and may need
 smaller free/noise weights or more substeps.
 
+### Experiment 10h: stochastic rollout sharpening and anti-checkerboard controls
+
+Experiment 10h keeps the stochastic-aware conditioning target from 10g and adds
+the fixes for the current artifacts: resize-conv upsampling instead of transposed
+convolutions, projected/minimum-energy flux parameterization to remove useless
+curl components, full-horizon on-policy prefixes, mixed late residual targets,
+multi-step rollout consistency, image-gradient sharpening, and small
+anti-checkerboard/curl regularizers.
+
+Recommended first 10h stochastic run:
+
+```powershell
+.venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
+  --data-root mnist_data `
+  --target-mode poisson-ot-flow `
+  --source-mode lowfreq `
+  --condition-on-source `
+  --ot-match-mode nearest `
+  --free-aware-target `
+  --sde-curriculum `
+  --sde-ramp-steps 3000 `
+  --target-free-weight 0.015 `
+  --target-noise-weight 0.002 `
+  --velocity-target mixed `
+  --late-residual-fraction 0.25 `
+  --late-residual-prob 0.50 `
+  --on-policy-use-free `
+  --on-policy-use-noise `
+  --on-policy-prob 0.40 `
+  --on-policy-prefix-mode uniform `
+  --on-policy-min-prefix-fraction 0.05 `
+  --on-policy-max-prefix-fraction 0.85 `
+  --on-policy-batch-size 64 `
+  --rollout-loss-weight 0.15 `
+  --rollout-loss-steps 8 `
+  --rollout-loss-batch-size 64 `
+  --image-grad-loss-weight 0.05 `
+  --upsample-mode resize-conv `
+  --flux-parameterization projected `
+  --curl-loss-weight 0.01 `
+  --checkerboard-loss-weight 0.001 `
+  --stochastic-step-loss `
+  --adaptive-sampling `
+  --clip-target 0.03 `
+  --max-substeps 4 `
+  --train-steps 8000 `
+  --batch-size 256 `
+  --base-channels 32 `
+  --sample-steps 256 `
+  --num-samples 64 `
+  --save-ablation-samples
+```
+
+The saved `.npz` includes artifact diagnostics: `sample_total_variation`,
+`sample_checkerboard_energy`, and `sample_highfreq_fraction`.  The ablation grids
+are now named `conditioning_only`, `free_plus_conditioning_no_noise`,
+`full_stochastic`, `free_only`, and `noise_only`; under `--free-aware-target`,
+`conditioning_only` is not expected to be a faithful sample because the model is
+trained as a correction to the free SDE.
