@@ -31,10 +31,11 @@ predict the h-transform conditioning flux, i.e. the desired total transport
 flux minus the free Dirichlet drift, while on-policy/step losses can use the
 same free/noisy SDE weights as the sampler.  The default remains learned-only
 for quick deterministic debugging; pass the SDE curriculum/free-aware flags to
-train and sample with stochastic dynamics.  Experiment 10h merges the rollout-sharpening machinery back into stochastic training, replaces transposed-convolution upsampling by resize-conv by default, and can project learned edge fluxes to their minimum-energy divergence-equivalent part to suppress checkerboard/curl artifacts.  Experiment 10i adds a replay on-policy cache, cheaper projected-flux losses, cached Poisson denominators, rollout-endpoint sharpening losses, timing diagnostics, and diffusion-process figures. Experiment 10j replaces independent replay rollouts with trajectory-snapshot replay, adds safe residual replay targets, and optionally uses EMA weights for cache building and sampling.
+train and sample with stochastic dynamics.  Experiment 10h merges the rollout-sharpening machinery back into stochastic training, replaces transposed-convolution upsampling by resize-conv by default, and can project learned edge fluxes to their minimum-energy divergence-equivalent part to suppress checkerboard/curl artifacts.  Experiment 10i adds a replay on-policy cache, cheaper projected-flux losses, cached Poisson denominators, rollout-endpoint sharpening losses, timing diagnostics, and diffusion-process figures. Experiment 10j replaces independent replay rollouts with trajectory-snapshot replay, adds safe residual replay targets, and optionally uses EMA weights for cache building and sampling. Experiment 10k adds terminal classifier diagnostics/losses, terminal-biased replay snapshots, endpoint losses, optional classifier-based sample selection, and good/bad sample annotation analysis.
 """
 
 import argparse
+import json
 import math
 import time
 from contextlib import contextmanager, nullcontext
@@ -67,6 +68,7 @@ ON_POLICY_CACHE_MODES = ("independent", "trajectory")
 ON_POLICY_TARGET_MODES = ("residual", "mixed", "constant", "safe-residual")
 UPSAMPLE_MODES = ("transpose", "resize-conv")
 FLUX_PARAMETERIZATION_MODES = ("edge", "projected")
+SAMPLE_SELECTION_METRICS = ("none", "classifier-confidence")
 
 __all__ = [
     "DirectFluxMNISTConfig",
@@ -84,6 +86,12 @@ __all__ = [
     "ON_POLICY_TARGET_MODES",
     "UPSAMPLE_MODES",
     "FLUX_PARAMETERIZATION_MODES",
+    "SAMPLE_SELECTION_METRICS",
+    "TinyMNISTClassifier",
+    "train_or_load_mnist_classifier",
+    "classifier_generation_metrics",
+    "select_generation_result_by_classifier",
+    "analyze_goodbad_annotations",
     "DirectFluxUNet",
     "edge_alpha_value",
     "natural_horizon",
@@ -234,8 +242,13 @@ class DirectFluxMNISTConfig:
     rollout_loss_prob: float = 1.0
     image_grad_loss_weight: float = 0.0
     rollout_image_grad_loss_weight: float = 0.03
+    rollout_endpoint_l2_weight: float = 0.05
+    rollout_endpoint_bce_weight: float = 0.01
+    rollout_endpoint_tv_weight: float = 0.005
     target_tv_loss_weight: float = 0.0
     target_entropy_loss_weight: float = 0.0
+    classifier_loss_weight: float = 0.0
+    classifier_confidence_loss_weight: float = 0.0
     curl_loss_weight: float = 0.01
     edge_laplacian_loss_weight: float = 0.0
     checkerboard_loss_weight: float = 0.001
@@ -254,6 +267,9 @@ class DirectFluxMNISTConfig:
     on_policy_cache_device: str = "cpu"
     on_policy_cache_mode: str = "trajectory"
     on_policy_cache_snapshots_per_traj: int = 16
+    on_policy_cache_terminal_fraction: float = 0.35
+    on_policy_cache_terminal_min_tau: float = 0.02
+    on_policy_cache_terminal_max_tau: float = 0.18
     on_policy_target_mode: str = "safe-residual"
     on_policy_residual_max_ratio: float = 1.5
     ema_decay: float = 0.999
@@ -263,6 +279,15 @@ class DirectFluxMNISTConfig:
     adaptive_sampling: bool = False
     clip_target: float = 0.03
     max_substeps: int = 4
+
+    use_classifier_diagnostics: bool = False
+    classifier_train_epochs: int = 2
+    classifier_cache_path: str = ""
+    classifier_batch_size: int = 256
+    classifier_lr: float = 1e-3
+    sample_rejection_factor: int = 1
+    sample_selection_metric: str = "none"
+    analyze_goodbad_file: bool = True
 
     def __post_init__(self) -> None:
         if self.grid_size <= 1:
@@ -399,10 +424,20 @@ class DirectFluxMNISTConfig:
             raise ValueError("image_grad_loss_weight must be non-negative")
         if self.rollout_image_grad_loss_weight < 0.0:
             raise ValueError("rollout_image_grad_loss_weight must be non-negative")
+        if self.rollout_endpoint_l2_weight < 0.0:
+            raise ValueError("rollout_endpoint_l2_weight must be non-negative")
+        if self.rollout_endpoint_bce_weight < 0.0:
+            raise ValueError("rollout_endpoint_bce_weight must be non-negative")
+        if self.rollout_endpoint_tv_weight < 0.0:
+            raise ValueError("rollout_endpoint_tv_weight must be non-negative")
         if self.target_tv_loss_weight < 0.0:
             raise ValueError("target_tv_loss_weight must be non-negative")
         if self.target_entropy_loss_weight < 0.0:
             raise ValueError("target_entropy_loss_weight must be non-negative")
+        if self.classifier_loss_weight < 0.0:
+            raise ValueError("classifier_loss_weight must be non-negative")
+        if self.classifier_confidence_loss_weight < 0.0:
+            raise ValueError("classifier_confidence_loss_weight must be non-negative")
         if self.rollout_loss_weight < 0.0:
             raise ValueError("rollout_loss_weight must be non-negative")
         if self.rollout_loss_steps < 0:
@@ -437,6 +472,14 @@ class DirectFluxMNISTConfig:
             raise ValueError(f"on_policy_cache_mode must be one of {ON_POLICY_CACHE_MODES}")
         if self.on_policy_cache_snapshots_per_traj <= 0:
             raise ValueError("on_policy_cache_snapshots_per_traj must be positive")
+        if not (0.0 <= self.on_policy_cache_terminal_fraction <= 1.0):
+            raise ValueError("on_policy_cache_terminal_fraction must be in [0, 1]")
+        if not (0.0 <= self.on_policy_cache_terminal_min_tau <= 1.0):
+            raise ValueError("on_policy_cache_terminal_min_tau must be in [0, 1]")
+        if not (0.0 <= self.on_policy_cache_terminal_max_tau <= 1.0):
+            raise ValueError("on_policy_cache_terminal_max_tau must be in [0, 1]")
+        if self.on_policy_cache_terminal_min_tau > self.on_policy_cache_terminal_max_tau:
+            raise ValueError("on_policy_cache_terminal_min_tau must be <= max_tau")
         if self.on_policy_target_mode not in ON_POLICY_TARGET_MODES:
             raise ValueError(f"on_policy_target_mode must be one of {ON_POLICY_TARGET_MODES}")
         if self.on_policy_residual_max_ratio <= 0.0 or not math.isfinite(self.on_policy_residual_max_ratio):
@@ -467,6 +510,20 @@ class DirectFluxMNISTConfig:
             raise ValueError("clip_target must be in [0, 1]")
         if self.max_substeps <= 0:
             raise ValueError("max_substeps must be positive")
+        if not isinstance(self.use_classifier_diagnostics, bool):
+            raise ValueError("use_classifier_diagnostics must be a bool")
+        if self.classifier_train_epochs < 0:
+            raise ValueError("classifier_train_epochs must be non-negative")
+        if self.classifier_batch_size <= 0:
+            raise ValueError("classifier_batch_size must be positive")
+        if self.classifier_lr <= 0.0 or not math.isfinite(self.classifier_lr):
+            raise ValueError("classifier_lr must be positive and finite")
+        if self.sample_rejection_factor <= 0:
+            raise ValueError("sample_rejection_factor must be positive")
+        if self.sample_selection_metric not in SAMPLE_SELECTION_METRICS:
+            raise ValueError(f"sample_selection_metric must be one of {SAMPLE_SELECTION_METRICS}")
+        if not isinstance(self.analyze_goodbad_file, bool):
+            raise ValueError("analyze_goodbad_file must be a bool")
 
 
 @dataclass(frozen=True)
@@ -528,6 +585,7 @@ class OnPolicyReplayCache:
     tau_min: float = float("nan")
     tau_mean: float = float("nan")
     tau_max: float = float("nan")
+    terminal_fraction: float = float("nan")
 
     @property
     def size(self) -> int:
@@ -949,6 +1007,274 @@ class DirectFluxUNet(nn.Module):
         return apply_flux_parameterization_torch(raw, masses, self.config)
 
 
+class TinyMNISTClassifier(nn.Module):
+    """Small LeNet-style classifier used for MNIST terminal diagnostics/losses.
+
+    Inputs are density images scaled as ``grid_size ** 2 * mass`` with shape
+    ``(B, 1, H, W)``.  The classifier is intentionally tiny so training it for a
+    few epochs on the same local MNIST subset remains laptop-friendly.
+    """
+
+    def __init__(self, grid_size: int = 28, num_classes: int = 10) -> None:
+        super().__init__()
+        self.grid_size = int(grid_size)
+        self.num_classes = int(num_classes)
+        self.net = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=5, padding=2),
+            nn.SiLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.MaxPool2d(2),
+            nn.Flatten(),
+            nn.Linear(64 * (self.grid_size // 4) * (self.grid_size // 4), 128),
+            nn.SiLU(),
+            nn.Linear(128, self.num_classes),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        if x.ndim != 4 or x.shape[1] != 1:
+            raise ValueError("classifier input must have shape (B, 1, H, W)")
+        return self.net(x)
+
+
+def _classifier_input_from_masses(masses: Tensor, grid_size: int) -> Tensor:
+    if masses.ndim == 2:
+        return masses.reshape(masses.shape[0], 1, int(grid_size), int(grid_size)) * float(grid_size * grid_size)
+    if masses.ndim == 3:
+        return masses[:, None, :, :] * float(grid_size * grid_size)
+    if masses.ndim == 4:
+        return masses * float(grid_size * grid_size)
+    raise ValueError("masses must have shape (B,N), (B,H,W), or (B,1,H,W)")
+
+
+def train_or_load_mnist_classifier(
+    images: np.ndarray,
+    labels: np.ndarray,
+    *,
+    grid_size: int,
+    cache_path: str | Path | None = None,
+    train_epochs: int = 2,
+    batch_size: int = 256,
+    lr: float = 1e-3,
+    device: str | torch.device = "cpu",
+    seed: int = 0,
+    show_progress: bool = True,
+) -> TinyMNISTClassifier:
+    """Return a cached or freshly trained tiny MNIST classifier."""
+    resolved_device = torch.device(device)
+    model = TinyMNISTClassifier(grid_size=int(grid_size)).to(resolved_device)
+    path = None if cache_path is None or str(cache_path) == "" else Path(cache_path)
+    if path is not None and path.exists():
+        payload = torch.load(path, map_location=resolved_device)
+        state = payload.get("model_state_dict", payload) if isinstance(payload, dict) else payload
+        model.load_state_dict(state, strict=False)
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad_(False)
+        return model
+    if train_epochs <= 0:
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad_(False)
+        return model
+    rng = np.random.default_rng(seed)
+    x_np = np.asarray(images, dtype=np.float32).reshape(-1, int(grid_size), int(grid_size))
+    y_np = np.asarray(labels, dtype=np.int64).reshape(-1)
+    x = torch.as_tensor(x_np, dtype=torch.float32, device=resolved_device)
+    y = torch.as_tensor(y_np, dtype=torch.long, device=resolved_device)
+    opt = torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=1e-4)
+    steps_per_epoch = max(1, int(math.ceil(x.shape[0] / max(1, int(batch_size)))))
+    total_steps = int(train_epochs) * steps_per_epoch
+    bar = _progress(range(total_steps), total=total_steps, desc="train MNIST classifier", disable=not show_progress)
+    for step in bar:
+        if step % steps_per_epoch == 0:
+            perm_np = rng.permutation(x.shape[0])
+            perm = torch.as_tensor(perm_np, dtype=torch.long, device=resolved_device)
+        start = (step % steps_per_epoch) * int(batch_size)
+        idx = perm[start : start + int(batch_size)]
+        xb = _classifier_input_from_masses(x.index_select(0, idx), int(grid_size))
+        yb = y.index_select(0, idx)
+        opt.zero_grad(set_to_none=True)
+        logits = model(xb)
+        loss = F.cross_entropy(logits, yb)
+        loss.backward()
+        opt.step()
+        if hasattr(bar, "set_postfix"):
+            pred = logits.argmax(dim=1)
+            acc = (pred == yb).float().mean()
+            bar.set_postfix(loss=float(loss.detach().cpu()), acc=float(acc.detach().cpu()))
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"model_state_dict": model.state_dict(), "grid_size": int(grid_size)}, path)
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad_(False)
+    return model
+
+
+@torch.no_grad()
+def classifier_generation_metrics(
+    samples: np.ndarray | Tensor,
+    labels: np.ndarray | Tensor,
+    classifier: TinyMNISTClassifier | None,
+    *,
+    grid_size: int,
+    device: str | torch.device | None = None,
+) -> dict[str, float | np.ndarray]:
+    """Classify generated samples and return confidence/margin diagnostics."""
+    if classifier is None:
+        return {}
+    resolved_device = next(classifier.parameters()).device if device is None else torch.device(device)
+    classifier = classifier.to(resolved_device).eval()
+    x = torch.as_tensor(samples, dtype=torch.float32, device=resolved_device)
+    y = torch.as_tensor(labels, dtype=torch.long, device=resolved_device).reshape(-1)
+    logits = classifier(_classifier_input_from_masses(x, int(grid_size)))
+    probs = logits.softmax(dim=1)
+    pred = probs.argmax(dim=1)
+    target_probs = probs.gather(1, y.view(-1, 1)).squeeze(1)
+    masked = probs.clone()
+    masked.scatter_(1, y.view(-1, 1), -1.0)
+    wrong_best = masked.max(dim=1).values
+    margin = target_probs - wrong_best
+    per_label = np.full(10, np.nan, dtype=np.float64)
+    for digit in range(10):
+        mask = y == digit
+        if bool(mask.any()):
+            per_label[digit] = float((pred[mask] == y[mask]).float().mean().detach().cpu())
+    return {
+        "classifier_acc": float((pred == y).float().mean().detach().cpu()),
+        "classifier_confidence": float(target_probs.mean().detach().cpu()),
+        "classifier_margin": float(margin.mean().detach().cpu()),
+        "classifier_predictions": pred.detach().cpu().numpy().astype(np.int64),
+        "classifier_target_probs": target_probs.detach().cpu().numpy().astype(np.float64),
+        "classifier_margins": margin.detach().cpu().numpy().astype(np.float64),
+        "per_label_classifier_acc": per_label,
+    }
+
+
+def _parse_goodbad_tokens(path: str | Path) -> np.ndarray:
+    tokens: list[bool] = []
+    for raw in Path(path).read_text(encoding="utf-8", errors="ignore").replace(",", " ").split():
+        token = raw.strip().lower()
+        if token in {"good", "g", "1", "true", "ok", "yes"}:
+            tokens.append(True)
+        elif token in {"bad", "b", "0", "false", "no"}:
+            tokens.append(False)
+    return np.asarray(tokens, dtype=bool)
+
+
+def analyze_goodbad_annotations(
+    path: str | Path,
+    samples: np.ndarray,
+    labels: np.ndarray,
+    *,
+    classifier_metrics: dict[str, float | np.ndarray] | None = None,
+) -> dict[str, float | np.ndarray]:
+    """Analyze optional human good/bad labels for a saved sample grid."""
+    good = _parse_goodbad_tokens(path)
+    count = min(int(good.size), int(samples.shape[0]))
+    if count <= 0:
+        return {}
+    good = good[:count]
+    samples = np.asarray(samples[:count], dtype=np.float64)
+    labels = np.asarray(labels[:count], dtype=np.int64)
+    entropy = -(samples.clip(1e-30) * np.log(samples.clip(1e-30))).sum(axis=1)
+    n = int(round(math.sqrt(samples.shape[1])))
+    imgs = samples.reshape(count, n, n)
+    tv = np.abs(np.roll(imgs, -1, axis=1) - imgs).sum(axis=(1, 2)) + np.abs(np.roll(imgs, -1, axis=2) - imgs).sum(axis=(1, 2))
+    good_by_label = np.full(10, np.nan, dtype=np.float64)
+    bad_count_by_label = np.zeros(10, dtype=np.int64)
+    for digit in range(10):
+        mask = labels == digit
+        if mask.any():
+            good_by_label[digit] = float(good[mask].mean())
+            bad_count_by_label[digit] = int((~good[mask]).sum())
+    result: dict[str, float | np.ndarray] = {
+        "human_good_rate": float(good.mean()),
+        "human_good_count": float(good.sum()),
+        "human_bad_count": float((~good).sum()),
+        "human_good_by_label": good_by_label,
+        "human_bad_count_by_label": bad_count_by_label,
+        "entropy_good_mean": float(entropy[good].mean()) if good.any() else float("nan"),
+        "entropy_bad_mean": float(entropy[~good].mean()) if (~good).any() else float("nan"),
+        "tv_good_mean": float(tv[good].mean()) if good.any() else float("nan"),
+        "tv_bad_mean": float(tv[~good].mean()) if (~good).any() else float("nan"),
+    }
+    if classifier_metrics is not None:
+        target_probs = classifier_metrics.get("classifier_target_probs")
+        margins = classifier_metrics.get("classifier_margins")
+        if isinstance(target_probs, np.ndarray) and target_probs.shape[0] >= count:
+            tp = target_probs[:count]
+            result["classifier_conf_good_mean"] = float(tp[good].mean()) if good.any() else float("nan")
+            result["classifier_conf_bad_mean"] = float(tp[~good].mean()) if (~good).any() else float("nan")
+        if isinstance(margins, np.ndarray) and margins.shape[0] >= count:
+            mg = margins[:count]
+            result["classifier_margin_good_mean"] = float(mg[good].mean()) if good.any() else float("nan")
+            result["classifier_margin_bad_mean"] = float(mg[~good].mean()) if (~good).any() else float("nan")
+    return result
+
+
+def select_generation_result_by_classifier(
+    result: FluxGenerationResult,
+    requested_labels: np.ndarray,
+    *,
+    factor: int,
+    classifier: TinyMNISTClassifier,
+    grid_size: int,
+    device: str | torch.device,
+) -> FluxGenerationResult:
+    """Select the best candidate per requested label by classifier target confidence."""
+    factor = int(factor)
+    if factor <= 1:
+        return result
+    labels = np.asarray(requested_labels, dtype=np.int64).reshape(-1)
+    expected = labels.size * factor
+    if result.samples.shape[0] != expected:
+        raise ValueError("candidate result size does not equal len(labels) * factor")
+    metrics = classifier_generation_metrics(result.samples, result.labels, classifier, grid_size=int(grid_size), device=device)
+    probs = metrics.get("classifier_target_probs")
+    if not isinstance(probs, np.ndarray):
+        raise RuntimeError("classifier probabilities were not available for sample selection")
+    chosen: list[int] = []
+    for i in range(labels.size):
+        start = i * factor
+        stop = start + factor
+        local = int(np.argmax(probs[start:stop]))
+        chosen.append(start + local)
+    idx = np.asarray(chosen, dtype=np.int64)
+    def maybe_take(arr):
+        return None if arr is None else np.asarray(arr)[idx]
+    selected_samples = np.asarray(result.samples)[idx]
+    selected_sources = maybe_take(result.sources)
+    n = int(round(math.sqrt(selected_samples.shape[1])))
+    imgs = selected_samples.reshape(selected_samples.shape[0], n, n)
+    sample_entropy = float(-(selected_samples.clip(1e-30) * np.log(selected_samples.clip(1e-30))).sum(axis=1).mean())
+    sample_tv = float((np.abs(np.roll(imgs, -1, axis=1) - imgs).sum(axis=(1, 2)) + np.abs(np.roll(imgs, -1, axis=2) - imgs).sum(axis=(1, 2))).mean())
+    return FluxGenerationResult(
+        samples=selected_samples,
+        labels=np.asarray(result.labels)[idx],
+        trajectory=None,
+        clipping_fraction=float(result.clipping_fraction),
+        sources=selected_sources,
+        source_indices=maybe_take(result.source_indices),
+        source_labels=maybe_take(result.source_labels),
+        source_unique_count=None,
+        source_diversity_l2=None,
+        source_pair_l2=None,
+        source_label_match_rate=None,
+        learned_step_rms=result.learned_step_rms,
+        free_step_rms=result.free_step_rms,
+        noise_step_rms=result.noise_step_rms,
+        free_to_learned_ratio=result.free_to_learned_ratio,
+        noise_to_learned_ratio=result.noise_to_learned_ratio,
+        sample_entropy=sample_entropy,
+        sample_total_variation=sample_tv,
+        sample_checkerboard_energy=None,
+        sample_highfreq_fraction=None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Terminal proxy, Poisson-flow targets, and direct flux target
 # ---------------------------------------------------------------------------
@@ -1278,6 +1604,22 @@ def image_gradient_mse_torch(a: Tensor, b: Tensor, *, grid_size: int | None = No
     bdx = torch.roll(bi, shifts=-1, dims=-1) - bi
     bdy = torch.roll(bi, shifts=-1, dims=-2) - bi
     return F.mse_loss(adx, bdx) + F.mse_loss(ady, bdy)
+
+
+def binary_cross_entropy_probs_autocast_safe(input_prob: Tensor, target_prob: Tensor) -> Tensor:
+    """Autocast-safe BCE for probability tensors.
+
+    ``torch.nn.functional.binary_cross_entropy`` intentionally raises under
+    CUDA autocast.  This helper keeps the endpoint BCE probability-space loss
+    but evaluates the scalar expression manually in float32 with autocast
+    disabled, so mixed-precision training can still be used for the expensive
+    network and rollout computations.
+    """
+    with _autocast_disabled_for(input_prob.device.type):
+        input32 = input_prob.float().clamp(1e-5, 1.0 - 1e-5)
+        target32 = target_prob.float().clamp(0.0, 1.0)
+        loss = -(target32 * torch.log(input32) + (1.0 - target32) * torch.log1p(-input32)).mean()
+    return loss
 
 
 def checkerboard_energy_torch(states: Tensor, *, grid_size: int | None = None) -> Tensor:
@@ -1937,26 +2279,28 @@ def direct_flux_rollout_consistency_loss(
     max_items: int | None = None,
     steps: int | None = None,
     return_extra: bool = False,
-) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor, Tensor]:
+    terminal_classifier: TinyMNISTClassifier | None = None,
+) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Multi-step sampler-consistency loss on a small microbatch.
 
     The prediction is unrolled through the same differentiable conservative
     clipped step used by the one-step loss.  The teacher branch is unrolled with
     the corresponding supervised conditioning flux and no gradients.  The
-    optional extra returns are endpoint image-gradient and TV-matching losses.
+    optional extra returns are endpoint image-gradient, endpoint BCE, TV, and
+    classifier losses that improve terminal MNIST fidelity.
     """
     config = model.config
     rollout_steps = int(config.rollout_loss_steps if steps is None else steps)
     if rollout_steps <= 0:
         z = batch.states.new_tensor(0.0)
-        return (z, z, z, z) if return_extra else (z, z)
+        return (z, z, z, z, z, z, z, z) if return_extra else (z, z)
     count = int(batch.states.shape[0])
     if max_items is None:
         max_items = int(config.rollout_loss_batch_size)
     count = min(count, int(max_items))
     if count <= 0:
         z = batch.states.new_tensor(0.0)
-        return (z, z, z, z) if return_extra else (z, z)
+        return (z, z, z, z, z, z, z, z) if return_extra else (z, z)
     sl = slice(0, count)
     horizon = max(float(natural_horizon(config)), 1e-12)
     dt = horizon / float(max(int(config.num_steps), 1))
@@ -2000,24 +2344,40 @@ def direct_flux_rollout_consistency_loss(
             )
             tau = (tau - dt).clamp_min(0.0)
     scale = float(config.grid_size * config.grid_size)
-    rollout_l2 = F.mse_loss(pred_state * scale, teacher_state * scale)
-    endpoint_l2 = F.mse_loss(pred_state * scale, targets * scale)
+    pred_scaled = pred_state * scale
+    target_scaled = targets * scale
+    rollout_l2 = F.mse_loss(pred_scaled, teacher_state * scale)
+    endpoint_l2 = F.mse_loss(pred_scaled, target_scaled)
     if not return_extra:
         return rollout_l2, endpoint_l2
-    rollout_image_grad = image_gradient_mse_torch(
-        pred_state * scale, targets * scale, grid_size=int(config.grid_size)
-    )
+    rollout_image_grad = image_gradient_mse_torch(pred_scaled, target_scaled, grid_size=int(config.grid_size))
+    # BCE on scaled images is a weak terminal pixel-likelihood surrogate.  Clamp
+    # because normalized mass images can have a few scaled values above one.
+    # Use a manual float32 implementation because PyTorch blocks probability
+    # BCE under CUDA autocast.
+    endpoint_bce = binary_cross_entropy_probs_autocast_safe(pred_scaled, target_scaled)
     tv_loss = (
-        image_total_variation(pred_state * scale, grid_size=int(config.grid_size))
-        - image_total_variation(targets * scale, grid_size=int(config.grid_size))
+        image_total_variation(pred_scaled, grid_size=int(config.grid_size))
+        - image_total_variation(target_scaled, grid_size=int(config.grid_size))
     ).square()
-    return rollout_l2, endpoint_l2, rollout_image_grad, tv_loss
+    endpoint_tv_loss = tv_loss
+    cls_loss = pred_state.new_tensor(0.0)
+    cls_conf_loss = pred_state.new_tensor(0.0)
+    if terminal_classifier is not None:
+        terminal_classifier.eval()
+        logits = terminal_classifier(_classifier_input_from_masses(pred_state, int(config.grid_size)))
+        cls_loss = F.cross_entropy(logits, labels)
+        probs = logits.softmax(dim=1)
+        target_prob = probs.gather(1, labels.view(-1, 1)).squeeze(1)
+        cls_conf_loss = (1.0 - target_prob).mean()
+    return rollout_l2, endpoint_l2, rollout_image_grad, tv_loss, endpoint_bce, endpoint_tv_loss, cls_loss, cls_conf_loss
 
 def direct_flux_matching_loss(
     model: DirectFluxUNet,
     batch: FluxTrainingBatch,
     *,
     step_index: int | None = None,
+    terminal_classifier: TinyMNISTClassifier | None = None,
 ) -> tuple[Tensor, dict[str, float]]:
     """Return the direct-flux regression loss and scalar diagnostics."""
     config = model.config
@@ -2046,6 +2406,11 @@ def direct_flux_matching_loss(
             float(config.step_loss_weight) > 0.0
             or float(config.rollout_loss_weight) > 0.0
             or float(config.rollout_image_grad_loss_weight) > 0.0
+            or float(config.rollout_endpoint_l2_weight) > 0.0
+            or float(config.rollout_endpoint_bce_weight) > 0.0
+            or float(config.rollout_endpoint_tv_weight) > 0.0
+            or float(config.classifier_loss_weight) > 0.0
+            or float(config.classifier_confidence_loss_weight) > 0.0
             or float(config.target_tv_loss_weight) > 0.0
             or float(config.target_entropy_loss_weight) > 0.0
         )
@@ -2096,6 +2461,10 @@ def direct_flux_matching_loss(
     rollout_loss = pred_norm.new_tensor(0.0)
     rollout_endpoint_l2 = pred_norm.new_tensor(0.0)
     rollout_image_grad_loss = pred_norm.new_tensor(0.0)
+    rollout_endpoint_bce_loss = pred_norm.new_tensor(0.0)
+    rollout_endpoint_tv_loss = pred_norm.new_tensor(0.0)
+    classifier_loss = pred_norm.new_tensor(0.0)
+    classifier_confidence_loss = pred_norm.new_tensor(0.0)
     target_tv_loss = pred_norm.new_tensor(0.0)
     rollout_ready = batch.step_index is None or int(batch.step_index) >= int(config.rollout_loss_warmup_steps)
     rollout_due = True
@@ -2108,9 +2477,23 @@ def direct_flux_matching_loss(
     if rollout_ready and rollout_due and int(config.rollout_loss_steps) > 0 and (
         float(config.rollout_loss_weight) > 0.0
         or float(config.rollout_image_grad_loss_weight) > 0.0
+        or float(config.rollout_endpoint_l2_weight) > 0.0
+        or float(config.rollout_endpoint_bce_weight) > 0.0
+        or float(config.rollout_endpoint_tv_weight) > 0.0
+        or float(config.classifier_loss_weight) > 0.0
+        or float(config.classifier_confidence_loss_weight) > 0.0
         or float(config.target_tv_loss_weight) > 0.0
     ):
-        rollout_loss, rollout_endpoint_l2, rollout_image_grad_loss, target_tv_loss = direct_flux_rollout_consistency_loss(model, batch, return_extra=True)
+        (
+            rollout_loss,
+            rollout_endpoint_l2,
+            rollout_image_grad_loss,
+            target_tv_loss,
+            rollout_endpoint_bce_loss,
+            rollout_endpoint_tv_loss,
+            classifier_loss,
+            classifier_confidence_loss,
+        ) = direct_flux_rollout_consistency_loss(model, batch, return_extra=True, terminal_classifier=terminal_classifier)
 
     curl_loss = flux_curl_torch(raw_pred_norm).square().mean()
     edge_lap_loss = edge_laplacian_energy_torch(raw_pred_norm)
@@ -2122,10 +2505,15 @@ def direct_flux_matching_loss(
         + float(config.node_loss_weight) * node_loss
         + float(config.step_loss_weight) * step_loss
         + float(config.rollout_loss_weight) * rollout_loss
+        + float(config.rollout_endpoint_l2_weight) * rollout_endpoint_l2
+        + float(config.rollout_endpoint_bce_weight) * rollout_endpoint_bce_loss
+        + float(config.rollout_endpoint_tv_weight) * rollout_endpoint_tv_loss
         + float(config.image_grad_loss_weight) * image_grad_loss
         + float(config.rollout_image_grad_loss_weight) * rollout_image_grad_loss
         + float(config.target_tv_loss_weight) * target_tv_loss
         + float(config.target_entropy_loss_weight) * target_entropy_loss
+        + float(config.classifier_loss_weight) * classifier_loss
+        + float(config.classifier_confidence_loss_weight) * classifier_confidence_loss
         + float(config.curl_loss_weight) * curl_loss
         + float(config.edge_laplacian_loss_weight) * edge_lap_loss
         + float(config.checkerboard_loss_weight) * checker_loss
@@ -2155,9 +2543,13 @@ def direct_flux_matching_loss(
         "step_loss": float(step_loss.detach().cpu()),
         "rollout_loss": float(rollout_loss.detach().cpu()),
         "rollout_endpoint_l2": float(rollout_endpoint_l2.detach().cpu()),
+        "rollout_endpoint_bce_loss": float(rollout_endpoint_bce_loss.detach().cpu()),
+        "rollout_endpoint_tv_loss": float(rollout_endpoint_tv_loss.detach().cpu()),
         "rollout_image_grad_loss": float(rollout_image_grad_loss.detach().cpu()),
         "target_tv_loss": float(target_tv_loss.detach().cpu()),
         "target_entropy_loss": float(target_entropy_loss.detach().cpu()),
+        "classifier_loss": float(classifier_loss.detach().cpu()),
+        "classifier_confidence_loss": float(classifier_confidence_loss.detach().cpu()),
         "image_grad_loss": float(image_grad_loss.detach().cpu()),
         "curl_loss": float(curl_loss.detach().cpu()),
         "edge_laplacian_loss": float(edge_lap_loss.detach().cpu()),
@@ -2359,16 +2751,39 @@ def _on_policy_prefix_bounds(config: DirectFluxMNISTConfig) -> tuple[int, int]:
 
 
 def _trajectory_snapshot_steps(config: DirectFluxMNISTConfig) -> np.ndarray:
+    """Return replay snapshot prefix steps, including optional terminal-biased states.
+
+    ``tau`` decreases from one at the source to zero at the terminal digit.  The
+    terminal replay fraction intentionally samples large prefix steps so the
+    replay cache covers late endpoint corrections such as incomplete strokes.
+    """
     min_prefix, max_prefix = _on_policy_prefix_bounds(config)
     if max_prefix <= 0 or max_prefix < min_prefix:
         return np.asarray([], dtype=np.int64)
     count = max(1, int(config.on_policy_cache_snapshots_per_traj))
-    if str(config.on_policy_prefix_mode) == "late-biased":
-        u = np.linspace(0.0, 1.0, count + 2, dtype=np.float64)[1:-1]
-        values = min_prefix + (max_prefix - min_prefix) * np.sqrt(u)
-    else:
-        values = np.linspace(min_prefix, max_prefix, count, dtype=np.float64)
-    steps = np.unique(np.clip(np.round(values).astype(np.int64), min_prefix, max_prefix))
+    terminal_count = int(round(float(config.on_policy_cache_terminal_fraction) * float(count)))
+    terminal_count = max(0, min(count, terminal_count))
+    regular_count = max(0, count - terminal_count)
+    pieces: list[np.ndarray] = []
+    if regular_count > 0:
+        if str(config.on_policy_prefix_mode) == "late-biased":
+            u = np.linspace(0.0, 1.0, regular_count + 2, dtype=np.float64)[1:-1]
+            values = min_prefix + (max_prefix - min_prefix) * np.sqrt(u)
+        else:
+            values = np.linspace(min_prefix, max_prefix, regular_count, dtype=np.float64)
+        pieces.append(values)
+    if terminal_count > 0:
+        # Terminal tau fraction in [tau_min, tau_max] corresponds to prefix
+        # fraction in [1 - tau_max, 1 - tau_min].
+        nsteps = max(int(config.num_steps), 1)
+        lo = int(round((1.0 - float(config.on_policy_cache_terminal_max_tau)) * float(nsteps)))
+        hi = int(round((1.0 - float(config.on_policy_cache_terminal_min_tau)) * float(nsteps)))
+        lo = max(min_prefix, min(max_prefix, lo))
+        hi = max(lo, min(int(config.num_steps) - 1, hi))
+        pieces.append(np.linspace(lo, hi, terminal_count, dtype=np.float64))
+    if not pieces:
+        return np.asarray([max_prefix], dtype=np.int64)
+    steps = np.unique(np.clip(np.round(np.concatenate(pieces)).astype(np.int64), min_prefix, int(config.num_steps) - 1))
     if steps.size == 0:
         steps = np.asarray([max_prefix], dtype=np.int64)
     return steps
@@ -2437,6 +2852,7 @@ def _build_trajectory_on_policy_replay_cache(
             tau_min=float(tau_frac.min().detach().cpu()),
             tau_mean=float(tau_frac.mean().detach().cpu()),
             tau_max=float(tau_frac.max().detach().cpu()),
+            terminal_fraction=float((tau_frac <= float(config.on_policy_cache_terminal_max_tau)).float().mean().detach().cpu()),
         )
     pieces: list[FluxTrainingBatch] = []
     produced = 0
@@ -2524,6 +2940,7 @@ def _build_trajectory_on_policy_replay_cache(
         tau_min=float(tau_frac.min().detach().cpu()),
         tau_mean=float(tau_frac.mean().detach().cpu()),
         tau_max=float(tau_frac.max().detach().cpu()),
+        terminal_fraction=float((tau_frac <= float(config.on_policy_cache_terminal_max_tau)).float().mean().detach().cpu()),
     )
 
 
@@ -2600,6 +3017,7 @@ def build_on_policy_replay_cache(
         tau_min=float(tau_frac.min().detach().cpu()),
         tau_mean=float(tau_frac.mean().detach().cpu()),
         tau_max=float(tau_frac.max().detach().cpu()),
+        terminal_fraction=float((tau_frac <= float(config.on_policy_cache_terminal_max_tau)).float().mean().detach().cpu()),
     )
 
 def sample_on_policy_replay_batch(
@@ -2685,6 +3103,7 @@ def train_direct_flux_model(
     preview_every: int = 0,
     preview_sample_steps: int = 64,
     preview_num_samples: int = 16,
+    terminal_classifier: TinyMNISTClassifier | None = None,
 ) -> dict[str, list[float]]:
     """Train the direct-flux U-Net with an ETA progress bar and optional previews."""
     if train_steps <= 0 or batch_size <= 0:
@@ -2711,9 +3130,13 @@ def train_direct_flux_model(
         "step_loss": [],
         "rollout_loss": [],
         "rollout_endpoint_l2": [],
+        "rollout_endpoint_bce_loss": [],
+        "rollout_endpoint_tv_loss": [],
         "rollout_image_grad_loss": [],
         "target_tv_loss": [],
         "target_entropy_loss": [],
+        "classifier_loss": [],
+        "classifier_confidence_loss": [],
         "image_grad_loss": [],
         "curl_loss": [],
         "edge_laplacian_loss": [],
@@ -2737,6 +3160,7 @@ def train_direct_flux_model(
         "cache_tau_min": [],
         "cache_tau_mean": [],
         "cache_tau_max": [],
+        "cache_terminal_fraction": [],
         "off_loss": [],
         "off_div_cos": [],
         "off_target_rms": [],
@@ -2826,7 +3250,12 @@ def train_direct_flux_model(
         optimizer.zero_grad(set_to_none=True)
         context = _cuda_autocast(enabled=True) if amp_enabled else nullcontext()
         with context:
-            loss, metrics = direct_flux_matching_loss(model, batch, step_index=int(step_index))
+            loss, metrics = direct_flux_matching_loss(
+                model,
+                batch,
+                step_index=int(step_index),
+                terminal_classifier=terminal_classifier,
+            )
         metrics["on_policy"] = 1.0 if use_on_policy else 0.0
         metrics["on_policy_tau_frac"] = float((batch.tau / max(natural_horizon(model.config), 1e-12)).mean().detach().cpu()) if use_on_policy else -1.0
         metrics["on_policy_cache_age"] = -1.0 if replay_cache is None else float(int(step_index) - int(replay_cache.created_step))
@@ -2834,6 +3263,7 @@ def train_direct_flux_model(
         metrics["cache_tau_min"] = float("nan") if replay_cache is None else float(replay_cache.tau_min)
         metrics["cache_tau_mean"] = float("nan") if replay_cache is None else float(replay_cache.tau_mean)
         metrics["cache_tau_max"] = float("nan") if replay_cache is None else float(replay_cache.tau_max)
+        metrics["cache_terminal_fraction"] = float("nan") if replay_cache is None else float(replay_cache.terminal_fraction)
         inactive = float("nan")
         if use_on_policy:
             metrics["on_loss"] = metrics["loss"]
@@ -2878,6 +3308,8 @@ def train_direct_flux_model(
                 step_l=metrics.get("step_loss", 0.0),
                 roll=metrics.get("rollout_loss", 0.0),
                 rimg=metrics.get("rollout_image_grad_loss", 0.0),
+                ep=metrics.get("rollout_endpoint_l2", 0.0),
+                cls=metrics.get("classifier_loss", 0.0),
                 tv=metrics.get("target_tv_loss", 0.0),
                 curl=metrics.get("curl_loss", 0.0),
                 pred=metrics["pred_rms"],
@@ -2891,6 +3323,7 @@ def train_direct_flux_model(
                 cache_age=metrics.get("on_policy_cache_age", -1.0),
                 cache_s=metrics.get("cache_refresh_sec", 0.0),
                 c_tau=metrics.get("cache_tau_mean", float("nan")),
+                c_term=metrics.get("cache_terminal_fraction", float("nan")),
                 on_cos=metrics.get("on_div_cos", float("nan")),
                 off_cos=metrics.get("off_div_cos", float("nan")),
                 mean_p=float(anchor_prob) if model.config.target_mode in {"poisson-flow", "poisson-ot-flow"} else 0.0,
@@ -3775,8 +4208,22 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--rollout-loss-every", type=int, default=2)
     parser.add_argument("--rollout-loss-prob", type=float, default=1.0)
     parser.add_argument("--rollout-image-grad-loss-weight", type=float, default=0.03)
+    parser.add_argument("--rollout-endpoint-l2-weight", type=float, default=0.05)
+    parser.add_argument("--rollout-endpoint-bce-weight", type=float, default=0.01)
+    parser.add_argument("--rollout-endpoint-tv-weight", type=float, default=0.005)
     parser.add_argument("--target-tv-loss-weight", type=float, default=0.0)
     parser.add_argument("--target-entropy-loss-weight", type=float, default=0.0)
+    parser.add_argument("--classifier-loss-weight", type=float, default=0.0)
+    parser.add_argument("--classifier-confidence-loss-weight", type=float, default=0.0)
+    parser.add_argument("--use-classifier-diagnostics", action="store_true")
+    parser.add_argument("--classifier-cache-path", type=Path, default=None)
+    parser.add_argument("--classifier-train-epochs", type=int, default=2)
+    parser.add_argument("--classifier-batch-size", type=int, default=256)
+    parser.add_argument("--classifier-lr", type=float, default=1e-3)
+    parser.add_argument("--sample-rejection-factor", type=int, default=1)
+    parser.add_argument("--sample-selection-metric", choices=SAMPLE_SELECTION_METRICS, default="none")
+    parser.add_argument("--analyze-goodbad-file", dest="analyze_goodbad_file", action="store_true", default=True)
+    parser.add_argument("--no-analyze-goodbad-file", dest="analyze_goodbad_file", action="store_false")
     parser.add_argument("--project-main-loss", action="store_true", help="Project predicted flux before the main flux/divergence losses; slower but exact for projected mode.")
     parser.add_argument("--curl-loss-weight", type=float, default=0.01)
     parser.add_argument("--edge-laplacian-loss-weight", type=float, default=0.0)
@@ -3807,6 +4254,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--on-policy-cache-device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--on-policy-cache-mode", choices=ON_POLICY_CACHE_MODES, default="trajectory")
     parser.add_argument("--on-policy-cache-snapshots-per-traj", type=int, default=16)
+    parser.add_argument("--on-policy-cache-terminal-fraction", type=float, default=0.35)
+    parser.add_argument("--on-policy-cache-terminal-min-tau", type=float, default=0.02)
+    parser.add_argument("--on-policy-cache-terminal-max-tau", type=float, default=0.18)
     parser.add_argument("--on-policy-target-mode", choices=ON_POLICY_TARGET_MODES, default="safe-residual")
     parser.add_argument("--on-policy-residual-max-ratio", type=float, default=1.5)
     parser.add_argument("--ema-decay", type=float, default=0.999)
@@ -3901,8 +4351,21 @@ def main(argv: Sequence[str] | None = None) -> None:
         rollout_loss_every=int(args.rollout_loss_every),
         rollout_loss_prob=float(args.rollout_loss_prob),
         rollout_image_grad_loss_weight=float(args.rollout_image_grad_loss_weight),
+        rollout_endpoint_l2_weight=float(args.rollout_endpoint_l2_weight),
+        rollout_endpoint_bce_weight=float(args.rollout_endpoint_bce_weight),
+        rollout_endpoint_tv_weight=float(args.rollout_endpoint_tv_weight),
         target_tv_loss_weight=float(args.target_tv_loss_weight),
         target_entropy_loss_weight=float(args.target_entropy_loss_weight),
+        classifier_loss_weight=float(args.classifier_loss_weight),
+        classifier_confidence_loss_weight=float(args.classifier_confidence_loss_weight),
+        use_classifier_diagnostics=bool(args.use_classifier_diagnostics),
+        classifier_train_epochs=int(args.classifier_train_epochs),
+        classifier_cache_path="" if args.classifier_cache_path is None else str(args.classifier_cache_path),
+        classifier_batch_size=int(args.classifier_batch_size),
+        classifier_lr=float(args.classifier_lr),
+        sample_rejection_factor=int(args.sample_rejection_factor),
+        sample_selection_metric=str(args.sample_selection_metric),
+        analyze_goodbad_file=bool(args.analyze_goodbad_file),
         project_main_loss=bool(args.project_main_loss),
         curl_loss_weight=float(args.curl_loss_weight),
         edge_laplacian_loss_weight=float(args.edge_laplacian_loss_weight),
@@ -3927,6 +4390,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         on_policy_cache_device=str(args.on_policy_cache_device),
         on_policy_cache_mode=str(args.on_policy_cache_mode),
         on_policy_cache_snapshots_per_traj=int(args.on_policy_cache_snapshots_per_traj),
+        on_policy_cache_terminal_fraction=float(args.on_policy_cache_terminal_fraction),
+        on_policy_cache_terminal_min_tau=float(args.on_policy_cache_terminal_min_tau),
+        on_policy_cache_terminal_max_tau=float(args.on_policy_cache_terminal_max_tau),
         on_policy_target_mode=str(args.on_policy_target_mode),
         on_policy_residual_max_ratio=float(args.on_policy_residual_max_ratio),
         ema_decay=float(args.ema_decay),
@@ -3939,7 +4405,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     device = torch.device(
         "cuda" if args.device is None and torch.cuda.is_available() else "cpu" if args.device is None else args.device
     )
-    print(f"Experiment 10j direct-flux MNIST on device={device}")
+    print(f"Experiment 10k direct-flux MNIST on device={device}")
     print(
         "Laptop-friendly settings: "
         f"target_mode={config.target_mode}, source_mode={config.source_mode}, "
@@ -3962,6 +4428,28 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"Loaded {dataset.train_images.shape[0]} training images")
 
     model = DirectFluxUNet(config, base_channels=int(args.base_channels))
+    classifier_needed = (
+        bool(config.use_classifier_diagnostics)
+        or float(config.classifier_loss_weight) > 0.0
+        or float(config.classifier_confidence_loss_weight) > 0.0
+        or int(config.sample_rejection_factor) > 1
+    )
+    terminal_classifier: TinyMNISTClassifier | None = None
+    if classifier_needed:
+        cls_cache = Path(config.classifier_cache_path) if str(config.classifier_cache_path) else args.out_dir / "experiment10_mnist_classifier.pt"
+        print(f"Preparing terminal MNIST classifier: {cls_cache}")
+        terminal_classifier = train_or_load_mnist_classifier(
+            dataset.train_images,
+            dataset.train_labels,
+            grid_size=int(config.grid_size),
+            cache_path=cls_cache,
+            train_epochs=int(config.classifier_train_epochs),
+            batch_size=int(config.classifier_batch_size),
+            lr=float(config.classifier_lr),
+            device=device,
+            seed=int(args.seed) + 17,
+            show_progress=not bool(args.no_progress),
+        )
     final_class_means = _compute_class_mean_measures(dataset.train_images, dataset.train_labels, config.grid_size)
     preview_dir = args.out_dir / "previews" if int(args.preview_every) > 0 else None
     history = train_direct_flux_model(
@@ -3979,13 +4467,22 @@ def main(argv: Sequence[str] | None = None) -> None:
         preview_every=int(args.preview_every),
         preview_sample_steps=int(args.preview_sample_steps),
         preview_num_samples=int(args.preview_num_samples),
+        terminal_classifier=terminal_classifier,
     )
 
     print("Training complete; starting generation")
     labels = _parse_label_sequence(args.labels, int(args.num_samples))
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    candidate_labels = labels
+    selection_factor = int(config.sample_rejection_factor)
+    if selection_factor > 1:
+        if terminal_classifier is None or str(config.sample_selection_metric) != "classifier-confidence":
+            raise RuntimeError("sample rejection requires --use-classifier-diagnostics or classifier loss plus classifier-confidence selection")
+        candidate_labels = np.repeat(labels, selection_factor)
+        print(f"Generating {selection_factor} classifier-ranked candidates per requested sample")
     result = simulate_direct_flux_generation(
         model,
-        labels,
+        candidate_labels,
         num_steps=int(args.sample_steps),
         deterministic=bool(args.deterministic_sampling),
         device=device,
@@ -3995,13 +4492,52 @@ def main(argv: Sequence[str] | None = None) -> None:
         source_images=dataset.train_images,
         source_labels=dataset.train_labels,
     )
+    if selection_factor > 1:
+        raw_png = args.out_dir / "experiment10_samples_raw.png"
+        try:
+            save_flux_samples_grid(result.samples, result.labels, raw_png, grid_size=config.grid_size)
+            print(f"Saved raw candidate preview: {raw_png}")
+        except RuntimeError as exc:
+            print(f"Skipping raw candidate PNG: {exc}")
+        assert terminal_classifier is not None
+        result = select_generation_result_by_classifier(
+            result,
+            labels,
+            factor=selection_factor,
+            classifier=terminal_classifier,
+            grid_size=int(config.grid_size),
+            device=device,
+        )
 
     print("Generation complete; saving artifacts")
-    args.out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = args.out_dir / "experiment10_direct_flux_mnist.pt"
     samples_path = args.out_dir / "experiment10_samples.npz"
     png_path = args.out_dir / "experiment10_samples.png"
     final_metrics = nearest_class_mean_metrics(result.samples, result.labels, final_class_means)
+    classifier_metrics = classifier_generation_metrics(
+        result.samples,
+        result.labels,
+        terminal_classifier,
+        grid_size=int(config.grid_size),
+        device=device,
+    )
+    goodbad_metrics: dict[str, float | np.ndarray] = {}
+    goodbad_path = args.out_dir / "samples_goodbad.txt"
+    if bool(config.analyze_goodbad_file) and goodbad_path.exists():
+        goodbad_metrics = analyze_goodbad_annotations(
+            goodbad_path,
+            result.samples,
+            result.labels,
+            classifier_metrics=classifier_metrics,
+        )
+        serializable_goodbad = {
+            key: (value.tolist() if isinstance(value, np.ndarray) else value)
+            for key, value in goodbad_metrics.items()
+        }
+        (args.out_dir / "samples_goodbad_analysis.json").write_text(
+            json.dumps(serializable_goodbad, indent=2),
+            encoding="utf-8",
+        )
     source_metrics = source_batch_diagnostics(
         result.sources if result.sources is not None else result.samples,
         requested_labels=result.labels,
@@ -4022,6 +4558,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             "labels": result.labels,
             "clipping_fraction": result.clipping_fraction,
             "final_metrics": final_metrics,
+            "classifier_metrics": {k: v for k, v in classifier_metrics.items() if not isinstance(v, np.ndarray)},
+            "goodbad_metrics": {k: v for k, v in goodbad_metrics.items() if not isinstance(v, np.ndarray)},
             "source_metrics": source_metrics,
             "component_metrics": {
                 "learned_step_rms": result.learned_step_rms,
@@ -4054,6 +4592,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         nearest_mean_acc=np.asarray([final_metrics["nearest_mean_acc"]], dtype=np.float64),
         correct_mean_dist=np.asarray([final_metrics["correct_mean_dist"]], dtype=np.float64),
         wrong_mean_margin=np.asarray([final_metrics["wrong_mean_margin"]], dtype=np.float64),
+        classifier_acc=np.asarray([float(classifier_metrics.get("classifier_acc", np.nan))], dtype=np.float64),
+        classifier_confidence=np.asarray([float(classifier_metrics.get("classifier_confidence", np.nan))], dtype=np.float64),
+        classifier_margin=np.asarray([float(classifier_metrics.get("classifier_margin", np.nan))], dtype=np.float64),
+        classifier_predictions=np.asarray(classifier_metrics.get("classifier_predictions", []), dtype=np.int64),
+        classifier_target_probs=np.asarray(classifier_metrics.get("classifier_target_probs", []), dtype=np.float64),
+        classifier_margins=np.asarray(classifier_metrics.get("classifier_margins", []), dtype=np.float64),
+        human_good_rate=np.asarray([float(goodbad_metrics.get("human_good_rate", np.nan))], dtype=np.float64),
+        human_good_by_label=np.asarray(goodbad_metrics.get("human_good_by_label", []), dtype=np.float64),
+        human_bad_count_by_label=np.asarray(goodbad_metrics.get("human_bad_count_by_label", []), dtype=np.int64),
         learned_step_rms=np.asarray([0.0 if result.learned_step_rms is None else result.learned_step_rms], dtype=np.float64),
         free_step_rms=np.asarray([0.0 if result.free_step_rms is None else result.free_step_rms], dtype=np.float64),
         noise_step_rms=np.asarray([0.0 if result.noise_step_rms is None else result.noise_step_rms], dtype=np.float64),
@@ -4185,6 +4732,22 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"correct_dist={final_metrics['correct_mean_dist']:.4g}, "
         f"wrong_margin={final_metrics['wrong_mean_margin']:.4g}"
     )
+    if classifier_metrics:
+        print(
+            "Classifier diagnostics: "
+            f"acc={float(classifier_metrics.get('classifier_acc', float('nan'))):.3f}, "
+            f"conf={float(classifier_metrics.get('classifier_confidence', float('nan'))):.3f}, "
+            f"margin={float(classifier_metrics.get('classifier_margin', float('nan'))):.3f}"
+        )
+    if goodbad_metrics:
+        print(
+            "Good/bad annotation diagnostics: "
+            f"good_rate={float(goodbad_metrics.get('human_good_rate', float('nan'))):.3f}, "
+            f"entropy_good={float(goodbad_metrics.get('entropy_good_mean', float('nan'))):.3f}, "
+            f"entropy_bad={float(goodbad_metrics.get('entropy_bad_mean', float('nan'))):.3f}, "
+            f"tv_good={float(goodbad_metrics.get('tv_good_mean', float('nan'))):.3f}, "
+            f"tv_bad={float(goodbad_metrics.get('tv_bad_mean', float('nan'))):.3f}"
+        )
 
 
 if __name__ == "__main__":

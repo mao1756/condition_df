@@ -335,3 +335,86 @@ Recommended laptop-friendly 10j run:
 The process output is saved as `experiment10_diffusion_process.png`,
 `experiment10_diffusion_marginal_process.png`, and
 `experiment10_diffusion_process.npz`.
+
+### Experiment 10k: terminal classifier diagnostics and endpoint refinement
+
+Experiment 10k keeps the 10j stochastic/free-aware replay setup and adds a small
+LeNet-style MNIST classifier as an optional terminal diagnostic and training loss.
+The classifier is trained/cached locally on the same normalized MNIST measures and
+is used only as a terminal-label score surrogate; generation still receives only a
+label and a random/coarse source, never the target image.  The patch also adds
+terminal-biased replay snapshots, endpoint L2/BCE/TV losses on rollout endpoints,
+classifier-confidence diagnostics, optional classifier-based candidate selection,
+and automatic analysis of `samples_goodbad.txt` when present in the output folder.
+
+Recommended 10k raw-quality run:
+
+```powershell
+.venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
+  --data-root mnist_data `
+  --target-mode poisson-ot-flow `
+  --source-mode lowfreq `
+  --condition-on-source `
+  --ot-match-mode nearest `
+  --free-aware-target `
+  --sde-curriculum `
+  --sde-ramp-steps 3000 `
+  --target-free-weight 0.015 `
+  --target-noise-weight 0.002 `
+  --velocity-target mixed `
+  --late-residual-fraction 0.25 `
+  --late-residual-prob 0.50 `
+  --on-policy-use-free `
+  --on-policy-use-noise `
+  --on-policy-mode replay `
+  --on-policy-cache-mode trajectory `
+  --on-policy-cache-size 2048 `
+  --on-policy-cache-refresh-interval 100 `
+  --on-policy-cache-rollout-batch-size 128 `
+  --on-policy-cache-snapshots-per-traj 16 `
+  --on-policy-cache-terminal-fraction 0.35 `
+  --on-policy-cache-terminal-min-tau 0.02 `
+  --on-policy-cache-terminal-max-tau 0.18 `
+  --on-policy-target-mode safe-residual `
+  --on-policy-residual-max-ratio 1.5 `
+  --ema-decay 0.999 `
+  --use-ema-for-sampling `
+  --use-ema-for-cache `
+  --rollout-loss-weight 0.15 `
+  --rollout-loss-steps 6 `
+  --rollout-loss-batch-size 64 `
+  --rollout-loss-every 2 `
+  --rollout-image-grad-loss-weight 0.03 `
+  --rollout-endpoint-l2-weight 0.05 `
+  --rollout-endpoint-bce-weight 0.01 `
+  --rollout-endpoint-tv-weight 0.005 `
+  --use-classifier-diagnostics `
+  --classifier-loss-weight 0.04 `
+  --classifier-train-epochs 2 `
+  --upsample-mode resize-conv `
+  --flux-parameterization projected `
+  --curl-loss-weight 0.01 `
+  --checkerboard-loss-weight 0.001 `
+  --stochastic-step-loss `
+  --adaptive-sampling `
+  --clip-target 0.03 `
+  --max-substeps 4 `
+  --train-steps 8000 `
+  --batch-size 256 `
+  --base-channels 32 `
+  --sample-steps 256 `
+  --num-samples 64 `
+  --save-ablation-samples `
+  --save-process-figure
+```
+
+For a presentation-style grid, add:
+
+```powershell
+  --sample-rejection-factor 4 `
+  --sample-selection-metric classifier-confidence
+```
+
+This saves `experiment10_samples_raw.png` for the unselected candidates and
+`experiment10_samples.png` for the selected grid.  The raw grid should still be
+used when measuring actual generator quality.

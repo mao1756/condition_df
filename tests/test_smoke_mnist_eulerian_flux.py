@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import numpy as np
 import torch
 
@@ -16,6 +18,7 @@ except RuntimeError:
 from mnist.eulerian_flux_mnist import (
     DirectFluxMNISTConfig,
     DirectFluxUNet,
+    TinyMNISTClassifier,
     EDGE_ALPHA_MODES,
     FLUX_PARAMETERIZATION_MODES,
     ON_POLICY_PREFIX_MODES,
@@ -36,11 +39,14 @@ from mnist.eulerian_flux_mnist import (
     flux_curl_torch,
     flux_divergence_torch,
     image_total_variation,
+    binary_cross_entropy_probs_autocast_safe,
     make_on_policy_training_batch,
     poisson_flux_from_velocity_torch,
     sample_on_policy_replay_batch,
     save_diffusion_process_figure,
     nearest_class_mean_metrics,
+    classifier_generation_metrics,
+    analyze_goodbad_annotations,
     step_component_rms_torch,
     sample_flux_training_batch,
     simulate_direct_flux_generation,
@@ -69,6 +75,17 @@ def _toy_digit_measures(num_samples: int = 20, grid_size: int = 8) -> tuple[np.n
         images.append(blob)
         labels.append(label)
     return normalize_images_to_measures(np.asarray(images)), np.asarray(labels, dtype=np.int64)
+
+
+
+def test_probability_bce_helper_is_autocast_safe_on_probabilities() -> None:
+    pred = torch.tensor([[1e-6, 0.2, 0.8, 1.2]], dtype=torch.float16)
+    target = torch.tensor([[0.0, 0.25, 0.75, 1.0]], dtype=torch.float16)
+    context = torch.amp.autocast("cpu", enabled=True) if hasattr(torch, "amp") else nullcontext()
+    with context:
+        loss = binary_cross_entropy_probs_autocast_safe(pred, target)
+    assert torch.isfinite(loss)
+    assert loss.dtype == torch.float32
 
 
 def test_poisson_flux_divergence_matches_velocity() -> None:
@@ -229,11 +246,24 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
     projected = apply_flux_parameterization_torch(raw, batch.states, config)
     assert torch.allclose(flux_divergence_torch(projected), flux_divergence_torch(raw), atol=2e-5, rtol=2e-5)
     assert flux_curl_torch(projected).square().mean() <= flux_curl_torch(raw).square().mean() + 1e-7
-    rollout_loss, endpoint_l2, rollout_img, tv_loss = direct_flux_rollout_consistency_loss(model, batch, max_items=2, steps=1, return_extra=True)
+    (
+        rollout_loss,
+        endpoint_l2,
+        rollout_img,
+        tv_loss,
+        endpoint_bce,
+        endpoint_tv,
+        classifier_loss,
+        classifier_conf_loss,
+    ) = direct_flux_rollout_consistency_loss(model, batch, max_items=2, steps=1, return_extra=True)
     assert torch.isfinite(rollout_loss)
     assert torch.isfinite(endpoint_l2)
     assert torch.isfinite(rollout_img)
     assert torch.isfinite(tv_loss)
+    assert torch.isfinite(endpoint_bce)
+    assert torch.isfinite(endpoint_tv)
+    assert torch.isfinite(classifier_loss)
+    assert torch.isfinite(classifier_conf_loss)
     loss, metrics = direct_flux_matching_loss(model, batch)
     assert torch.isfinite(loss)
     for key in ["rollout_loss", "rollout_image_grad_loss", "target_tv_loss", "image_grad_loss", "curl_loss", "checkerboard_loss"]:
@@ -485,3 +515,34 @@ def test_direct_flux_teacher_model_and_sampler_smoke() -> None:
     assert result.trajectory.shape == (3, 3, config.grid_size * config.grid_size)
     assert np.all(result.samples >= 0.0)
     assert np.allclose(result.samples.sum(axis=1), 1.0)
+
+
+def test_terminal_classifier_metrics_and_goodbad_analysis() -> None:
+    images, labels = _toy_digit_measures(num_samples=8, grid_size=8)
+    clf = TinyMNISTClassifier(grid_size=8)
+    metrics = classifier_generation_metrics(images.reshape(8, -1), labels, clf, grid_size=8, device="cpu")
+    assert "classifier_acc" in metrics
+    from pathlib import Path
+    tmp = Path("/tmp/samples_goodbad_smoke.txt")
+    tmp.write_text("good bad good bad good bad good bad")
+    analysis = analyze_goodbad_annotations(tmp, images.reshape(8, -1), labels, classifier_metrics=metrics)
+    assert analysis["human_good_rate"] == 0.5
+    assert analysis["human_bad_count_by_label"].shape == (10,)
+
+
+def test_terminal_snapshot_steps_include_late_tau() -> None:
+    config = DirectFluxMNISTConfig(
+        grid_size=8,
+        num_steps=100,
+        on_policy_prefix_mode="uniform",
+        on_policy_min_prefix_fraction=0.05,
+        on_policy_max_prefix_fraction=0.85,
+        on_policy_cache_snapshots_per_traj=10,
+        on_policy_cache_terminal_fraction=0.4,
+        on_policy_cache_terminal_min_tau=0.02,
+        on_policy_cache_terminal_max_tau=0.18,
+    )
+    from mnist.eulerian_flux_mnist import _trajectory_snapshot_steps
+    steps = _trajectory_snapshot_steps(config)
+    assert steps.max() >= 90
+    assert steps.min() <= 10
