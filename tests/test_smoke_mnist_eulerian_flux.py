@@ -40,6 +40,7 @@ from mnist.eulerian_flux_mnist import (
     flux_divergence_torch,
     image_total_variation,
     binary_cross_entropy_probs_autocast_safe,
+    binary_cross_entropy_probs_per_sample_autocast_safe,
     make_on_policy_training_batch,
     poisson_flux_from_velocity_torch,
     sample_on_policy_replay_batch,
@@ -86,6 +87,9 @@ def test_probability_bce_helper_is_autocast_safe_on_probabilities() -> None:
         loss = binary_cross_entropy_probs_autocast_safe(pred, target)
     assert torch.isfinite(loss)
     assert loss.dtype == torch.float32
+    per_sample = binary_cross_entropy_probs_per_sample_autocast_safe(pred, target)
+    assert per_sample.shape == (1,)
+    assert torch.isfinite(per_sample).all()
 
 
 def test_poisson_flux_divergence_matches_velocity() -> None:
@@ -255,6 +259,9 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
         endpoint_tv,
         classifier_loss,
         classifier_conf_loss,
+        terminal_active,
+        terminal_tau_mean,
+        terminal_scale,
     ) = direct_flux_rollout_consistency_loss(model, batch, max_items=2, steps=1, return_extra=True)
     assert torch.isfinite(rollout_loss)
     assert torch.isfinite(endpoint_l2)
@@ -264,6 +271,8 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
     assert torch.isfinite(endpoint_tv)
     assert torch.isfinite(classifier_loss)
     assert torch.isfinite(classifier_conf_loss)
+    assert torch.isfinite(terminal_active)
+    assert torch.isfinite(terminal_scale)
     loss, metrics = direct_flux_matching_loss(model, batch)
     assert torch.isfinite(loss)
     for key in ["rollout_loss", "rollout_image_grad_loss", "target_tv_loss", "image_grad_loss", "curl_loss", "checkerboard_loss"]:

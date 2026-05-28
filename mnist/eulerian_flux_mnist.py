@@ -31,7 +31,7 @@ predict the h-transform conditioning flux, i.e. the desired total transport
 flux minus the free Dirichlet drift, while on-policy/step losses can use the
 same free/noisy SDE weights as the sampler.  The default remains learned-only
 for quick deterministic debugging; pass the SDE curriculum/free-aware flags to
-train and sample with stochastic dynamics.  Experiment 10h merges the rollout-sharpening machinery back into stochastic training, replaces transposed-convolution upsampling by resize-conv by default, and can project learned edge fluxes to their minimum-energy divergence-equivalent part to suppress checkerboard/curl artifacts.  Experiment 10i adds a replay on-policy cache, cheaper projected-flux losses, cached Poisson denominators, rollout-endpoint sharpening losses, timing diagnostics, and diffusion-process figures. Experiment 10j replaces independent replay rollouts with trajectory-snapshot replay, adds safe residual replay targets, and optionally uses EMA weights for cache building and sampling. Experiment 10k adds terminal classifier diagnostics/losses, terminal-biased replay snapshots, endpoint losses, optional classifier-based sample selection, and good/bad sample annotation analysis.
+train and sample with stochastic dynamics.  Experiment 10h merges the rollout-sharpening machinery back into stochastic training, replaces transposed-convolution upsampling by resize-conv by default, and can project learned edge fluxes to their minimum-energy divergence-equivalent part to suppress checkerboard/curl artifacts.  Experiment 10i adds a replay on-policy cache, cheaper projected-flux losses, cached Poisson denominators, rollout-endpoint sharpening losses, timing diagnostics, and diffusion-process figures. Experiment 10j replaces independent replay rollouts with trajectory-snapshot replay, adds safe residual replay targets, and optionally uses EMA weights for cache building and sampling. Experiment 10k adds terminal classifier diagnostics/losses, terminal-biased replay snapshots, endpoint losses, optional classifier-based sample selection, and good/bad sample annotation analysis. Experiment 10l makes terminal/classifier losses safe by gating them to late-terminal states, separating classifier diagnostics from classifier training, and disabling unsafe endpoint TV by default.
 """
 
 import argparse
@@ -242,13 +242,20 @@ class DirectFluxMNISTConfig:
     rollout_loss_prob: float = 1.0
     image_grad_loss_weight: float = 0.0
     rollout_image_grad_loss_weight: float = 0.03
-    rollout_endpoint_l2_weight: float = 0.05
-    rollout_endpoint_bce_weight: float = 0.01
-    rollout_endpoint_tv_weight: float = 0.005
+    # Experiment 10l: endpoint/classifier losses are potentially dangerous away
+    # from the terminal endpoint.  Keep them disabled by default and, when
+    # enabled, gate them by terminal time below.
+    rollout_endpoint_l2_weight: float = 0.0
+    rollout_endpoint_bce_weight: float = 0.0
+    rollout_endpoint_tv_weight: float = 0.0
+    terminal_loss_tau_max_fraction: float = 0.18
+    terminal_loss_ramp_steps: int = 3000
     target_tv_loss_weight: float = 0.0
     target_entropy_loss_weight: float = 0.0
+    use_classifier_loss: bool = False
     classifier_loss_weight: float = 0.0
     classifier_confidence_loss_weight: float = 0.0
+    classifier_loss_blur_sigma: float = 0.6
     curl_loss_weight: float = 0.01
     edge_laplacian_loss_weight: float = 0.0
     checkerboard_loss_weight: float = 0.001
@@ -430,14 +437,22 @@ class DirectFluxMNISTConfig:
             raise ValueError("rollout_endpoint_bce_weight must be non-negative")
         if self.rollout_endpoint_tv_weight < 0.0:
             raise ValueError("rollout_endpoint_tv_weight must be non-negative")
+        if not (0.0 <= self.terminal_loss_tau_max_fraction <= 1.0):
+            raise ValueError("terminal_loss_tau_max_fraction must be in [0, 1]")
+        if self.terminal_loss_ramp_steps < 0:
+            raise ValueError("terminal_loss_ramp_steps must be non-negative")
         if self.target_tv_loss_weight < 0.0:
             raise ValueError("target_tv_loss_weight must be non-negative")
         if self.target_entropy_loss_weight < 0.0:
             raise ValueError("target_entropy_loss_weight must be non-negative")
+        if not isinstance(self.use_classifier_loss, bool):
+            raise ValueError("use_classifier_loss must be a bool")
         if self.classifier_loss_weight < 0.0:
             raise ValueError("classifier_loss_weight must be non-negative")
         if self.classifier_confidence_loss_weight < 0.0:
             raise ValueError("classifier_confidence_loss_weight must be non-negative")
+        if self.classifier_loss_blur_sigma < 0.0 or not math.isfinite(self.classifier_loss_blur_sigma):
+            raise ValueError("classifier_loss_blur_sigma must be non-negative and finite")
         if self.rollout_loss_weight < 0.0:
             raise ValueError("rollout_loss_weight must be non-negative")
         if self.rollout_loss_steps < 0:
@@ -1590,6 +1605,67 @@ def image_total_variation(states: Tensor, *, grid_size: int | None = None) -> Te
     return (dx.abs() + dy.abs()).flatten(1).sum(dim=1).mean()
 
 
+def image_total_variation_per_sample(states: Tensor, *, grid_size: int | None = None) -> Tensor:
+    """Per-sample anisotropic total variation of mass/image tensors."""
+    if states.ndim == 2:
+        n = int(grid_size or round(math.sqrt(int(states.shape[1]))))
+        img = states.reshape(-1, n, n)
+    elif states.ndim == 3:
+        img = states
+    elif states.ndim == 4 and states.shape[1] == 1:
+        img = states[:, 0]
+    else:
+        raise ValueError("states must have shape (B,N), (B,H,W), or (B,1,H,W)")
+    dx = torch.roll(img, shifts=-1, dims=-1) - img
+    dy = torch.roll(img, shifts=-1, dims=-2) - img
+    return (dx.abs() + dy.abs()).flatten(1).sum(dim=1)
+
+
+def _masked_mean_torch(values: Tensor, mask: Tensor) -> Tensor:
+    """Mean over samples selected by a fixed boolean/float mask; zero if empty."""
+    values = values.reshape(-1)
+    weights = mask.to(dtype=values.dtype, device=values.device).reshape(-1)
+    denom = weights.sum()
+    if float(denom.detach().cpu()) <= 0.0:
+        return values.new_tensor(0.0)
+    return (values * weights).sum() / denom.clamp_min(torch.finfo(values.dtype).eps)
+
+
+def _safe_terminal_loss_scale(step_index: int | None, config: DirectFluxMNISTConfig, ref: Tensor) -> Tensor:
+    ramp_steps = int(config.terminal_loss_ramp_steps)
+    if ramp_steps <= 0 or step_index is None:
+        scale = 1.0
+    else:
+        scale = min(1.0, max(0.0, float(step_index) / float(max(ramp_steps, 1))))
+    return ref.new_tensor(scale)
+
+
+def binary_cross_entropy_probs_per_sample_autocast_safe(input_prob: Tensor, target_prob: Tensor) -> Tensor:
+    """Autocast-safe per-sample BCE for probability tensors."""
+    with _autocast_disabled_for(input_prob.device.type):
+        input32 = input_prob.float().clamp(1e-5, 1.0 - 1e-5)
+        target32 = target_prob.float().clamp(0.0, 1.0)
+        loss = -(target32 * torch.log(input32) + (1.0 - target32) * torch.log1p(-input32))
+        return loss.flatten(1).mean(dim=1)
+
+
+def _classifier_input_from_masses_for_loss(masses: Tensor, grid_size: int, *, blur_sigma: float) -> Tensor:
+    """Classifier input for generator loss; optionally blurred to avoid grid exploits."""
+    n = int(grid_size)
+    if masses.ndim == 2:
+        img = masses.reshape(masses.shape[0], 1, n, n)
+    elif masses.ndim == 3:
+        img = masses[:, None, :, :]
+    elif masses.ndim == 4 and masses.shape[1] == 1:
+        img = masses
+    else:
+        raise ValueError("masses must have shape (B,N), (B,H,W), or (B,1,H,W)")
+    if float(blur_sigma) > 0.0:
+        with _autocast_disabled_for(img.device.type):
+            img = _periodic_gaussian_blur_torch(img.float(), sigma=float(blur_sigma)).to(dtype=masses.dtype)
+    return img * float(n * n)
+
+
 def image_gradient_mse_torch(a: Tensor, b: Tensor, *, grid_size: int | None = None) -> Tensor:
     """Finite-difference image-gradient MSE for sharpening losses."""
     if a.ndim == 2:
@@ -2280,27 +2356,29 @@ def direct_flux_rollout_consistency_loss(
     steps: int | None = None,
     return_extra: bool = False,
     terminal_classifier: TinyMNISTClassifier | None = None,
-) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Multi-step sampler-consistency loss on a small microbatch.
 
     The prediction is unrolled through the same differentiable conservative
     clipped step used by the one-step loss.  The teacher branch is unrolled with
-    the corresponding supervised conditioning flux and no gradients.  The
-    optional extra returns are endpoint image-gradient, endpoint BCE, TV, and
-    classifier losses that improve terminal MNIST fidelity.
+    the corresponding supervised conditioning flux and no gradients.  Experiment
+    10l makes the optional terminal losses safe: they act only after the rollout
+    endpoint is actually close to terminal time, and they are ramped in over the
+    early training steps.  This avoids forcing mid-trajectory states to look like
+    final MNIST digits, which produced checkerboard/classifier artifacts in 10k.
     """
     config = model.config
     rollout_steps = int(config.rollout_loss_steps if steps is None else steps)
     if rollout_steps <= 0:
         z = batch.states.new_tensor(0.0)
-        return (z, z, z, z, z, z, z, z) if return_extra else (z, z)
+        return (z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
     count = int(batch.states.shape[0])
     if max_items is None:
         max_items = int(config.rollout_loss_batch_size)
     count = min(count, int(max_items))
     if count <= 0:
         z = batch.states.new_tensor(0.0)
-        return (z, z, z, z, z, z, z, z) if return_extra else (z, z)
+        return (z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
     sl = slice(0, count)
     horizon = max(float(natural_horizon(config)), 1e-12)
     dt = horizon / float(max(int(config.num_steps), 1))
@@ -2347,30 +2425,63 @@ def direct_flux_rollout_consistency_loss(
     pred_scaled = pred_state * scale
     target_scaled = targets * scale
     rollout_l2 = F.mse_loss(pred_scaled, teacher_state * scale)
-    endpoint_l2 = F.mse_loss(pred_scaled, target_scaled)
+
+    tau_frac_after = (tau / horizon).clamp(0.0, 1.0)
+    terminal_mask = tau_frac_after <= float(config.terminal_loss_tau_max_fraction)
+    terminal_active_fraction = terminal_mask.float().mean()
+    terminal_tau_mean = _masked_mean_torch(tau_frac_after, terminal_mask)
+    terminal_loss_scale = _safe_terminal_loss_scale(batch.step_index, config, pred_state)
+
+    endpoint_l2_vec = (pred_scaled - target_scaled).square().flatten(1).mean(dim=1)
+    endpoint_l2 = terminal_loss_scale * _masked_mean_torch(endpoint_l2_vec, terminal_mask)
     if not return_extra:
         return rollout_l2, endpoint_l2
+
+    # Keep the rollout image-gradient loss as the stable 10j sharpening signal.
+    # The more aggressive endpoint losses below are terminal-gated.
     rollout_image_grad = image_gradient_mse_torch(pred_scaled, target_scaled, grid_size=int(config.grid_size))
-    # BCE on scaled images is a weak terminal pixel-likelihood surrogate.  Clamp
-    # because normalized mass images can have a few scaled values above one.
-    # Use a manual float32 implementation because PyTorch blocks probability
-    # BCE under CUDA autocast.
-    endpoint_bce = binary_cross_entropy_probs_autocast_safe(pred_scaled, target_scaled)
-    tv_loss = (
-        image_total_variation(pred_scaled, grid_size=int(config.grid_size))
-        - image_total_variation(target_scaled, grid_size=int(config.grid_size))
-    ).square()
-    endpoint_tv_loss = tv_loss
+
+    endpoint_bce_vec = binary_cross_entropy_probs_per_sample_autocast_safe(pred_scaled, target_scaled)
+    endpoint_bce = terminal_loss_scale * _masked_mean_torch(endpoint_bce_vec, terminal_mask)
+
+    pred_tv_vec = image_total_variation_per_sample(pred_scaled, grid_size=int(config.grid_size))
+    target_tv_vec = image_total_variation_per_sample(target_scaled, grid_size=int(config.grid_size)).detach()
+    # Raw scalar TV matching rewarded alternating pixel patterns in 10k.  Use a
+    # relative TV discrepancy and terminal gating so the loss cannot dominate.
+    endpoint_tv_vec = ((pred_tv_vec - target_tv_vec) / target_tv_vec.clamp_min(1.0)).square()
+    endpoint_tv_loss = terminal_loss_scale * _masked_mean_torch(endpoint_tv_vec, terminal_mask)
+    target_tv_loss = endpoint_tv_loss
+
     cls_loss = pred_state.new_tensor(0.0)
     cls_conf_loss = pred_state.new_tensor(0.0)
-    if terminal_classifier is not None:
+    if terminal_classifier is not None and bool(config.use_classifier_loss) and (
+        float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0
+    ):
         terminal_classifier.eval()
-        logits = terminal_classifier(_classifier_input_from_masses(pred_state, int(config.grid_size)))
-        cls_loss = F.cross_entropy(logits, labels)
+        cls_input = _classifier_input_from_masses_for_loss(
+            pred_state,
+            int(config.grid_size),
+            blur_sigma=float(config.classifier_loss_blur_sigma),
+        )
+        logits = terminal_classifier(cls_input)
+        ce_vec = F.cross_entropy(logits, labels, reduction="none")
+        cls_loss = terminal_loss_scale * _masked_mean_torch(ce_vec, terminal_mask)
         probs = logits.softmax(dim=1)
         target_prob = probs.gather(1, labels.view(-1, 1)).squeeze(1)
-        cls_conf_loss = (1.0 - target_prob).mean()
-    return rollout_l2, endpoint_l2, rollout_image_grad, tv_loss, endpoint_bce, endpoint_tv_loss, cls_loss, cls_conf_loss
+        cls_conf_loss = terminal_loss_scale * _masked_mean_torch(1.0 - target_prob, terminal_mask)
+    return (
+        rollout_l2,
+        endpoint_l2,
+        rollout_image_grad,
+        target_tv_loss,
+        endpoint_bce,
+        endpoint_tv_loss,
+        cls_loss,
+        cls_conf_loss,
+        terminal_active_fraction.detach(),
+        terminal_tau_mean.detach(),
+        terminal_loss_scale.detach(),
+    )
 
 def direct_flux_matching_loss(
     model: DirectFluxUNet,
@@ -2409,8 +2520,7 @@ def direct_flux_matching_loss(
             or float(config.rollout_endpoint_l2_weight) > 0.0
             or float(config.rollout_endpoint_bce_weight) > 0.0
             or float(config.rollout_endpoint_tv_weight) > 0.0
-            or float(config.classifier_loss_weight) > 0.0
-            or float(config.classifier_confidence_loss_weight) > 0.0
+            or (bool(config.use_classifier_loss) and (float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0))
             or float(config.target_tv_loss_weight) > 0.0
             or float(config.target_entropy_loss_weight) > 0.0
         )
@@ -2466,6 +2576,9 @@ def direct_flux_matching_loss(
     classifier_loss = pred_norm.new_tensor(0.0)
     classifier_confidence_loss = pred_norm.new_tensor(0.0)
     target_tv_loss = pred_norm.new_tensor(0.0)
+    terminal_active_fraction = pred_norm.new_tensor(0.0)
+    terminal_tau_mean = pred_norm.new_tensor(float("nan"))
+    terminal_loss_scale = pred_norm.new_tensor(0.0)
     rollout_ready = batch.step_index is None or int(batch.step_index) >= int(config.rollout_loss_warmup_steps)
     rollout_due = True
     if batch.step_index is not None:
@@ -2480,8 +2593,7 @@ def direct_flux_matching_loss(
         or float(config.rollout_endpoint_l2_weight) > 0.0
         or float(config.rollout_endpoint_bce_weight) > 0.0
         or float(config.rollout_endpoint_tv_weight) > 0.0
-        or float(config.classifier_loss_weight) > 0.0
-        or float(config.classifier_confidence_loss_weight) > 0.0
+        or (bool(config.use_classifier_loss) and (float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0))
         or float(config.target_tv_loss_weight) > 0.0
     ):
         (
@@ -2493,6 +2605,9 @@ def direct_flux_matching_loss(
             rollout_endpoint_tv_loss,
             classifier_loss,
             classifier_confidence_loss,
+            terminal_active_fraction,
+            terminal_tau_mean,
+            terminal_loss_scale,
         ) = direct_flux_rollout_consistency_loss(model, batch, return_extra=True, terminal_classifier=terminal_classifier)
 
     curl_loss = flux_curl_torch(raw_pred_norm).square().mean()
@@ -2512,8 +2627,8 @@ def direct_flux_matching_loss(
         + float(config.rollout_image_grad_loss_weight) * rollout_image_grad_loss
         + float(config.target_tv_loss_weight) * target_tv_loss
         + float(config.target_entropy_loss_weight) * target_entropy_loss
-        + float(config.classifier_loss_weight) * classifier_loss
-        + float(config.classifier_confidence_loss_weight) * classifier_confidence_loss
+        + (float(config.classifier_loss_weight) * classifier_loss if bool(config.use_classifier_loss) else classifier_loss.new_tensor(0.0))
+        + (float(config.classifier_confidence_loss_weight) * classifier_confidence_loss if bool(config.use_classifier_loss) else classifier_confidence_loss.new_tensor(0.0))
         + float(config.curl_loss_weight) * curl_loss
         + float(config.edge_laplacian_loss_weight) * edge_lap_loss
         + float(config.checkerboard_loss_weight) * checker_loss
@@ -2550,6 +2665,9 @@ def direct_flux_matching_loss(
         "target_entropy_loss": float(target_entropy_loss.detach().cpu()),
         "classifier_loss": float(classifier_loss.detach().cpu()),
         "classifier_confidence_loss": float(classifier_confidence_loss.detach().cpu()),
+        "terminal_loss_active_fraction": float(terminal_active_fraction.detach().cpu()),
+        "terminal_tau_mean": float(terminal_tau_mean.detach().cpu()),
+        "terminal_loss_scale": float(terminal_loss_scale.detach().cpu()),
         "image_grad_loss": float(image_grad_loss.detach().cpu()),
         "curl_loss": float(curl_loss.detach().cpu()),
         "edge_laplacian_loss": float(edge_lap_loss.detach().cpu()),
@@ -3137,6 +3255,9 @@ def train_direct_flux_model(
         "target_entropy_loss": [],
         "classifier_loss": [],
         "classifier_confidence_loss": [],
+        "terminal_loss_active_fraction": [],
+        "terminal_tau_mean": [],
+        "terminal_loss_scale": [],
         "image_grad_loss": [],
         "curl_loss": [],
         "edge_laplacian_loss": [],
@@ -3310,6 +3431,8 @@ def train_direct_flux_model(
                 rimg=metrics.get("rollout_image_grad_loss", 0.0),
                 ep=metrics.get("rollout_endpoint_l2", 0.0),
                 cls=metrics.get("classifier_loss", 0.0),
+                t_act=metrics.get("terminal_loss_active_fraction", 0.0),
+                t_tau=metrics.get("terminal_tau_mean", float("nan")),
                 tv=metrics.get("target_tv_loss", 0.0),
                 curl=metrics.get("curl_loss", 0.0),
                 pred=metrics["pred_rms"],
@@ -4208,13 +4331,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--rollout-loss-every", type=int, default=2)
     parser.add_argument("--rollout-loss-prob", type=float, default=1.0)
     parser.add_argument("--rollout-image-grad-loss-weight", type=float, default=0.03)
-    parser.add_argument("--rollout-endpoint-l2-weight", type=float, default=0.05)
-    parser.add_argument("--rollout-endpoint-bce-weight", type=float, default=0.01)
-    parser.add_argument("--rollout-endpoint-tv-weight", type=float, default=0.005)
+    parser.add_argument("--rollout-endpoint-l2-weight", type=float, default=0.0)
+    parser.add_argument("--rollout-endpoint-bce-weight", type=float, default=0.0)
+    parser.add_argument("--rollout-endpoint-tv-weight", type=float, default=0.0)
+    parser.add_argument("--terminal-loss-tau-max-fraction", type=float, default=0.18)
+    parser.add_argument("--terminal-loss-ramp-steps", type=int, default=3000)
     parser.add_argument("--target-tv-loss-weight", type=float, default=0.0)
     parser.add_argument("--target-entropy-loss-weight", type=float, default=0.0)
+    parser.add_argument("--use-classifier-loss", dest="use_classifier_loss", action="store_true", default=False)
+    parser.add_argument("--no-use-classifier-loss", dest="use_classifier_loss", action="store_false")
     parser.add_argument("--classifier-loss-weight", type=float, default=0.0)
     parser.add_argument("--classifier-confidence-loss-weight", type=float, default=0.0)
+    parser.add_argument("--classifier-loss-blur-sigma", type=float, default=0.6)
     parser.add_argument("--use-classifier-diagnostics", action="store_true")
     parser.add_argument("--classifier-cache-path", type=Path, default=None)
     parser.add_argument("--classifier-train-epochs", type=int, default=2)
@@ -4354,10 +4482,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         rollout_endpoint_l2_weight=float(args.rollout_endpoint_l2_weight),
         rollout_endpoint_bce_weight=float(args.rollout_endpoint_bce_weight),
         rollout_endpoint_tv_weight=float(args.rollout_endpoint_tv_weight),
+        terminal_loss_tau_max_fraction=float(args.terminal_loss_tau_max_fraction),
+        terminal_loss_ramp_steps=int(args.terminal_loss_ramp_steps),
         target_tv_loss_weight=float(args.target_tv_loss_weight),
         target_entropy_loss_weight=float(args.target_entropy_loss_weight),
+        use_classifier_loss=bool(args.use_classifier_loss),
         classifier_loss_weight=float(args.classifier_loss_weight),
         classifier_confidence_loss_weight=float(args.classifier_confidence_loss_weight),
+        classifier_loss_blur_sigma=float(args.classifier_loss_blur_sigma),
         use_classifier_diagnostics=bool(args.use_classifier_diagnostics),
         classifier_train_epochs=int(args.classifier_train_epochs),
         classifier_cache_path="" if args.classifier_cache_path is None else str(args.classifier_cache_path),
@@ -4406,6 +4538,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         "cuda" if args.device is None and torch.cuda.is_available() else "cpu" if args.device is None else args.device
     )
     print(f"Experiment 10k direct-flux MNIST on device={device}")
+    if float(config.rollout_endpoint_tv_weight) > 0.0:
+        print(
+            "Warning: --rollout-endpoint-tv-weight is enabled. 10l gates and normalizes this loss, "
+            "but raw TV matching can still encourage high-frequency texture; prefer 0 for baseline runs."
+        )
+    if (float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0) and not bool(config.use_classifier_loss):
+        print(
+            "Note: classifier loss weights were provided, but --use-classifier-loss was not set. "
+            "The classifier will be used only for diagnostics/sample selection."
+        )
     print(
         "Laptop-friendly settings: "
         f"target_mode={config.target_mode}, source_mode={config.source_mode}, "
@@ -4413,7 +4555,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"source_cond={config.condition_on_source}, upsample={config.upsample_mode}, flux_param={config.flux_parameterization}, velocity={config.velocity_target}, "
         f"free_aware={config.free_aware_target}, sde_curr={config.sde_curriculum}, edge_alpha={config.edge_alpha_mode}, "
         f"on_policy={config.on_policy_prob}, onp_mode={config.on_policy_mode}/{config.on_policy_cache_mode}, cache={config.on_policy_cache_size}/{config.on_policy_cache_refresh_interval}/snap{config.on_policy_cache_snapshots_per_traj}, onp_target={config.on_policy_target_mode}, ema={config.ema_decay}, onp_sde=({config.on_policy_use_free},{config.on_policy_use_noise}), "
-        f"step_loss={config.step_loss_weight}, rollout={config.rollout_loss_weight}/{config.rollout_loss_steps}/every{config.rollout_loss_every}, rollout_img={config.rollout_image_grad_loss_weight}, project_main={config.project_main_loss}, curl={config.curl_loss_weight}, stochastic_step={config.stochastic_step_loss}, adaptive={config.adaptive_sampling}, "
+        f"step_loss={config.step_loss_weight}, rollout={config.rollout_loss_weight}/{config.rollout_loss_steps}/every{config.rollout_loss_every}, rollout_img={config.rollout_image_grad_loss_weight}, terminal_tau<={config.terminal_loss_tau_max_fraction}, cls_loss={config.use_classifier_loss}/{config.classifier_loss_weight}, project_main={config.project_main_loss}, curl={config.curl_loss_weight}, stochastic_step={config.stochastic_step_loss}, adaptive={config.adaptive_sampling}, "
         f"train_steps={args.train_steps}, batch={args.batch_size}, base_channels={args.base_channels}, "
         f"horizon={natural_horizon(config):.3e}, sample_steps={args.sample_steps}, "
         f"weights=(free={config.free_weight}, noise={config.noise_weight}, learned={config.learned_weight})"
@@ -4430,8 +4572,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     model = DirectFluxUNet(config, base_channels=int(args.base_channels))
     classifier_needed = (
         bool(config.use_classifier_diagnostics)
-        or float(config.classifier_loss_weight) > 0.0
-        or float(config.classifier_confidence_loss_weight) > 0.0
+        or (bool(config.use_classifier_loss) and (float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0))
         or int(config.sample_rejection_factor) > 1
     )
     terminal_classifier: TinyMNISTClassifier | None = None
