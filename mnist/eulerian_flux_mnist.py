@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-r"""Example 10/10b/10c/10d/10e/10g/10h: MNIST generation with directly learned Eulerian edge fluxes.
+r"""Example 10/10b/10c/10d/10e/10g/10h/10i: MNIST generation with directly learned Eulerian edge fluxes.
 
 The manuscript's fixed-grid h-transform adds a conservative edge flux
 
@@ -31,7 +31,7 @@ predict the h-transform conditioning flux, i.e. the desired total transport
 flux minus the free Dirichlet drift, while on-policy/step losses can use the
 same free/noisy SDE weights as the sampler.  The default remains learned-only
 for quick deterministic debugging; pass the SDE curriculum/free-aware flags to
-train and sample with stochastic dynamics.  Experiment 10h merges the rollout-sharpening machinery back into stochastic training, replaces transposed-convolution upsampling by resize-conv by default, and can project learned edge fluxes to their minimum-energy divergence-equivalent part to suppress checkerboard/curl artifacts.
+train and sample with stochastic dynamics.  Experiment 10h merges the rollout-sharpening machinery back into stochastic training, replaces transposed-convolution upsampling by resize-conv by default, and can project learned edge fluxes to their minimum-energy divergence-equivalent part to suppress checkerboard/curl artifacts.  Experiment 10i adds a replay on-policy cache, cheaper projected-flux losses, cached Poisson denominators, rollout-endpoint sharpening losses, timing diagnostics, and diffusion-process figures.
 """
 
 import argparse
@@ -62,6 +62,7 @@ OT_COST_MODES = ("lowres", "pixel")
 OT_MATCH_MODES = ("minibatch", "nearest", "topk")
 EDGE_ALPHA_MODES = ("legacy", "grid")
 ON_POLICY_PREFIX_MODES = ("short", "uniform", "late-biased")
+ON_POLICY_MODES = ("online", "replay", "off")
 UPSAMPLE_MODES = ("transpose", "resize-conv")
 FLUX_PARAMETERIZATION_MODES = ("edge", "projected")
 
@@ -71,10 +72,12 @@ __all__ = [
     "SourceBatch",
     "FluxTrainingBatch",
     "FluxGenerationResult",
+    "OnPolicyReplayCache",
     "ClasswiseOTCache",
     "OT_MATCH_MODES",
     "EDGE_ALPHA_MODES",
     "ON_POLICY_PREFIX_MODES",
+    "ON_POLICY_MODES",
     "UPSAMPLE_MODES",
     "FLUX_PARAMETERIZATION_MODES",
     "DirectFluxUNet",
@@ -95,6 +98,10 @@ __all__ = [
     "build_classwise_ot_cache",
     "training_target_flux_torch",
     "make_on_policy_training_batch",
+    "build_on_policy_replay_cache",
+    "sample_on_policy_replay_batch",
+    "save_diffusion_process_figure",
+    "save_diffusion_marginal_process_figure",
     "direct_flux_rollout_consistency_loss",
     "image_total_variation",
     "checkerboard_energy_torch",
@@ -111,6 +118,7 @@ __all__ = [
     "nearest_class_mean_metrics",
     "save_flux_samples_grid",
     "save_flux_preview_panel",
+    "save_flux_process_figure",
     "source_diversity_metrics",
     "main",
 ]
@@ -146,6 +154,10 @@ class DirectFluxMNISTConfig:
     condition_on_source: bool = True
     upsample_mode: str = "resize-conv"
     flux_parameterization: str = "projected"
+    # Experiment 10i: skip the expensive FFT projection for the main
+    # teacher-forced losses. Projection is still used for sampler-consistency
+    # losses and generation, where it matters for the actual dynamics.
+    project_main_loss: bool = False
 
     # Experiment 10e: the default target matching is stable across batches.
     # ``nearest`` chooses a same-label target by global low-resolution features;
@@ -210,10 +222,15 @@ class DirectFluxMNISTConfig:
     node_loss_weight: float = 1.0
     step_loss_weight: float = 0.25
     rollout_loss_weight: float = 0.15
-    rollout_loss_steps: int = 8
+    rollout_loss_steps: int = 6
     rollout_loss_batch_size: int = 64
     rollout_loss_warmup_steps: int = 1500
-    image_grad_loss_weight: float = 0.05
+    rollout_loss_every: int = 2
+    rollout_loss_prob: float = 1.0
+    image_grad_loss_weight: float = 0.0
+    rollout_image_grad_loss_weight: float = 0.05
+    target_tv_loss_weight: float = 0.0
+    target_entropy_loss_weight: float = 0.0
     curl_loss_weight: float = 0.01
     edge_laplacian_loss_weight: float = 0.0
     checkerboard_loss_weight: float = 0.001
@@ -225,6 +242,11 @@ class DirectFluxMNISTConfig:
     on_policy_min_prefix_fraction: float = 0.05
     on_policy_max_prefix_fraction: float = 0.85
     on_policy_batch_size: int = 64
+    on_policy_mode: str = "replay"
+    on_policy_cache_size: int = 2048
+    on_policy_cache_refresh_interval: int = 250
+    on_policy_cache_rollout_batch_size: int = 128
+    on_policy_cache_device: str = "cpu"
 
     adaptive_sampling: bool = False
     clip_target: float = 0.03
@@ -337,6 +359,8 @@ class DirectFluxMNISTConfig:
             raise ValueError(f"upsample_mode must be one of {UPSAMPLE_MODES}")
         if self.flux_parameterization not in FLUX_PARAMETERIZATION_MODES:
             raise ValueError(f"flux_parameterization must be one of {FLUX_PARAMETERIZATION_MODES}")
+        if not isinstance(self.project_main_loss, bool):
+            raise ValueError("project_main_loss must be a bool")
         if not (0.0 <= self.state_jitter_weight < 1.0):
             raise ValueError("state_jitter_weight must be in [0, 1)")
         if self.velocity_target not in VELOCITY_TARGET_MODES:
@@ -361,6 +385,12 @@ class DirectFluxMNISTConfig:
             raise ValueError("step_loss_weight must be non-negative")
         if self.image_grad_loss_weight < 0.0:
             raise ValueError("image_grad_loss_weight must be non-negative")
+        if self.rollout_image_grad_loss_weight < 0.0:
+            raise ValueError("rollout_image_grad_loss_weight must be non-negative")
+        if self.target_tv_loss_weight < 0.0:
+            raise ValueError("target_tv_loss_weight must be non-negative")
+        if self.target_entropy_loss_weight < 0.0:
+            raise ValueError("target_entropy_loss_weight must be non-negative")
         if self.rollout_loss_weight < 0.0:
             raise ValueError("rollout_loss_weight must be non-negative")
         if self.rollout_loss_steps < 0:
@@ -369,6 +399,10 @@ class DirectFluxMNISTConfig:
             raise ValueError("rollout_loss_batch_size must be positive")
         if self.rollout_loss_warmup_steps < 0:
             raise ValueError("rollout_loss_warmup_steps must be non-negative")
+        if self.rollout_loss_every <= 0:
+            raise ValueError("rollout_loss_every must be positive")
+        if not (0.0 <= self.rollout_loss_prob <= 1.0):
+            raise ValueError("rollout_loss_prob must be in [0, 1]")
         if self.curl_loss_weight < 0.0:
             raise ValueError("curl_loss_weight must be non-negative")
         if self.edge_laplacian_loss_weight < 0.0:
@@ -377,6 +411,16 @@ class DirectFluxMNISTConfig:
             raise ValueError("checkerboard_loss_weight must be non-negative")
         if not (0.0 <= self.on_policy_prob <= 1.0):
             raise ValueError("on_policy_prob must be in [0, 1]")
+        if self.on_policy_mode not in ON_POLICY_MODES:
+            raise ValueError(f"on_policy_mode must be one of {ON_POLICY_MODES}")
+        if self.on_policy_cache_size <= 0:
+            raise ValueError("on_policy_cache_size must be positive")
+        if self.on_policy_cache_refresh_interval <= 0:
+            raise ValueError("on_policy_cache_refresh_interval must be positive")
+        if self.on_policy_cache_rollout_batch_size <= 0:
+            raise ValueError("on_policy_cache_rollout_batch_size must be positive")
+        if self.on_policy_cache_device not in {"cpu", "cuda"}:
+            raise ValueError("on_policy_cache_device must be 'cpu' or 'cuda'")
         if self.on_policy_warmup_steps < 0:
             raise ValueError("on_policy_warmup_steps must be non-negative")
         if self.on_policy_prefix_steps < 0:
@@ -445,6 +489,19 @@ class FluxTrainingBatch:
     step_index: int | None = None
     train_free_weight: float = 0.0
     train_noise_weight: float = 0.0
+
+
+@dataclass
+class OnPolicyReplayCache:
+    """Replay buffer of model-visited states for cheaper on-policy training."""
+
+    batch: FluxTrainingBatch
+    created_step: int
+    refresh_seconds: float
+
+    @property
+    def size(self) -> int:
+        return int(self.batch.states.shape[0])
 
 
 @dataclass(frozen=True)
@@ -1054,6 +1111,25 @@ def _autocast_disabled_for(device_type: str):
     return nullcontext()
 
 
+_POISSON_DENOM_CACHE: dict[tuple[int, int, str, torch.dtype], Tensor] = {}
+
+
+def _poisson_denom_cached(h: int, w: int, *, device: torch.device, dtype: torch.dtype) -> Tensor:
+    """Cached spectral denominator for repeated periodic Poisson solves."""
+    key = (int(h), int(w), str(device), dtype)
+    cached = _POISSON_DENOM_CACHE.get(key)
+    if cached is not None:
+        return cached
+    ky = torch.arange(h, device=device, dtype=dtype).view(h, 1)
+    kx = torch.arange(w // 2 + 1, device=device, dtype=dtype).view(1, w // 2 + 1)
+    two_pi = 2.0 * math.pi
+    denom = 2.0 * torch.cos(two_pi * kx / float(w)) - 2.0
+    denom = denom + 2.0 * torch.cos(two_pi * ky / float(h)) - 2.0
+    denom = denom.clamp(max=-1e-12)
+    _POISSON_DENOM_CACHE[key] = denom
+    return denom
+
+
 def poisson_flux_from_velocity_torch(velocity: Tensor, *, grid_size: int | None = None) -> Tensor:
     """Return minimum-energy periodic edge flux with ``div flux = velocity``.
 
@@ -1093,12 +1169,7 @@ def poisson_flux_from_velocity_torch(velocity: Tensor, *, grid_size: int | None 
         v_work = v.to(dtype=compute_dtype)
         v_work = v_work - v_work.mean(dim=(-2, -1), keepdim=True)
         v_hat = torch.fft.rfft2(v_work)
-        ky = torch.arange(h, device=v_work.device, dtype=compute_dtype).view(h, 1)
-        kx = torch.arange(w // 2 + 1, device=v_work.device, dtype=compute_dtype).view(1, w // 2 + 1)
-        two_pi = 2.0 * math.pi
-        denom = 2.0 * torch.cos(two_pi * kx / float(w)) - 2.0
-        denom = denom + 2.0 * torch.cos(two_pi * ky / float(h)) - 2.0
-        safe_denom = denom.clamp(max=-1e-12)
+        safe_denom = _poisson_denom_cached(h, w, device=v_work.device, dtype=compute_dtype)
         psi_hat = torch.zeros_like(v_hat)
         psi_hat[..., 0, 0] = 0.0
         psi_hat[..., 1:, :] = v_hat[..., 1:, :] / safe_denom[1:, :]
@@ -1826,25 +1897,27 @@ def direct_flux_rollout_consistency_loss(
     *,
     max_items: int | None = None,
     steps: int | None = None,
-) -> tuple[Tensor, Tensor]:
+    return_extra: bool = False,
+) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor, Tensor]:
     """Multi-step sampler-consistency loss on a small microbatch.
 
     The prediction is unrolled through the same differentiable conservative
     clipped step used by the one-step loss.  The teacher branch is unrolled with
-    the corresponding supervised conditioning flux and no gradients.
+    the corresponding supervised conditioning flux and no gradients.  The
+    optional extra returns are endpoint image-gradient and TV-matching losses.
     """
     config = model.config
     rollout_steps = int(config.rollout_loss_steps if steps is None else steps)
     if rollout_steps <= 0:
         z = batch.states.new_tensor(0.0)
-        return z, z
+        return (z, z, z, z) if return_extra else (z, z)
     count = int(batch.states.shape[0])
     if max_items is None:
         max_items = int(config.rollout_loss_batch_size)
     count = min(count, int(max_items))
     if count <= 0:
         z = batch.states.new_tensor(0.0)
-        return z, z
+        return (z, z, z, z) if return_extra else (z, z)
     sl = slice(0, count)
     horizon = max(float(natural_horizon(config)), 1e-12)
     dt = horizon / float(max(int(config.num_steps), 1))
@@ -1855,7 +1928,6 @@ def direct_flux_rollout_consistency_loss(
     targets = batch.targets[sl]
     tau = batch.tau[sl]
     free_w = float(batch.train_free_weight) if bool(config.stochastic_step_loss) else 0.0
-    endpoint_l2 = pred_state.new_tensor(0.0)
     for _ in range(rollout_steps):
         pred_flux = model.predict_flux(tau, pred_state, labels, sources)
         pred_state = eulerian_flux_step_differentiable_torch(
@@ -1891,7 +1963,16 @@ def direct_flux_rollout_consistency_loss(
     scale = float(config.grid_size * config.grid_size)
     rollout_l2 = F.mse_loss(pred_state * scale, teacher_state * scale)
     endpoint_l2 = F.mse_loss(pred_state * scale, targets * scale)
-    return rollout_l2, endpoint_l2
+    if not return_extra:
+        return rollout_l2, endpoint_l2
+    rollout_image_grad = image_gradient_mse_torch(
+        pred_state * scale, targets * scale, grid_size=int(config.grid_size)
+    )
+    tv_loss = (
+        image_total_variation(pred_state * scale, grid_size=int(config.grid_size))
+        - image_total_variation(targets * scale, grid_size=int(config.grid_size))
+    ).square()
+    return rollout_l2, endpoint_l2, rollout_image_grad, tv_loss
 
 def direct_flux_matching_loss(
     model: DirectFluxUNet,
@@ -1902,7 +1983,13 @@ def direct_flux_matching_loss(
     """Return the direct-flux regression loss and scalar diagnostics."""
     config = model.config
     raw_pred_norm = model(batch.tau, batch.states, batch.labels, batch.sources)
-    pred_norm = apply_flux_parameterization_torch(raw_pred_norm, batch.states, config)
+    if bool(config.project_main_loss):
+        pred_norm = apply_flux_parameterization_torch(raw_pred_norm, batch.states, config)
+    else:
+        # Projection keeps the same node velocity/divergence, so the main
+        # losses can skip the FFT-based projection.  Sampler-consistency losses
+        # and generation still use the configured parameterization.
+        pred_norm = raw_pred_norm
     with torch.no_grad():
         target_flux = training_target_flux_torch(batch, config)
         target_norm = (target_flux / float(config.flux_scale)).clamp(
@@ -1914,8 +2001,24 @@ def direct_flux_matching_loss(
     div_loss = F.smooth_l1_loss(pred_div, target_div)
     node_loss = F.mse_loss(pred_div, target_div)
 
+    pred_step_norm = pred_norm
+    if not bool(config.project_main_loss) and str(config.flux_parameterization) != "edge":
+        needs_step_projection = (
+            float(config.step_loss_weight) > 0.0
+            or float(config.rollout_loss_weight) > 0.0
+            or float(config.rollout_image_grad_loss_weight) > 0.0
+            or float(config.target_tv_loss_weight) > 0.0
+            or float(config.target_entropy_loss_weight) > 0.0
+        )
+        if needs_step_projection:
+            pred_step_norm = apply_flux_parameterization_torch(raw_pred_norm, batch.states, config)
+
     step_loss = pred_norm.new_tensor(0.0)
-    if float(config.step_loss_weight) > 0.0:
+    image_grad_loss = pred_norm.new_tensor(0.0)
+    target_entropy_loss = pred_norm.new_tensor(0.0)
+    pred_next: Tensor | None = None
+    target_next: Tensor | None = None
+    if float(config.step_loss_weight) > 0.0 or float(config.image_grad_loss_weight) > 0.0 or float(config.target_entropy_loss_weight) > 0.0:
         dt = natural_horizon(config) / float(max(int(config.num_steps), 1))
         step_free_weight = float(batch.train_free_weight) if bool(config.stochastic_step_loss) else 0.0
         step_noise_weight = float(batch.train_noise_weight) if bool(config.stochastic_step_loss) else 0.0
@@ -1926,7 +2029,7 @@ def direct_flux_matching_loss(
         )
         pred_next = eulerian_flux_step_differentiable_torch(
             batch.states,
-            pred_norm * float(config.flux_scale),
+            pred_step_norm * float(config.flux_scale),
             dt,
             config,
             free_weight=step_free_weight,
@@ -1944,17 +2047,31 @@ def direct_flux_matching_loss(
                 noise_delta_flat=noise_delta,
             )
         density_scale = float(config.grid_size * config.grid_size)
-        step_loss = F.mse_loss(pred_next * density_scale, target_next * density_scale)
+        if float(config.step_loss_weight) > 0.0:
+            step_loss = F.mse_loss(pred_next * density_scale, target_next * density_scale)
+        if float(config.image_grad_loss_weight) > 0.0:
+            image_grad_loss = image_gradient_mse_torch(pred_next * density_scale, target_next * density_scale, grid_size=int(config.grid_size))
+        if float(config.target_entropy_loss_weight) > 0.0:
+            target_entropy_loss = (_mass_entropy_torch(pred_next).mean() - _mass_entropy_torch(batch.targets).mean()).square()
 
     rollout_loss = pred_norm.new_tensor(0.0)
     rollout_endpoint_l2 = pred_norm.new_tensor(0.0)
+    rollout_image_grad_loss = pred_norm.new_tensor(0.0)
+    target_tv_loss = pred_norm.new_tensor(0.0)
     rollout_ready = batch.step_index is None or int(batch.step_index) >= int(config.rollout_loss_warmup_steps)
-    if rollout_ready and float(config.rollout_loss_weight) > 0.0 and int(config.rollout_loss_steps) > 0:
-        rollout_loss, rollout_endpoint_l2 = direct_flux_rollout_consistency_loss(model, batch)
-
-    image_grad_loss = pred_norm.new_tensor(0.0)
-    if float(config.image_grad_loss_weight) > 0.0 and float(config.step_loss_weight) > 0.0:
-        image_grad_loss = image_gradient_mse_torch(pred_next, target_next, grid_size=int(config.grid_size))
+    rollout_due = True
+    if batch.step_index is not None:
+        rollout_due = int(batch.step_index) % int(config.rollout_loss_every) == 0
+        if rollout_due and float(config.rollout_loss_prob) < 1.0:
+            # Deterministic gate avoids adding another RNG stream to the loss.
+            gate = math.fmod(abs(math.sin(float(int(batch.step_index) + 1) * 12.9898) * 43758.5453), 1.0)
+            rollout_due = gate < float(config.rollout_loss_prob)
+    if rollout_ready and rollout_due and int(config.rollout_loss_steps) > 0 and (
+        float(config.rollout_loss_weight) > 0.0
+        or float(config.rollout_image_grad_loss_weight) > 0.0
+        or float(config.target_tv_loss_weight) > 0.0
+    ):
+        rollout_loss, rollout_endpoint_l2, rollout_image_grad_loss, target_tv_loss = direct_flux_rollout_consistency_loss(model, batch, return_extra=True)
 
     curl_loss = flux_curl_torch(raw_pred_norm).square().mean()
     edge_lap_loss = edge_laplacian_energy_torch(raw_pred_norm)
@@ -1967,6 +2084,9 @@ def direct_flux_matching_loss(
         + float(config.step_loss_weight) * step_loss
         + float(config.rollout_loss_weight) * rollout_loss
         + float(config.image_grad_loss_weight) * image_grad_loss
+        + float(config.rollout_image_grad_loss_weight) * rollout_image_grad_loss
+        + float(config.target_tv_loss_weight) * target_tv_loss
+        + float(config.target_entropy_loss_weight) * target_entropy_loss
         + float(config.curl_loss_weight) * curl_loss
         + float(config.edge_laplacian_loss_weight) * edge_lap_loss
         + float(config.checkerboard_loss_weight) * checker_loss
@@ -1981,7 +2101,7 @@ def direct_flux_matching_loss(
         div_cos = (numerator / denominator.clamp_min(1e-12)).mean()
         comp = step_component_rms_torch(
             batch.states,
-            pred_norm * float(config.flux_scale),
+            pred_step_norm * float(config.flux_scale),
             natural_horizon(config) / float(max(int(config.num_steps), 1)),
             config,
             free_weight=float(batch.train_free_weight),
@@ -1996,6 +2116,9 @@ def direct_flux_matching_loss(
         "step_loss": float(step_loss.detach().cpu()),
         "rollout_loss": float(rollout_loss.detach().cpu()),
         "rollout_endpoint_l2": float(rollout_endpoint_l2.detach().cpu()),
+        "rollout_image_grad_loss": float(rollout_image_grad_loss.detach().cpu()),
+        "target_tv_loss": float(target_tv_loss.detach().cpu()),
+        "target_entropy_loss": float(target_entropy_loss.detach().cpu()),
         "image_grad_loss": float(image_grad_loss.detach().cpu()),
         "curl_loss": float(curl_loss.detach().cpu()),
         "edge_laplacian_loss": float(edge_lap_loss.detach().cpu()),
@@ -2121,6 +2244,135 @@ def make_on_policy_training_batch(
     )
 
 
+def _batch_to_device(batch: FluxTrainingBatch, device: torch.device, *, step_index: int | None = None) -> FluxTrainingBatch:
+    return FluxTrainingBatch(
+        tau=batch.tau.to(device),
+        states=batch.states.to(device),
+        labels=batch.labels.to(device),
+        targets=batch.targets.to(device),
+        sources=batch.sources.to(device),
+        source_indices=None if batch.source_indices is None else np.asarray(batch.source_indices, dtype=np.int64).copy(),
+        source_labels=None if batch.source_labels is None else np.asarray(batch.source_labels, dtype=np.int64).copy(),
+        target_indices=None if batch.target_indices is None else np.asarray(batch.target_indices, dtype=np.int64).copy(),
+        target_velocity_mode=batch.target_velocity_mode,
+        step_index=batch.step_index if step_index is None else int(step_index),
+        train_free_weight=float(batch.train_free_weight),
+        train_noise_weight=float(batch.train_noise_weight),
+    )
+
+
+def _concat_optional_arrays(values: list[IntArray | None]) -> IntArray | None:
+    if any(v is None for v in values):
+        return None
+    return np.concatenate([np.asarray(v, dtype=np.int64).reshape(-1) for v in values], axis=0)
+
+
+def _concat_training_batches(batches: list[FluxTrainingBatch], *, device: torch.device, step_index: int | None = None) -> FluxTrainingBatch:
+    if not batches:
+        raise ValueError("at least one batch is required")
+    mode = batches[0].target_velocity_mode
+    return FluxTrainingBatch(
+        tau=torch.cat([b.tau.to(device) for b in batches], dim=0),
+        states=torch.cat([b.states.to(device) for b in batches], dim=0),
+        labels=torch.cat([b.labels.to(device) for b in batches], dim=0),
+        targets=torch.cat([b.targets.to(device) for b in batches], dim=0),
+        sources=torch.cat([b.sources.to(device) for b in batches], dim=0),
+        source_indices=_concat_optional_arrays([b.source_indices for b in batches]),
+        source_labels=_concat_optional_arrays([b.source_labels for b in batches]),
+        target_indices=_concat_optional_arrays([b.target_indices for b in batches]),
+        target_velocity_mode=mode,
+        step_index=step_index,
+        train_free_weight=float(batches[0].train_free_weight),
+        train_noise_weight=float(batches[0].train_noise_weight),
+    )
+
+
+def _subset_training_batch(batch: FluxTrainingBatch, indices: np.ndarray, *, device: torch.device, step_index: int | None = None) -> FluxTrainingBatch:
+    idx_np = np.asarray(indices, dtype=np.int64).reshape(-1)
+    idx_t = torch.as_tensor(idx_np, dtype=torch.long, device=batch.states.device)
+    def arr_subset(arr: IntArray | None) -> IntArray | None:
+        if arr is None:
+            return None
+        return np.asarray(arr, dtype=np.int64).reshape(-1)[idx_np].copy()
+    return FluxTrainingBatch(
+        tau=batch.tau.index_select(0, idx_t).to(device),
+        states=batch.states.index_select(0, idx_t).to(device),
+        labels=batch.labels.index_select(0, idx_t).to(device),
+        targets=batch.targets.index_select(0, idx_t).to(device),
+        sources=batch.sources.index_select(0, idx_t).to(device),
+        source_indices=arr_subset(batch.source_indices),
+        source_labels=arr_subset(batch.source_labels),
+        target_indices=arr_subset(batch.target_indices),
+        target_velocity_mode=batch.target_velocity_mode,
+        step_index=step_index,
+        train_free_weight=float(batch.train_free_weight),
+        train_noise_weight=float(batch.train_noise_weight),
+    )
+
+
+@torch.no_grad()
+def build_on_policy_replay_cache(
+    model: DirectFluxUNet,
+    images: np.ndarray,
+    labels: np.ndarray,
+    config: DirectFluxMNISTConfig,
+    *,
+    cache_size: int,
+    rollout_batch_size: int,
+    device: torch.device,
+    rng: np.random.Generator,
+    dtype: torch.dtype,
+    class_means: np.ndarray,
+    ot_cache: ClasswiseOTCache,
+    step_index: int,
+) -> OnPolicyReplayCache:
+    """Refresh a replay buffer of model-visited states.
+
+    This amortizes expensive on-policy prefixes over many training iterations.
+    The cache can live on CPU to reduce VRAM pressure or on CUDA for maximum speed.
+    """
+    start = time.perf_counter()
+    cache_device = torch.device("cuda" if config.on_policy_cache_device == "cuda" and torch.cuda.is_available() else "cpu")
+    pieces: list[FluxTrainingBatch] = []
+    remaining = int(cache_size)
+    model_was_training = bool(model.training)
+    model.eval()
+    while remaining > 0:
+        current = min(int(rollout_batch_size), remaining)
+        piece = make_on_policy_training_batch(
+            model,
+            images,
+            labels,
+            config,
+            batch_size=current,
+            device=device,
+            rng=rng,
+            dtype=dtype,
+            class_means=class_means,
+            ot_cache=ot_cache,
+            step_index=step_index,
+        )
+        pieces.append(_batch_to_device(piece, cache_device, step_index=int(step_index)))
+        remaining -= current
+    if model_was_training:
+        model.train()
+    batch = _concat_training_batches(pieces, device=cache_device, step_index=int(step_index))
+    return OnPolicyReplayCache(batch=batch, created_step=int(step_index), refresh_seconds=time.perf_counter() - start)
+
+
+def sample_on_policy_replay_batch(
+    cache: OnPolicyReplayCache,
+    *,
+    batch_size: int,
+    device: torch.device,
+    rng: np.random.Generator,
+    step_index: int,
+) -> FluxTrainingBatch:
+    count = min(int(batch_size), int(cache.size))
+    indices = rng.choice(cache.size, size=count, replace=cache.size < count)
+    return _subset_training_batch(cache.batch, indices, device=device, step_index=int(step_index))
+
+
 def _mass_entropy_torch(states: Tensor) -> Tensor:
     states = states.clamp_min(1e-30)
     return -(states * states.log()).sum(dim=1)
@@ -2179,6 +2431,9 @@ def train_direct_flux_model(
         "step_loss": [],
         "rollout_loss": [],
         "rollout_endpoint_l2": [],
+        "rollout_image_grad_loss": [],
+        "target_tv_loss": [],
+        "target_entropy_loss": [],
         "image_grad_loss": [],
         "curl_loss": [],
         "edge_laplacian_loss": [],
@@ -2195,20 +2450,58 @@ def train_direct_flux_model(
         "noise_step_rms": [],
         "free_to_learned_ratio": [],
         "noise_to_learned_ratio": [],
+        "sec_per_step": [],
+        "examples_per_sec": [],
+        "on_policy_cache_age": [],
+        "cache_refresh_sec": [],
     }
 
+    replay_cache: OnPolicyReplayCache | None = None
+    last_cache_refresh_sec = 0.0
     preview_path = None if preview_dir is None or preview_every <= 0 else Path(preview_dir)
     if preview_path is not None:
         preview_path.mkdir(parents=True, exist_ok=True)
 
     bar = _progress(range(int(train_steps)), total=int(train_steps), desc="train flux", disable=not show_progress)
     for step_index in bar:
+        iter_start = time.perf_counter()
         use_on_policy = (
-            int(step_index) >= int(model.config.on_policy_warmup_steps)
+            str(model.config.on_policy_mode) != "off"
+            and int(step_index) >= int(model.config.on_policy_warmup_steps)
             and float(model.config.on_policy_prob) > 0.0
             and rng.random() < float(model.config.on_policy_prob)
         )
-        if use_on_policy:
+        if use_on_policy and str(model.config.on_policy_mode) == "replay":
+            cache_stale = (
+                replay_cache is None
+                or int(step_index) - int(replay_cache.created_step) >= int(model.config.on_policy_cache_refresh_interval)
+                or replay_cache.size < min(int(batch_size), int(model.config.on_policy_batch_size))
+            )
+            if cache_stale:
+                replay_cache = build_on_policy_replay_cache(
+                    model,
+                    images,
+                    labels,
+                    model.config,
+                    cache_size=int(model.config.on_policy_cache_size),
+                    rollout_batch_size=int(model.config.on_policy_cache_rollout_batch_size),
+                    device=resolved_device,
+                    rng=rng,
+                    dtype=torch.float32,
+                    class_means=class_means,
+                    ot_cache=ot_cache,
+                    step_index=int(step_index),
+                )
+                last_cache_refresh_sec = float(replay_cache.refresh_seconds)
+            assert replay_cache is not None
+            batch = sample_on_policy_replay_batch(
+                replay_cache,
+                batch_size=min(int(batch_size), int(model.config.on_policy_batch_size)),
+                device=resolved_device,
+                rng=rng,
+                step_index=int(step_index),
+            )
+        elif use_on_policy and str(model.config.on_policy_mode) == "online":
             batch = make_on_policy_training_batch(
                 model,
                 images,
@@ -2239,14 +2532,19 @@ def train_direct_flux_model(
             loss, metrics = direct_flux_matching_loss(model, batch, step_index=int(step_index))
         metrics["on_policy"] = 1.0 if use_on_policy else 0.0
         metrics["on_policy_tau_frac"] = float((batch.tau / max(natural_horizon(model.config), 1e-12)).mean().detach().cpu()) if use_on_policy else -1.0
+        metrics["on_policy_cache_age"] = -1.0 if replay_cache is None else float(int(step_index) - int(replay_cache.created_step))
+        metrics["cache_refresh_sec"] = float(last_cache_refresh_sec)
         scaler.scale(loss).backward()
         if grad_clip > 0.0:
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(grad_clip))
         scaler.step(optimizer)
         scaler.update()
+        elapsed = max(time.perf_counter() - iter_start, 1e-12)
+        metrics["sec_per_step"] = float(elapsed)
+        metrics["examples_per_sec"] = float(batch.states.shape[0]) / elapsed
         for key in history:
-            history[key].append(metrics[key])
+            history[key].append(metrics.get(key, 0.0))
         if hasattr(bar, "set_postfix"):
             anchor_prob = (
                 model.config.mean_flow_warmup_prob
@@ -2258,7 +2556,8 @@ def train_direct_flux_model(
                 div_cos=metrics["div_cos"],
                 step_l=metrics.get("step_loss", 0.0),
                 roll=metrics.get("rollout_loss", 0.0),
-                img_g=metrics.get("image_grad_loss", 0.0),
+                rimg=metrics.get("rollout_image_grad_loss", 0.0),
+                tv=metrics.get("target_tv_loss", 0.0),
                 curl=metrics.get("curl_loss", 0.0),
                 pred=metrics["pred_rms"],
                 tgt=metrics["target_rms"],
@@ -2266,6 +2565,10 @@ def train_direct_flux_model(
                 on_tau=metrics.get("on_policy_tau_frac", -1.0),
                 free_r=metrics.get("free_to_learned_ratio", 0.0),
                 noise_r=metrics.get("noise_to_learned_ratio", 0.0),
+                sec=metrics.get("sec_per_step", 0.0),
+                eps=metrics.get("examples_per_sec", 0.0),
+                cache_age=metrics.get("on_policy_cache_age", -1.0),
+                cache_s=metrics.get("cache_refresh_sec", 0.0),
                 mean_p=float(anchor_prob) if model.config.target_mode in {"poisson-flow", "poisson-ot-flow"} else 0.0,
             )
 
@@ -2860,6 +3163,101 @@ def save_flux_preview_panel(
 
 
 
+
+def _select_trajectory_frames(trajectory: np.ndarray, frame_count: int) -> np.ndarray:
+    traj = np.asarray(trajectory, dtype=np.float64)
+    if traj.ndim != 3:
+        raise ValueError("trajectory must have shape (T, B, N)")
+    if frame_count <= 1 or traj.shape[0] <= frame_count:
+        return traj
+    idx = np.linspace(0, traj.shape[0] - 1, int(frame_count)).round().astype(np.int64)
+    return traj[idx]
+
+
+def save_diffusion_process_figure(
+    trajectory: np.ndarray,
+    labels: Sequence[int] | np.ndarray,
+    output_path: str | Path,
+    *,
+    grid_size: int = 28,
+    num_frames: int = 12,
+    max_samples: int = 8,
+) -> None:
+    """Save rows of individual trajectories from source to terminal sample."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover - optional plotting dependency.
+        raise RuntimeError("matplotlib is required to save a process figure") from exc
+    frames = _select_trajectory_frames(trajectory, int(num_frames))
+    labels_arr = np.asarray(labels, dtype=np.int64).reshape(-1)
+    count = min(int(max_samples), frames.shape[1])
+    cols = int(frames.shape[0])
+    fig, axes = plt.subplots(count, cols, figsize=(1.05 * cols, 1.12 * count), squeeze=False)
+    for row in range(count):
+        for col in range(cols):
+            ax = axes[row, col]
+            img = frames[col, row].reshape(grid_size, grid_size)
+            ax.imshow(_normalize_for_display(img), cmap="gray", interpolation="nearest")
+            if row == 0:
+                frac = col / max(cols - 1, 1)
+                ax.set_title(f"{frac:.2f}", fontsize=7)
+            if col == 0:
+                ax.set_ylabel(str(int(labels_arr[row])), fontsize=8)
+            ax.set_xticks([])
+            ax.set_yticks([])
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout(pad=0.12)
+    fig.savefig(output, dpi=180)
+    plt.close(fig)
+
+
+def save_diffusion_marginal_process_figure(
+    trajectory: np.ndarray,
+    labels: Sequence[int] | np.ndarray,
+    output_path: str | Path,
+    *,
+    grid_size: int = 28,
+    num_frames: int = 8,
+    samples_per_frame: int = 8,
+) -> None:
+    """Save time-slice rows showing the evolving generated distribution."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover - optional plotting dependency.
+        raise RuntimeError("matplotlib is required to save a process figure") from exc
+    frames = _select_trajectory_frames(trajectory, int(num_frames))
+    labels_arr = np.asarray(labels, dtype=np.int64).reshape(-1)
+    cols = min(int(samples_per_frame), frames.shape[1])
+    rows = int(frames.shape[0])
+    fig, axes = plt.subplots(rows, cols, figsize=(1.05 * cols, 1.15 * rows), squeeze=False)
+    for row in range(rows):
+        for col in range(cols):
+            ax = axes[row, col]
+            ax.imshow(_normalize_for_display(frames[row, col].reshape(grid_size, grid_size)), cmap="gray", interpolation="nearest")
+            if row == 0:
+                ax.set_title(str(int(labels_arr[col])), fontsize=7)
+            if col == 0:
+                frac = row / max(rows - 1, 1)
+                ax.set_ylabel(f"{frac:.2f}", fontsize=8)
+            ax.set_xticks([])
+            ax.set_yticks([])
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout(pad=0.12)
+    fig.savefig(output, dpi=180)
+    plt.close(fig)
+
+
+
+# Backwards-compatible name used by earlier notes/tests.
+def save_flux_process_figure(*args, **kwargs) -> None:
+    save_diffusion_process_figure(*args, **kwargs)
+
 def _parse_label_sequence(text: str, count: int) -> list[int]:
     if text == "cycle":
         return [idx % 10 for idx in range(count)]
@@ -3043,11 +3441,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--divergence-loss-weight", type=float, default=0.50)
     parser.add_argument("--node-loss-weight", type=float, default=1.0)
     parser.add_argument("--step-loss-weight", type=float, default=0.25)
-    parser.add_argument("--image-grad-loss-weight", type=float, default=0.05)
+    parser.add_argument("--image-grad-loss-weight", type=float, default=0.0)
     parser.add_argument("--rollout-loss-weight", type=float, default=0.15)
-    parser.add_argument("--rollout-loss-steps", type=int, default=8)
+    parser.add_argument("--rollout-loss-steps", type=int, default=6)
     parser.add_argument("--rollout-loss-batch-size", type=int, default=64)
     parser.add_argument("--rollout-loss-warmup-steps", type=int, default=1500)
+    parser.add_argument("--rollout-loss-every", type=int, default=2)
+    parser.add_argument("--rollout-loss-prob", type=float, default=1.0)
+    parser.add_argument("--rollout-image-grad-loss-weight", type=float, default=0.05)
+    parser.add_argument("--target-tv-loss-weight", type=float, default=0.0)
+    parser.add_argument("--target-entropy-loss-weight", type=float, default=0.0)
+    parser.add_argument("--project-main-loss", action="store_true", help="Project predicted flux before the main flux/divergence losses; slower but exact for projected mode.")
     parser.add_argument("--curl-loss-weight", type=float, default=0.01)
     parser.add_argument("--edge-laplacian-loss-weight", type=float, default=0.0)
     parser.add_argument("--checkerboard-loss-weight", type=float, default=0.001)
@@ -3070,6 +3474,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--on-policy-min-prefix-fraction", type=float, default=0.05)
     parser.add_argument("--on-policy-max-prefix-fraction", type=float, default=0.85)
     parser.add_argument("--on-policy-batch-size", type=int, default=64)
+    parser.add_argument("--on-policy-mode", choices=ON_POLICY_MODES, default="replay")
+    parser.add_argument("--on-policy-cache-size", type=int, default=2048)
+    parser.add_argument("--on-policy-cache-refresh-interval", type=int, default=250)
+    parser.add_argument("--on-policy-cache-rollout-batch-size", type=int, default=128)
+    parser.add_argument("--on-policy-cache-device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--adaptive-sampling", action="store_true")
     parser.add_argument("--clip-target", type=float, default=0.03)
     parser.add_argument("--max-substeps", type=int, default=4)
@@ -3082,6 +3491,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--save-ablation-samples", action="store_true", help="Save learned-only/free-only/noise-only/stochastic sample grids from the same sources.")
+    parser.add_argument("--save-process-figure", action="store_true", help="Save trajectory figures from source to terminal samples.")
+    parser.add_argument("--process-num-samples", type=int, default=8)
+    parser.add_argument("--process-num-frames", type=int, default=12)
+    parser.add_argument("--process-mode", choices=("full_stochastic", "free_plus_conditioning_no_noise", "conditioning_only"), default="full_stochastic")
     parser.add_argument("--out-dir", type=Path, default=Path("artifacts/experiment10_mnist_flux"))
     args = parser.parse_args(argv)
 
@@ -3150,6 +3563,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         rollout_loss_steps=int(args.rollout_loss_steps),
         rollout_loss_batch_size=int(args.rollout_loss_batch_size),
         rollout_loss_warmup_steps=int(args.rollout_loss_warmup_steps),
+        rollout_loss_every=int(args.rollout_loss_every),
+        rollout_loss_prob=float(args.rollout_loss_prob),
+        rollout_image_grad_loss_weight=float(args.rollout_image_grad_loss_weight),
+        target_tv_loss_weight=float(args.target_tv_loss_weight),
+        target_entropy_loss_weight=float(args.target_entropy_loss_weight),
+        project_main_loss=bool(args.project_main_loss),
         curl_loss_weight=float(args.curl_loss_weight),
         edge_laplacian_loss_weight=float(args.edge_laplacian_loss_weight),
         checkerboard_loss_weight=float(args.checkerboard_loss_weight),
@@ -3166,6 +3585,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         on_policy_min_prefix_fraction=float(args.on_policy_min_prefix_fraction),
         on_policy_max_prefix_fraction=float(args.on_policy_max_prefix_fraction),
         on_policy_batch_size=int(args.on_policy_batch_size),
+        on_policy_mode=str(args.on_policy_mode),
+        on_policy_cache_size=int(args.on_policy_cache_size),
+        on_policy_cache_refresh_interval=int(args.on_policy_cache_refresh_interval),
+        on_policy_cache_rollout_batch_size=int(args.on_policy_cache_rollout_batch_size),
+        on_policy_cache_device=str(args.on_policy_cache_device),
         adaptive_sampling=bool(args.adaptive_sampling),
         clip_target=float(args.clip_target),
         max_substeps=int(args.max_substeps),
@@ -3173,15 +3597,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     device = torch.device(
         "cuda" if args.device is None and torch.cuda.is_available() else "cpu" if args.device is None else args.device
     )
-    print(f"Experiment 10h direct-flux MNIST on device={device}")
+    print(f"Experiment 10i direct-flux MNIST on device={device}")
     print(
         "Laptop-friendly settings: "
         f"target_mode={config.target_mode}, source_mode={config.source_mode}, "
         f"ot={config.ot_cost_mode}/{config.ot_lowres_size}, match={config.ot_match_mode}, tau={config.tau_sampling}, "
         f"source_cond={config.condition_on_source}, upsample={config.upsample_mode}, flux_param={config.flux_parameterization}, velocity={config.velocity_target}, "
         f"free_aware={config.free_aware_target}, sde_curr={config.sde_curriculum}, edge_alpha={config.edge_alpha_mode}, "
-        f"on_policy={config.on_policy_prob}, onp_sde=({config.on_policy_use_free},{config.on_policy_use_noise}), "
-        f"step_loss={config.step_loss_weight}, rollout={config.rollout_loss_weight}/{config.rollout_loss_steps}, img_grad={config.image_grad_loss_weight}, curl={config.curl_loss_weight}, stochastic_step={config.stochastic_step_loss}, adaptive={config.adaptive_sampling}, "
+        f"on_policy={config.on_policy_prob}, onp_mode={config.on_policy_mode}, cache={config.on_policy_cache_size}/{config.on_policy_cache_refresh_interval}, onp_sde=({config.on_policy_use_free},{config.on_policy_use_noise}), "
+        f"step_loss={config.step_loss_weight}, rollout={config.rollout_loss_weight}/{config.rollout_loss_steps}/every{config.rollout_loss_every}, rollout_img={config.rollout_image_grad_loss_weight}, project_main={config.project_main_loss}, curl={config.curl_loss_weight}, stochastic_step={config.stochastic_step_loss}, adaptive={config.adaptive_sampling}, "
         f"train_steps={args.train_steps}, batch={args.batch_size}, base_channels={args.base_channels}, "
         f"horizon={natural_horizon(config):.3e}, sample_steps={args.sample_steps}, "
         f"weights=(free={config.free_weight}, noise={config.noise_weight}, learned={config.learned_weight})"
@@ -3303,6 +3727,57 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(f"Saved preview: {png_path}")
     except RuntimeError as exc:
         print(f"Skipping PNG preview: {exc}")
+
+    if bool(args.save_process_figure) and result.sources is not None:
+        process_count = min(int(args.process_num_samples), int(result.samples.shape[0]))
+        frame_count = max(2, int(args.process_num_frames))
+        save_every = max(1, int(args.sample_steps) // max(frame_count - 1, 1))
+        if str(args.process_mode) == "conditioning_only":
+            process_overrides = dict(free_weight=0.0, noise_weight=0.0, learned_weight=1.0, deterministic=True)
+        elif str(args.process_mode) == "free_plus_conditioning_no_noise":
+            process_overrides = dict(free_weight=config.free_weight, noise_weight=0.0, learned_weight=1.0, deterministic=True)
+        else:
+            process_overrides = dict(free_weight=config.free_weight, noise_weight=config.noise_weight, learned_weight=1.0, deterministic=bool(args.deterministic_sampling))
+        process = simulate_direct_flux_generation(
+            model,
+            result.labels[:process_count],
+            num_steps=int(args.sample_steps),
+            save_every=save_every,
+            deterministic=bool(process_overrides.pop("deterministic")),
+            device=device,
+            seed=int(args.seed) + 300,
+            use_amp=not bool(args.no_amp),
+            show_progress=False,
+            initial_states=result.sources[:process_count],
+            free_weight=float(process_overrides["free_weight"]),
+            noise_weight=float(process_overrides["noise_weight"]),
+            learned_weight=float(process_overrides["learned_weight"]),
+        )
+        if process.trajectory is not None:
+            process_npz = args.out_dir / "experiment10_diffusion_process.npz"
+            np.savez_compressed(process_npz, trajectory=process.trajectory, labels=process.labels, sources=process.sources, samples=process.samples)
+            try:
+                process_png = args.out_dir / "experiment10_diffusion_process.png"
+                marginal_png = args.out_dir / "experiment10_diffusion_marginal_process.png"
+                save_diffusion_process_figure(
+                    process.trajectory,
+                    process.labels,
+                    process_png,
+                    grid_size=config.grid_size,
+                    num_frames=frame_count,
+                    max_samples=process_count,
+                )
+                save_diffusion_marginal_process_figure(
+                    process.trajectory,
+                    process.labels,
+                    marginal_png,
+                    grid_size=config.grid_size,
+                    num_frames=min(frame_count, 8),
+                    samples_per_frame=process_count,
+                )
+                print(f"Saved diffusion process figures: {process_png}, {marginal_png}")
+            except RuntimeError as exc:
+                print(f"Skipping diffusion process PNGs: {exc}")
 
     if bool(args.save_ablation_samples) and result.sources is not None:
         ablations = [

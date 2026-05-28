@@ -19,11 +19,13 @@ from mnist.eulerian_flux_mnist import (
     EDGE_ALPHA_MODES,
     FLUX_PARAMETERIZATION_MODES,
     ON_POLICY_PREFIX_MODES,
+    ON_POLICY_MODES,
     UPSAMPLE_MODES,
     FluxTrainingBatch,
     _ot_coupled_target_indices,
     apply_flux_parameterization_torch,
     build_classwise_ot_cache,
+    build_on_policy_replay_cache,
     checkerboard_energy_torch,
     direct_flux_matching_loss,
     direct_flux_rollout_consistency_loss,
@@ -34,6 +36,8 @@ from mnist.eulerian_flux_mnist import (
     image_total_variation,
     make_on_policy_training_batch,
     poisson_flux_from_velocity_torch,
+    sample_on_policy_replay_batch,
+    save_diffusion_process_figure,
     nearest_class_mean_metrics,
     step_component_rms_torch,
     sample_flux_training_batch,
@@ -204,7 +208,8 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
         rollout_loss_weight=0.1,
         rollout_loss_steps=2,
         rollout_loss_batch_size=2,
-        image_grad_loss_weight=0.01,
+        image_grad_loss_weight=0.0,
+        rollout_image_grad_loss_weight=0.01,
         curl_loss_weight=0.01,
         checkerboard_loss_weight=0.001,
         flux_scale=10.0,
@@ -212,6 +217,7 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
     assert UPSAMPLE_MODES == ("transpose", "resize-conv")
     assert FLUX_PARAMETERIZATION_MODES == ("edge", "projected")
     assert "uniform" in ON_POLICY_PREFIX_MODES
+    assert "replay" in ON_POLICY_MODES
     images, labels = _toy_digit_measures(grid_size=config.grid_size)
     batch = sample_flux_training_batch(images, labels, config, batch_size=4, device="cpu", rng=np.random.default_rng(5), step_index=2000)
     model = DirectFluxUNet(config, base_channels=4, num_classes=10)
@@ -219,15 +225,67 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
     projected = apply_flux_parameterization_torch(raw, batch.states, config)
     assert torch.allclose(flux_divergence_torch(projected), flux_divergence_torch(raw), atol=2e-5, rtol=2e-5)
     assert flux_curl_torch(projected).square().mean() <= flux_curl_torch(raw).square().mean() + 1e-7
-    rollout_loss, endpoint_l2 = direct_flux_rollout_consistency_loss(model, batch, max_items=2, steps=1)
+    rollout_loss, endpoint_l2, rollout_img, tv_loss = direct_flux_rollout_consistency_loss(model, batch, max_items=2, steps=1, return_extra=True)
     assert torch.isfinite(rollout_loss)
     assert torch.isfinite(endpoint_l2)
+    assert torch.isfinite(rollout_img)
+    assert torch.isfinite(tv_loss)
     loss, metrics = direct_flux_matching_loss(model, batch)
     assert torch.isfinite(loss)
-    for key in ["rollout_loss", "image_grad_loss", "curl_loss", "checkerboard_loss"]:
+    for key in ["rollout_loss", "rollout_image_grad_loss", "target_tv_loss", "image_grad_loss", "curl_loss", "checkerboard_loss"]:
         assert key in metrics
     assert image_total_variation(batch.states, grid_size=config.grid_size) >= 0
     assert checkerboard_energy_torch(batch.states, grid_size=config.grid_size) >= 0
+
+
+def test_replay_cache_and_process_figure_smoke(tmp_path) -> None:
+    torch.manual_seed(4)
+    rng = np.random.default_rng(4)
+    config = DirectFluxMNISTConfig(
+        grid_size=8,
+        horizon_scale=0.2,
+        num_steps=4,
+        target_mode="poisson-ot-flow",
+        source_mode="lowfreq",
+        source_lowfreq_size=4,
+        ot_match_mode="nearest",
+        on_policy_mode="replay",
+        on_policy_cache_size=4,
+        on_policy_cache_rollout_batch_size=2,
+        on_policy_prefix_mode="short",
+        on_policy_prefix_steps=2,
+        rollout_loss_steps=1,
+        rollout_loss_batch_size=2,
+        rollout_loss_every=2,
+        rollout_image_grad_loss_weight=0.01,
+        project_main_loss=False,
+        flux_scale=10.0,
+    )
+    images, labels = _toy_digit_measures(num_samples=20, grid_size=config.grid_size)
+    cache = build_classwise_ot_cache(images, labels, config)
+    model = DirectFluxUNet(config, base_channels=4, num_classes=10)
+    replay = build_on_policy_replay_cache(
+        model,
+        images,
+        labels,
+        config,
+        cache_size=4,
+        rollout_batch_size=2,
+        device=torch.device("cpu"),
+        rng=rng,
+        dtype=torch.float32,
+        class_means=cache.class_means,
+        ot_cache=cache,
+        step_index=10,
+    )
+    assert replay.size == 4
+    batch = sample_on_policy_replay_batch(replay, batch_size=3, device=torch.device("cpu"), rng=rng, step_index=11)
+    assert batch.states.shape[0] == 3
+    traj = np.stack([batch.sources.detach().numpy(), batch.states.detach().numpy(), batch.targets.detach().numpy()], axis=0)
+    out = tmp_path / "process.png"
+    save_diffusion_process_figure(traj, batch.labels.detach().numpy(), out, grid_size=config.grid_size, num_frames=3, max_samples=2)
+    assert out.exists()
+
 
 
 def test_poisson_ot_and_class_lowres_prior_smoke() -> None:

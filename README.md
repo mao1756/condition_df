@@ -264,3 +264,68 @@ are now named `conditioning_only`, `free_plus_conditioning_no_noise`,
 `full_stochastic`, `free_only`, and `noise_only`; under `--free-aware-target`,
 `conditioning_only` is not expected to be a faithful sample because the model is
 trained as a correction to the free SDE.
+
+### Experiment 10i: laptop optimization and diffusion-process figures
+
+Experiment 10i keeps the stochastic/free-aware 10h setup but makes the expensive
+parts more laptop-friendly.  The default on-policy mode is now a replay cache:
+the code periodically rolls out a cache of model-visited states and samples
+on-policy microbatches from it, rather than doing a fresh long prefix rollout on
+every optimizer step.  The main teacher-forced loss also skips the FFT projection
+when `--flux-parameterization projected` is active; projection is still used for
+sampler-consistency losses and generation.  Poisson denominators are cached.
+
+The sharpening loss is moved to the rollout endpoint through
+`--rollout-image-grad-loss-weight`, because the old one-step image-gradient loss
+was usually too small to affect final samples.  Use `--save-process-figure` to
+save trajectory grids from the initial source distribution to the terminal digit
+samples.
+
+Recommended laptop-friendly 10i run:
+
+```powershell
+.venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
+  --data-root mnist_data `
+  --target-mode poisson-ot-flow `
+  --source-mode lowfreq `
+  --condition-on-source `
+  --ot-match-mode nearest `
+  --free-aware-target `
+  --sde-curriculum `
+  --sde-ramp-steps 3000 `
+  --target-free-weight 0.015 `
+  --target-noise-weight 0.002 `
+  --velocity-target mixed `
+  --late-residual-fraction 0.25 `
+  --late-residual-prob 0.50 `
+  --on-policy-use-free `
+  --on-policy-use-noise `
+  --on-policy-mode replay `
+  --on-policy-cache-size 2048 `
+  --on-policy-cache-refresh-interval 250 `
+  --on-policy-cache-rollout-batch-size 128 `
+  --rollout-loss-weight 0.15 `
+  --rollout-loss-steps 6 `
+  --rollout-loss-batch-size 64 `
+  --rollout-loss-every 2 `
+  --rollout-image-grad-loss-weight 0.05 `
+  --upsample-mode resize-conv `
+  --flux-parameterization projected `
+  --curl-loss-weight 0.01 `
+  --checkerboard-loss-weight 0.001 `
+  --stochastic-step-loss `
+  --adaptive-sampling `
+  --clip-target 0.03 `
+  --max-substeps 4 `
+  --train-steps 8000 `
+  --batch-size 256 `
+  --base-channels 32 `
+  --sample-steps 256 `
+  --num-samples 64 `
+  --save-ablation-samples `
+  --save-process-figure
+```
+
+The process output is saved as `experiment10_diffusion_process.png`,
+`experiment10_diffusion_marginal_process.png`, and
+`experiment10_diffusion_process.npz`.
