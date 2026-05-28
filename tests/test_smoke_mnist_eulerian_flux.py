@@ -27,6 +27,7 @@ from mnist.eulerian_flux_mnist import (
     ON_POLICY_TARGET_MODES,
     UPSAMPLE_MODES,
     FluxTrainingBatch,
+    make_experiment10_run_dir,
     _ot_coupled_target_indices,
     apply_flux_parameterization_torch,
     build_classwise_ot_cache,
@@ -555,3 +556,24 @@ def test_terminal_snapshot_steps_include_late_tau() -> None:
     steps = _trajectory_snapshot_steps(config)
     assert steps.max() >= 90
     assert steps.min() <= 10
+
+
+def test_experiment10_run_dir_is_timestamped_unique_and_named(tmp_path) -> None:
+    from datetime import datetime
+
+    fixed = datetime(2026, 5, 28, 22, 39, 1)
+    run_dir, meta = make_experiment10_run_dir(tmp_path / "runs" / "experiment10", "my first run!", now=fixed)
+    assert run_dir.exists()
+    assert run_dir.parent == tmp_path / "runs" / "experiment10"
+    assert run_dir.name == "20260528-223901_my-first-run"
+    assert meta["run_id"] == run_dir.name
+    assert meta["run_name"] == "my-first-run"
+
+    second_dir, second_meta = make_experiment10_run_dir(tmp_path / "runs" / "experiment10", "my first run!", now=fixed)
+    assert second_dir.exists()
+    assert second_dir.name == "20260528-223901_my-first-run_02"
+    assert second_meta["run_id"] == second_dir.name
+
+    timestamp_only, timestamp_meta = make_experiment10_run_dir(tmp_path / "runs" / "experiment10", "", now=fixed)
+    assert timestamp_only.name == "20260528-223901"
+    assert timestamp_meta["run_name"] == ""

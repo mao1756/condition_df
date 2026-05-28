@@ -14,8 +14,8 @@ with small numerical examples and MNIST weighted-point-cloud experiments.
 - `notebooks/`: interactive examples that import the package modules directly.
 - `tests/`: lightweight regression/smoke checks.
 - `docs/`: paper/reference notes and PDFs.
-- `artifacts/patches/`: old patch files kept for reference, away from the
-  importable source root.
+- `runs/experiment10/`: timestamped Experiment 10 outputs. Each invocation
+  creates a fresh subdirectory, optionally tagged with `--run-name`.
 
 ## Imports
 
@@ -65,6 +65,7 @@ First sanity check: class-mean flow should produce blurry recognizable digits.
 ```powershell
 .venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
   --data-root mnist_data `
+  --run-name class-mean-smoke `
   --target-mode class-mean-flow `
   --source-mode lowfreq `
   --free-weight 0 `
@@ -81,6 +82,7 @@ Then run the stable nearest-matched low-frequency source version:
 ```powershell
 .venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
   --data-root mnist_data `
+  --run-name poisson-ot-stable `
   --target-mode poisson-ot-flow `
   --source-mode lowfreq `
   --condition-on-source `
@@ -126,11 +128,14 @@ A useful diagnostic upper-bound run is the coupled target-lowres prior. It does 
 
 The progress bar reports loss, divergence cosine, predicted/target RMS, step
 loss, on-policy usage, mean-anchor probability, sample entropy, max pixel mass,
-clipping fraction, and ETA. Final artifacts also save `source_indices`,
-`source_labels`, `source_unique_count`, `source_diversity_l2`, and
-source-label match diagnostics so source-prior collapse is visible immediately.
-Training previews are saved under `artifacts/experiment10_mnist_flux/previews/`
-every `--preview-every` steps. The preview panel has rows for source, generated
+clipping fraction, and ETA. Every Experiment 10 invocation now creates a new
+run directory under `runs/experiment10/`. Use `--run-name my-nickname` to tag
+the folder; otherwise the folder is just timestamped. Final run outputs also
+save `source_indices`, `source_labels`, `source_unique_count`,
+`source_diversity_l2`, and source-label match diagnostics so source-prior
+collapse is visible immediately. Training previews are saved under the run
+folder, for example `runs/experiment10/<timestamp>_<name>/previews/`, every
+`--preview-every` steps. The preview panel has rows for source, generated
 sample, assigned target, exact teacher rollout, and class mean. To reproduce the
 older mini-batch OT pairing, pass `--ot-match-mode minibatch`; to sample among
 several stable neighbours, use `--ot-match-mode topk --ot-nearest-top-k K`. To

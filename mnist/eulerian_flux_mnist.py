@@ -38,6 +38,7 @@ import argparse
 import json
 import math
 import time
+from datetime import datetime
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -76,6 +77,7 @@ __all__ = [
     "SourceBatch",
     "FluxTrainingBatch",
     "FluxGenerationResult",
+    "make_experiment10_run_dir",
     "OnPolicyReplayCache",
     "ClasswiseOTCache",
     "OT_MATCH_MODES",
@@ -4260,6 +4262,63 @@ def nearest_class_mean_metrics(
     }
 
 
+
+def _sanitize_run_name(name: str | None) -> str:
+    """Return a filesystem-safe, human-readable run nickname."""
+    raw = "" if name is None else str(name).strip()
+    if not raw:
+        return ""
+    chars: list[str] = []
+    previous_dash = False
+    for ch in raw:
+        if ch.isalnum() or ch in {"_", "-", "."}:
+            chars.append(ch)
+            previous_dash = False
+        else:
+            if not previous_dash:
+                chars.append("-")
+                previous_dash = True
+    safe = "".join(chars).strip("-._")
+    return safe[:80]
+
+
+def make_experiment10_run_dir(
+    runs_root: Path,
+    run_name: str | None = None,
+    *,
+    now: datetime | None = None,
+) -> tuple[Path, dict[str, object]]:
+    """Create and return a unique Experiment 10 run directory.
+
+    Run outputs live under ``runs_root``. The folder name always starts with a
+    timestamp and optionally includes a sanitized nickname, so repeated runs do
+    not overwrite one another.
+    """
+    current = datetime.now() if now is None else now
+    timestamp = current.strftime("%Y%m%d-%H%M%S")
+    safe_name = _sanitize_run_name(run_name)
+    base_name = timestamp if not safe_name else f"{timestamp}_{safe_name}"
+    root = Path(runs_root)
+    root.mkdir(parents=True, exist_ok=True)
+    candidate = root / base_name
+    if candidate.exists():
+        for idx in range(2, 1000):
+            alt = root / f"{base_name}_{idx:02d}"
+            if not alt.exists():
+                candidate = alt
+                break
+        else:
+            raise RuntimeError(f"could not allocate a unique run directory under {root}")
+    candidate.mkdir(parents=True, exist_ok=False)
+    metadata = {
+        "run_id": candidate.name,
+        "run_name": safe_name,
+        "created_at": current.isoformat(timespec="seconds"),
+        "runs_root": str(root),
+        "out_dir": str(candidate),
+    }
+    return candidate, metadata
+
 def _serializable_args(args: argparse.Namespace) -> dict[str, object]:
     out: dict[str, object] = {}
     for key, value in vars(args).items():
@@ -4408,8 +4467,20 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--process-num-samples", type=int, default=8)
     parser.add_argument("--process-num-frames", type=int, default=12)
     parser.add_argument("--process-mode", choices=("full_stochastic", "free_plus_conditioning_no_noise", "conditioning_only"), default="full_stochastic")
-    parser.add_argument("--out-dir", type=Path, default=Path("artifacts/experiment10_mnist_flux"))
+    parser.add_argument("--runs-root", type=Path, default=Path("runs/experiment10"), help="Root directory for Experiment 10 run folders.")
+    parser.add_argument("--run-name", type=str, default="", help="Optional nickname appended to the timestamped run folder name.")
+    parser.add_argument("--out-dir", type=Path, default=None, help="Deprecated: use --runs-root and --run-name. If provided, its final path component is used as the run nickname.")
     args = parser.parse_args(argv)
+
+    legacy_out_dir = args.out_dir
+    if legacy_out_dir is not None:
+        if not str(args.run_name).strip():
+            args.run_name = Path(legacy_out_dir).name
+        print("Note: --out-dir is deprecated for Experiment 10; writing a fresh run under --runs-root instead.")
+    args.legacy_out_dir = None if legacy_out_dir is None else str(legacy_out_dir)
+    args.out_dir, run_metadata = make_experiment10_run_dir(args.runs_root, args.run_name)
+    args.run_id = run_metadata["run_id"]
+    args.run_created_at = run_metadata["created_at"]
 
     sample_free_weight = (
         float(args.target_free_weight)
@@ -4538,6 +4609,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "cuda" if args.device is None and torch.cuda.is_available() else "cpu" if args.device is None else args.device
     )
     print(f"Experiment 10k direct-flux MNIST on device={device}")
+    print(f"Run directory: {args.out_dir}")
     if float(config.rollout_endpoint_tv_weight) > 0.0:
         print(
             "Warning: --rollout-endpoint-tv-weight is enabled. 10l gates and normalizes this loss, "
@@ -4559,6 +4631,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"train_steps={args.train_steps}, batch={args.batch_size}, base_channels={args.base_channels}, "
         f"horizon={natural_horizon(config):.3e}, sample_steps={args.sample_steps}, "
         f"weights=(free={config.free_weight}, noise={config.noise_weight}, learned={config.learned_weight})"
+    )
+    run_metadata["args"] = _serializable_args(args)
+    run_metadata["config"] = asdict(config)
+    (args.out_dir / "run_metadata.json").write_text(
+        json.dumps(run_metadata, indent=2),
+        encoding="utf-8",
     )
     dataset = load_mnist_measure_dataset(
         args.data_root,
@@ -4650,7 +4728,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             device=device,
         )
 
-    print("Generation complete; saving artifacts")
+    print("Generation complete; saving run outputs")
     ckpt_path = args.out_dir / "experiment10_direct_flux_mnist.pt"
     samples_path = args.out_dir / "experiment10_samples.npz"
     png_path = args.out_dir / "experiment10_samples.png"
@@ -4695,6 +4773,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "model_state_dict": model.state_dict(),
             "config": asdict(config),
             "args": _serializable_args(args),
+            "run_metadata": run_metadata,
             "history": history,
             "labels": result.labels,
             "clipping_fraction": result.clipping_fraction,
@@ -4720,6 +4799,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     np.savez_compressed(
         samples_path,
+        run_id=np.asarray([str(args.run_id)]),
+        run_name=np.asarray([str(run_metadata.get("run_name", ""))]),
         samples=result.samples,
         labels=result.labels,
         sources=result.sources,
@@ -4847,7 +4928,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"Final clipping fraction: {result.clipping_fraction:.4f}")
     print(f"Final sample entropy: {ent:.4f}; mean max pixel mass: {max_mass:.4f}")
     print(
-        "Artifact diagnostics: "
+        "Sample artifact diagnostics: "
         f"TV={0.0 if result.sample_total_variation is None else result.sample_total_variation:.4g}, "
         f"checker={0.0 if result.sample_checkerboard_energy is None else result.sample_checkerboard_energy:.4g}, "
         f"highfreq={0.0 if result.sample_highfreq_fraction is None else result.sample_highfreq_fraction:.4g}"

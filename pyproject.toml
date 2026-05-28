@@ -2,7 +2,7 @@
 python_files = ["test_*.py"]
 python_functions = ["test_*", "_test_*", "_regression_test_*"]
 testpaths = ["tests"]
-norecursedirs = [".git", ".venv", "__pycache__", "artifacts", "mnist_data", "notebooks", "tuning_runs"]
+norecursedirs = [".git", ".venv", "__pycache__", "artifacts", "mnist_data", "notebooks", "tuning_runs", "runs/experiment10"]
 pythonpath = ["."]
 addopts = "-q"
 
@@ -14,6 +14,7 @@ extend-exclude = [
   "mnist_data",
   "notebooks",
   "tuning_runs",
+  "runs/experiment10",
 ]
 
 [tool.ruff.lint]
