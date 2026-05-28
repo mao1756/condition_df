@@ -265,23 +265,22 @@ are now named `conditioning_only`, `free_plus_conditioning_no_noise`,
 `conditioning_only` is not expected to be a faithful sample because the model is
 trained as a correction to the free SDE.
 
-### Experiment 10i: laptop optimization and diffusion-process figures
+### Experiment 10j: faster replay cache and safer on-policy targets
 
-Experiment 10i keeps the stochastic/free-aware 10h setup but makes the expensive
-parts more laptop-friendly.  The default on-policy mode is now a replay cache:
-the code periodically rolls out a cache of model-visited states and samples
-on-policy microbatches from it, rather than doing a fresh long prefix rollout on
-every optimizer step.  The main teacher-forced loss also skips the FFT projection
-when `--flux-parameterization projected` is active; projection is still used for
-sampler-consistency losses and generation.  Poisson denominators are cached.
+Experiment 10j keeps the stochastic/free-aware setup and improves the 10i replay cache.
+The default cache mode is now `trajectory`: one rollout stores many trajectory snapshots,
+so refreshes are much cheaper than independently rolling every cached state from the source.
+Replay targets use `--on-policy-target-mode safe-residual`, which clips residual corrections
+relative to the constant source-target velocity and avoids pulling the model toward overly
+aggressive mid-trajectory targets.  EMA weights can be used for cache refreshes and final
+sampling through `--use-ema-for-cache` and `--use-ema-for-sampling`.
 
-The sharpening loss is moved to the rollout endpoint through
-`--rollout-image-grad-loss-weight`, because the old one-step image-gradient loss
-was usually too small to affect final samples.  Use `--save-process-figure` to
-save trajectory grids from the initial source distribution to the terminal digit
-samples.
+The main teacher-forced loss still skips the FFT projection when `--flux-parameterization projected`
+is active; projection is used for sampler-consistency losses and generation.  Use
+`--save-process-figure` to save trajectory grids from the initial source distribution to the
+terminal digit samples.
 
-Recommended laptop-friendly 10i run:
+Recommended laptop-friendly 10j run:
 
 ```powershell
 .venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
@@ -301,14 +300,21 @@ Recommended laptop-friendly 10i run:
   --on-policy-use-free `
   --on-policy-use-noise `
   --on-policy-mode replay `
+  --on-policy-cache-mode trajectory `
   --on-policy-cache-size 2048 `
-  --on-policy-cache-refresh-interval 250 `
+  --on-policy-cache-refresh-interval 100 `
   --on-policy-cache-rollout-batch-size 128 `
+  --on-policy-cache-snapshots-per-traj 16 `
+  --on-policy-target-mode safe-residual `
+  --on-policy-residual-max-ratio 1.5 `
+  --ema-decay 0.999 `
+  --use-ema-for-sampling `
+  --use-ema-for-cache `
   --rollout-loss-weight 0.15 `
   --rollout-loss-steps 6 `
   --rollout-loss-batch-size 64 `
   --rollout-loss-every 2 `
-  --rollout-image-grad-loss-weight 0.05 `
+  --rollout-image-grad-loss-weight 0.03 `
   --upsample-mode resize-conv `
   --flux-parameterization projected `
   --curl-loss-weight 0.01 `

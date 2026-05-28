@@ -20,6 +20,8 @@ from mnist.eulerian_flux_mnist import (
     FLUX_PARAMETERIZATION_MODES,
     ON_POLICY_PREFIX_MODES,
     ON_POLICY_MODES,
+    ON_POLICY_CACHE_MODES,
+    ON_POLICY_TARGET_MODES,
     UPSAMPLE_MODES,
     FluxTrainingBatch,
     _ot_coupled_target_indices,
@@ -218,6 +220,8 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
     assert FLUX_PARAMETERIZATION_MODES == ("edge", "projected")
     assert "uniform" in ON_POLICY_PREFIX_MODES
     assert "replay" in ON_POLICY_MODES
+    assert "trajectory" in ON_POLICY_CACHE_MODES
+    assert "safe-residual" in ON_POLICY_TARGET_MODES
     images, labels = _toy_digit_measures(grid_size=config.grid_size)
     batch = sample_flux_training_batch(images, labels, config, batch_size=4, device="cpu", rng=np.random.default_rng(5), step_index=2000)
     model = DirectFluxUNet(config, base_channels=4, num_classes=10)
@@ -252,6 +256,9 @@ def test_replay_cache_and_process_figure_smoke(tmp_path) -> None:
         on_policy_mode="replay",
         on_policy_cache_size=4,
         on_policy_cache_rollout_batch_size=2,
+        on_policy_cache_mode="trajectory",
+        on_policy_cache_snapshots_per_traj=2,
+        on_policy_target_mode="safe-residual",
         on_policy_prefix_mode="short",
         on_policy_prefix_steps=2,
         rollout_loss_steps=1,
@@ -279,8 +286,13 @@ def test_replay_cache_and_process_figure_smoke(tmp_path) -> None:
         step_index=10,
     )
     assert replay.size == 4
+    assert replay.mode == "trajectory"
+    assert 0.0 <= replay.tau_min <= replay.tau_mean <= replay.tau_max <= 1.0
+    assert ON_POLICY_CACHE_MODES == ("independent", "trajectory")
+    assert "safe-residual" in ON_POLICY_TARGET_MODES
     batch = sample_on_policy_replay_batch(replay, batch_size=3, device=torch.device("cpu"), rng=rng, step_index=11)
     assert batch.states.shape[0] == 3
+    assert batch.target_velocity_mode == "safe-residual"
     traj = np.stack([batch.sources.detach().numpy(), batch.states.detach().numpy(), batch.targets.detach().numpy()], axis=0)
     out = tmp_path / "process.png"
     save_diffusion_process_figure(traj, batch.labels.detach().numpy(), out, grid_size=config.grid_size, num_frames=3, max_samples=2)
@@ -438,7 +450,7 @@ def test_direct_flux_teacher_model_and_sampler_smoke() -> None:
         device="cpu",
         rng=rng,
     )
-    assert on_policy_batch.target_velocity_mode == "residual"
+    assert on_policy_batch.target_velocity_mode == "safe-residual"
 
     history = train_direct_flux_model(
         model,

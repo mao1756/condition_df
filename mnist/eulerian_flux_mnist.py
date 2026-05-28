@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-r"""Example 10/10b/10c/10d/10e/10g/10h/10i: MNIST generation with directly learned Eulerian edge fluxes.
+r"""Example 10/10b/10c/10d/10e/10g/10h/10i/10j: MNIST generation with directly learned Eulerian edge fluxes.
 
 The manuscript's fixed-grid h-transform adds a conservative edge flux
 
@@ -31,13 +31,13 @@ predict the h-transform conditioning flux, i.e. the desired total transport
 flux minus the free Dirichlet drift, while on-policy/step losses can use the
 same free/noisy SDE weights as the sampler.  The default remains learned-only
 for quick deterministic debugging; pass the SDE curriculum/free-aware flags to
-train and sample with stochastic dynamics.  Experiment 10h merges the rollout-sharpening machinery back into stochastic training, replaces transposed-convolution upsampling by resize-conv by default, and can project learned edge fluxes to their minimum-energy divergence-equivalent part to suppress checkerboard/curl artifacts.  Experiment 10i adds a replay on-policy cache, cheaper projected-flux losses, cached Poisson denominators, rollout-endpoint sharpening losses, timing diagnostics, and diffusion-process figures.
+train and sample with stochastic dynamics.  Experiment 10h merges the rollout-sharpening machinery back into stochastic training, replaces transposed-convolution upsampling by resize-conv by default, and can project learned edge fluxes to their minimum-energy divergence-equivalent part to suppress checkerboard/curl artifacts.  Experiment 10i adds a replay on-policy cache, cheaper projected-flux losses, cached Poisson denominators, rollout-endpoint sharpening losses, timing diagnostics, and diffusion-process figures. Experiment 10j replaces independent replay rollouts with trajectory-snapshot replay, adds safe residual replay targets, and optionally uses EMA weights for cache building and sampling.
 """
 
 import argparse
 import math
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator, Sequence
@@ -56,13 +56,15 @@ IntArray = NDArray[np.int64]
 
 TARGET_MODES = ("poisson-flow", "poisson-ot-flow", "class-mean-flow", "terminal-score")
 SOURCE_MODES = ("lowfreq", "uniform-plus-lowfreq", "blurred-dirichlet", "dirichlet", "class-lowres-prior", "target-lowres-prior")
-VELOCITY_TARGET_MODES = ("constant", "residual", "mixed")
+VELOCITY_TARGET_MODES = ("constant", "residual", "mixed", "safe-residual")
 TAU_SAMPLING_MODES = ("uniform", "endpoint-mixture")
 OT_COST_MODES = ("lowres", "pixel")
 OT_MATCH_MODES = ("minibatch", "nearest", "topk")
 EDGE_ALPHA_MODES = ("legacy", "grid")
 ON_POLICY_PREFIX_MODES = ("short", "uniform", "late-biased")
 ON_POLICY_MODES = ("online", "replay", "off")
+ON_POLICY_CACHE_MODES = ("independent", "trajectory")
+ON_POLICY_TARGET_MODES = ("residual", "mixed", "constant", "safe-residual")
 UPSAMPLE_MODES = ("transpose", "resize-conv")
 FLUX_PARAMETERIZATION_MODES = ("edge", "projected")
 
@@ -78,6 +80,8 @@ __all__ = [
     "EDGE_ALPHA_MODES",
     "ON_POLICY_PREFIX_MODES",
     "ON_POLICY_MODES",
+    "ON_POLICY_CACHE_MODES",
+    "ON_POLICY_TARGET_MODES",
     "UPSAMPLE_MODES",
     "FLUX_PARAMETERIZATION_MODES",
     "DirectFluxUNet",
@@ -100,6 +104,8 @@ __all__ = [
     "make_on_policy_training_batch",
     "build_on_policy_replay_cache",
     "sample_on_policy_replay_batch",
+    "update_ema_state",
+    "temporary_ema_weights",
     "save_diffusion_process_figure",
     "save_diffusion_marginal_process_figure",
     "direct_flux_rollout_consistency_loss",
@@ -129,11 +135,10 @@ class DirectFluxMNISTConfig:
     """Configuration for the direct-flux MNIST experiment.
 
     Defaults are intentionally modest and designed for an 8 GB laptop GPU.  The
-    default 10e path uses stable nearest-matched Poisson-flow, a low-frequency
-    source, persistent source conditioning, constant source-target velocity,
-    on-policy corrections, limiter-aware losses, and learned-only deterministic
-    sampling so that the first serious run tests the learned conservative flux
-    before reintroducing the free harmonic drift/noise.
+    default 10j path uses stable nearest-matched Poisson-flow, a low-frequency
+    source, persistent source conditioning, stochastic-aware correction targets,
+    trajectory-snapshot replay, safe residual on-policy targets, and optional
+    EMA weights for cache construction and sampling.
     """
 
     grid_size: int = 28
@@ -228,7 +233,7 @@ class DirectFluxMNISTConfig:
     rollout_loss_every: int = 2
     rollout_loss_prob: float = 1.0
     image_grad_loss_weight: float = 0.0
-    rollout_image_grad_loss_weight: float = 0.05
+    rollout_image_grad_loss_weight: float = 0.03
     target_tv_loss_weight: float = 0.0
     target_entropy_loss_weight: float = 0.0
     curl_loss_weight: float = 0.01
@@ -244,9 +249,16 @@ class DirectFluxMNISTConfig:
     on_policy_batch_size: int = 64
     on_policy_mode: str = "replay"
     on_policy_cache_size: int = 2048
-    on_policy_cache_refresh_interval: int = 250
+    on_policy_cache_refresh_interval: int = 100
     on_policy_cache_rollout_batch_size: int = 128
     on_policy_cache_device: str = "cpu"
+    on_policy_cache_mode: str = "trajectory"
+    on_policy_cache_snapshots_per_traj: int = 16
+    on_policy_target_mode: str = "safe-residual"
+    on_policy_residual_max_ratio: float = 1.5
+    ema_decay: float = 0.999
+    use_ema_for_sampling: bool = True
+    use_ema_for_cache: bool = True
 
     adaptive_sampling: bool = False
     clip_target: float = 0.03
@@ -421,6 +433,20 @@ class DirectFluxMNISTConfig:
             raise ValueError("on_policy_cache_rollout_batch_size must be positive")
         if self.on_policy_cache_device not in {"cpu", "cuda"}:
             raise ValueError("on_policy_cache_device must be 'cpu' or 'cuda'")
+        if self.on_policy_cache_mode not in ON_POLICY_CACHE_MODES:
+            raise ValueError(f"on_policy_cache_mode must be one of {ON_POLICY_CACHE_MODES}")
+        if self.on_policy_cache_snapshots_per_traj <= 0:
+            raise ValueError("on_policy_cache_snapshots_per_traj must be positive")
+        if self.on_policy_target_mode not in ON_POLICY_TARGET_MODES:
+            raise ValueError(f"on_policy_target_mode must be one of {ON_POLICY_TARGET_MODES}")
+        if self.on_policy_residual_max_ratio <= 0.0 or not math.isfinite(self.on_policy_residual_max_ratio):
+            raise ValueError("on_policy_residual_max_ratio must be positive and finite")
+        if not (0.0 <= self.ema_decay < 1.0):
+            raise ValueError("ema_decay must be in [0, 1)")
+        if not isinstance(self.use_ema_for_sampling, bool):
+            raise ValueError("use_ema_for_sampling must be a bool")
+        if not isinstance(self.use_ema_for_cache, bool):
+            raise ValueError("use_ema_for_cache must be a bool")
         if self.on_policy_warmup_steps < 0:
             raise ValueError("on_policy_warmup_steps must be non-negative")
         if self.on_policy_prefix_steps < 0:
@@ -498,6 +524,10 @@ class OnPolicyReplayCache:
     batch: FluxTrainingBatch
     created_step: int
     refresh_seconds: float
+    mode: str = "independent"
+    tau_min: float = float("nan")
+    tau_mean: float = float("nan")
+    tau_max: float = float("nan")
 
     @property
     def size(self) -> int:
@@ -1855,21 +1885,24 @@ def sample_flux_training_batch(
         train_noise_weight=float(train_noise_weight),
     )
 
-def training_target_flux_torch(batch: FluxTrainingBatch, config: DirectFluxMNISTConfig) -> Tensor:
-    """Return the physical two-channel target flux for the configured target mode."""
-    if config.target_mode == "terminal-score":
-        return terminal_conditioning_flux_torch(batch.states, batch.targets, config)
+def training_target_velocity_torch(batch: FluxTrainingBatch, config: DirectFluxMNISTConfig, mode: str | None = None) -> Tensor:
+    """Node velocity teacher used before the Poisson edge-flux solve."""
     horizon = max(natural_horizon(config), 1e-12)
-    velocity_mode = batch.target_velocity_mode or config.velocity_target
-    if velocity_mode == "residual":
-        remaining = batch.tau.clamp_min(float(config.min_tau_fraction) * float(horizon)).view(-1, 1)
-        velocity = (batch.targets - batch.states) / remaining
-    elif velocity_mode == "constant":
-        velocity = (batch.targets - batch.sources) / float(horizon)
+    velocity_mode = mode or batch.target_velocity_mode or config.velocity_target
+    constant_velocity = (batch.targets - batch.sources) / float(horizon)
+    remaining = batch.tau.clamp_min(float(config.min_tau_fraction) * float(horizon)).view(-1, 1)
+    residual_velocity = (batch.targets - batch.states) / remaining
+    if velocity_mode == "constant":
+        velocity = constant_velocity
+    elif velocity_mode == "residual":
+        velocity = residual_velocity
+    elif velocity_mode == "safe-residual":
+        const_rms = constant_velocity.square().mean(dim=1, keepdim=True).sqrt().clamp_min(1e-8)
+        resid_rms = residual_velocity.square().mean(dim=1, keepdim=True).sqrt().clamp_min(1e-8)
+        max_rms = float(config.on_policy_residual_max_ratio) * const_rms
+        scale = torch.minimum(torch.ones_like(resid_rms), max_rms / resid_rms)
+        velocity = residual_velocity * scale
     elif velocity_mode == "mixed":
-        constant_velocity = (batch.targets - batch.sources) / float(horizon)
-        remaining = batch.tau.clamp_min(float(config.min_tau_fraction) * float(horizon)).view(-1, 1)
-        residual_velocity = (batch.targets - batch.states) / remaining
         tau_fraction = batch.tau / float(horizon)
         late_mask = tau_fraction <= float(config.late_residual_fraction)
         if float(config.late_residual_prob) < 1.0:
@@ -1883,12 +1916,18 @@ def training_target_flux_torch(batch: FluxTrainingBatch, config: DirectFluxMNIST
         velocity = torch.where(late_mask.view(-1, 1), residual_velocity, constant_velocity)
     else:
         raise ValueError(f"unknown velocity target mode: {velocity_mode}")
-    velocity = velocity - velocity.mean(dim=1, keepdim=True)
+    return velocity - velocity.mean(dim=1, keepdim=True)
+
+
+def training_target_flux_torch(batch: FluxTrainingBatch, config: DirectFluxMNISTConfig) -> Tensor:
+    """Return the physical two-channel target flux for the configured target mode."""
+    if config.target_mode == "terminal-score":
+        return terminal_conditioning_flux_torch(batch.states, batch.targets, config)
+    velocity = training_target_velocity_torch(batch, config)
     total_flux = poisson_flux_from_velocity_torch(velocity, grid_size=int(config.grid_size))
     if bool(config.free_aware_target):
         total_flux = total_flux - float(batch.train_free_weight) * free_drift_flux_torch(batch.states, config)
     return total_flux
-
 
 
 def direct_flux_rollout_consistency_loss(
@@ -2155,8 +2194,7 @@ def make_on_policy_training_batch(
 
     The batch keeps the same assigned source/target pair as the ordinary teacher
     batch, but replaces the interpolated state by a short no-gradient prefix
-    rollout of the current model.  Its target velocity is forced to residual so
-    the model learns to correct its own off-path states.
+    rollout of the current model.  Its target velocity uses ``config.on_policy_target_mode``; the default safe-residual target clips residual corrections relative to the constant source-target velocity.
     """
     rng = np.random.default_rng() if rng is None else rng
     resolved_device = torch.device(device)
@@ -2188,7 +2226,7 @@ def make_on_policy_training_batch(
             source_indices=base.source_indices,
             source_labels=base.source_labels,
             target_indices=base.target_indices,
-            target_velocity_mode="residual",
+            target_velocity_mode=str(config.on_policy_target_mode),
             step_index=base.step_index,
             train_free_weight=base.train_free_weight,
             train_noise_weight=base.train_noise_weight,
@@ -2237,7 +2275,7 @@ def make_on_policy_training_batch(
         source_indices=base.source_indices,
         source_labels=base.source_labels,
         target_indices=base.target_indices,
-        target_velocity_mode="residual",
+        target_velocity_mode=str(config.on_policy_target_mode),
         step_index=base.step_index,
         train_free_weight=base.train_free_weight,
         train_noise_weight=base.train_noise_weight,
@@ -2310,6 +2348,185 @@ def _subset_training_batch(batch: FluxTrainingBatch, indices: np.ndarray, *, dev
     )
 
 
+def _on_policy_prefix_bounds(config: DirectFluxMNISTConfig) -> tuple[int, int]:
+    if str(config.on_policy_prefix_mode) == "short":
+        min_prefix = 1
+        max_prefix = min(int(config.on_policy_prefix_steps), int(config.num_steps) - 1)
+    else:
+        min_prefix = max(1, int(round(float(config.on_policy_min_prefix_fraction) * float(config.num_steps))))
+        max_prefix = min(int(config.num_steps) - 1, int(round(float(config.on_policy_max_prefix_fraction) * float(config.num_steps))))
+    return min_prefix, max_prefix
+
+
+def _trajectory_snapshot_steps(config: DirectFluxMNISTConfig) -> np.ndarray:
+    min_prefix, max_prefix = _on_policy_prefix_bounds(config)
+    if max_prefix <= 0 or max_prefix < min_prefix:
+        return np.asarray([], dtype=np.int64)
+    count = max(1, int(config.on_policy_cache_snapshots_per_traj))
+    if str(config.on_policy_prefix_mode) == "late-biased":
+        u = np.linspace(0.0, 1.0, count + 2, dtype=np.float64)[1:-1]
+        values = min_prefix + (max_prefix - min_prefix) * np.sqrt(u)
+    else:
+        values = np.linspace(min_prefix, max_prefix, count, dtype=np.float64)
+    steps = np.unique(np.clip(np.round(values).astype(np.int64), min_prefix, max_prefix))
+    if steps.size == 0:
+        steps = np.asarray([max_prefix], dtype=np.int64)
+    return steps
+
+
+def _repeat_optional_array(arr: IntArray | None, repeats: int) -> IntArray | None:
+    if arr is None:
+        return None
+    return np.tile(np.asarray(arr, dtype=np.int64).reshape(-1), int(repeats))
+
+
+@torch.no_grad()
+def _build_trajectory_on_policy_replay_cache(
+    model: DirectFluxUNet,
+    images: np.ndarray,
+    labels: np.ndarray,
+    config: DirectFluxMNISTConfig,
+    *,
+    cache_size: int,
+    rollout_batch_size: int,
+    device: torch.device,
+    rng: np.random.Generator,
+    dtype: torch.dtype,
+    class_means: np.ndarray,
+    ot_cache: ClasswiseOTCache,
+    step_index: int,
+) -> OnPolicyReplayCache:
+    """Build replay states by rolling each trajectory once and storing multiple snapshots."""
+    start = time.perf_counter()
+    cache_device = torch.device("cuda" if config.on_policy_cache_device == "cuda" and torch.cuda.is_available() else "cpu")
+    snapshot_steps = _trajectory_snapshot_steps(config)
+    if snapshot_steps.size == 0:
+        batch = sample_flux_training_batch(
+            images,
+            labels,
+            config,
+            batch_size=int(cache_size),
+            device=device,
+            rng=rng,
+            dtype=dtype,
+            class_means=class_means,
+            ot_cache=ot_cache,
+            step_index=step_index,
+        )
+        batch = FluxTrainingBatch(
+            tau=batch.tau,
+            states=batch.states,
+            labels=batch.labels,
+            targets=batch.targets,
+            sources=batch.sources,
+            source_indices=batch.source_indices,
+            source_labels=batch.source_labels,
+            target_indices=batch.target_indices,
+            target_velocity_mode=str(config.on_policy_target_mode),
+            step_index=batch.step_index,
+            train_free_weight=batch.train_free_weight,
+            train_noise_weight=batch.train_noise_weight,
+        )
+        cached = _batch_to_device(batch, cache_device, step_index=int(step_index))
+        tau_frac = cached.tau / max(float(natural_horizon(config)), 1e-12)
+        return OnPolicyReplayCache(
+            batch=cached,
+            created_step=int(step_index),
+            refresh_seconds=time.perf_counter() - start,
+            mode="trajectory",
+            tau_min=float(tau_frac.min().detach().cpu()),
+            tau_mean=float(tau_frac.mean().detach().cpu()),
+            tau_max=float(tau_frac.max().detach().cpu()),
+        )
+    pieces: list[FluxTrainingBatch] = []
+    produced = 0
+    horizon = float(natural_horizon(config))
+    dt = horizon / float(max(int(config.num_steps), 1))
+    model_was_training = bool(model.training)
+    model.eval()
+    max_step = int(snapshot_steps.max())
+    while produced < int(cache_size):
+        remaining_items = int(cache_size) - produced
+        traj_batch = min(int(rollout_batch_size), max(1, int(math.ceil(remaining_items / max(1, snapshot_steps.size)))))
+        base = sample_flux_training_batch(
+            images,
+            labels,
+            config,
+            batch_size=traj_batch,
+            device=device,
+            rng=rng,
+            dtype=dtype,
+            class_means=class_means,
+            ot_cache=ot_cache,
+            step_index=step_index,
+        )
+        states = base.sources.clone()
+        source_condition = base.sources.clone()
+        saved_states: list[Tensor] = []
+        saved_tau: list[Tensor] = []
+        wanted = set(int(s) for s in snapshot_steps.tolist())
+        rollout_free = float(base.train_free_weight) if bool(config.on_policy_use_free) else 0.0
+        rollout_noise = float(base.train_noise_weight) if bool(config.on_policy_use_noise) else 0.0
+        for prefix_idx in range(max_step):
+            tau_value = max(horizon - float(prefix_idx) * dt, 0.0)
+            tau = torch.full((traj_batch,), tau_value, dtype=states.dtype, device=device)
+            flux = model.predict_flux(tau, states, base.labels, source_condition)
+            states, _, _ = eulerian_flux_step_torch(
+                states,
+                flux.float(),
+                dt,
+                config,
+                deterministic=not bool(config.on_policy_use_noise),
+                free_weight=rollout_free,
+                noise_weight=rollout_noise,
+                learned_weight=1.0,
+            )
+            completed = prefix_idx + 1
+            if completed in wanted:
+                tau_remaining = torch.full(
+                    (traj_batch,),
+                    max(horizon - float(completed) * dt, 0.0),
+                    dtype=states.dtype,
+                    device=device,
+                )
+                saved_states.append(states.detach().clone())
+                saved_tau.append(tau_remaining)
+        if saved_states:
+            repeats = len(saved_states)
+            chunk = FluxTrainingBatch(
+                tau=torch.cat(saved_tau, dim=0),
+                states=torch.cat(saved_states, dim=0),
+                labels=base.labels.repeat(repeats),
+                targets=base.targets.repeat(repeats, 1),
+                sources=base.sources.repeat(repeats, 1),
+                source_indices=_repeat_optional_array(base.source_indices, repeats),
+                source_labels=_repeat_optional_array(base.source_labels, repeats),
+                target_indices=_repeat_optional_array(base.target_indices, repeats),
+                target_velocity_mode=str(config.on_policy_target_mode),
+                step_index=base.step_index,
+                train_free_weight=base.train_free_weight,
+                train_noise_weight=base.train_noise_weight,
+            )
+            if produced + chunk.states.shape[0] > int(cache_size):
+                keep = np.arange(int(cache_size) - produced, dtype=np.int64)
+                chunk = _subset_training_batch(chunk, keep, device=device, step_index=int(step_index))
+            pieces.append(_batch_to_device(chunk, cache_device, step_index=int(step_index)))
+            produced += int(chunk.states.shape[0])
+    if model_was_training:
+        model.train()
+    batch = _concat_training_batches(pieces, device=cache_device, step_index=int(step_index))
+    tau_frac = batch.tau / max(float(natural_horizon(config)), 1e-12)
+    return OnPolicyReplayCache(
+        batch=batch,
+        created_step=int(step_index),
+        refresh_seconds=time.perf_counter() - start,
+        mode="trajectory",
+        tau_min=float(tau_frac.min().detach().cpu()),
+        tau_mean=float(tau_frac.mean().detach().cpu()),
+        tau_max=float(tau_frac.max().detach().cpu()),
+    )
+
+
 @torch.no_grad()
 def build_on_policy_replay_cache(
     model: DirectFluxUNet,
@@ -2328,9 +2545,26 @@ def build_on_policy_replay_cache(
 ) -> OnPolicyReplayCache:
     """Refresh a replay buffer of model-visited states.
 
-    This amortizes expensive on-policy prefixes over many training iterations.
-    The cache can live on CPU to reduce VRAM pressure or on CUDA for maximum speed.
+    In ``trajectory`` mode each sampled trajectory is rolled once and multiple
+    snapshots are stored, which is much cheaper than independent source-to-prefix
+    rollouts for every cache item.
     """
+    if str(config.on_policy_cache_mode) == "trajectory":
+        return _build_trajectory_on_policy_replay_cache(
+            model,
+            images,
+            labels,
+            config,
+            cache_size=int(cache_size),
+            rollout_batch_size=int(rollout_batch_size),
+            device=device,
+            rng=rng,
+            dtype=dtype,
+            class_means=class_means,
+            ot_cache=ot_cache,
+            step_index=int(step_index),
+        )
+
     start = time.perf_counter()
     cache_device = torch.device("cuda" if config.on_policy_cache_device == "cuda" and torch.cuda.is_available() else "cpu")
     pieces: list[FluxTrainingBatch] = []
@@ -2357,8 +2591,16 @@ def build_on_policy_replay_cache(
     if model_was_training:
         model.train()
     batch = _concat_training_batches(pieces, device=cache_device, step_index=int(step_index))
-    return OnPolicyReplayCache(batch=batch, created_step=int(step_index), refresh_seconds=time.perf_counter() - start)
-
+    tau_frac = batch.tau / max(float(natural_horizon(config)), 1e-12)
+    return OnPolicyReplayCache(
+        batch=batch,
+        created_step=int(step_index),
+        refresh_seconds=time.perf_counter() - start,
+        mode="independent",
+        tau_min=float(tau_frac.min().detach().cpu()),
+        tau_mean=float(tau_frac.mean().detach().cpu()),
+        tau_max=float(tau_frac.max().detach().cpu()),
+    )
 
 def sample_on_policy_replay_batch(
     cache: OnPolicyReplayCache,
@@ -2386,6 +2628,43 @@ def _disable_mkldnn_for_cpu_if_needed(device: torch.device) -> None:
     """Avoid rare CPU convolution backward hangs seen with MKL-DNN on sparse MNIST masses."""
     if device.type == "cpu" and hasattr(torch.backends, "mkldnn"):
         torch.backends.mkldnn.enabled = False
+
+
+
+def init_ema_state(model: nn.Module) -> dict[str, Tensor]:
+    """Create a detached state-dict copy for exponential moving average weights."""
+    return {name: value.detach().clone() for name, value in model.state_dict().items()}
+
+
+def update_ema_state(ema_state: dict[str, Tensor], model: nn.Module, decay: float) -> None:
+    """Update EMA tensors in-place from ``model``."""
+    if not ema_state:
+        return
+    decay_f = float(decay)
+    with torch.no_grad():
+        for name, value in model.state_dict().items():
+            if name not in ema_state:
+                ema_state[name] = value.detach().clone()
+                continue
+            target = ema_state[name]
+            if torch.is_floating_point(value):
+                target.mul_(decay_f).add_(value.detach(), alpha=1.0 - decay_f)
+            else:
+                target.copy_(value.detach())
+
+
+@contextmanager
+def temporary_ema_weights(model: nn.Module, ema_state: dict[str, Tensor] | None):
+    """Temporarily evaluate a model with EMA weights, restoring live weights after."""
+    if ema_state is None:
+        yield model
+        return
+    live_state = {name: value.detach().clone() for name, value in model.state_dict().items()}
+    try:
+        model.load_state_dict(ema_state, strict=False)
+        yield model
+    finally:
+        model.load_state_dict(live_state, strict=False)
 
 
 def train_direct_flux_model(
@@ -2418,6 +2697,7 @@ def train_direct_flux_model(
     torch.manual_seed(seed)
     model.to(resolved_device)
     model.train()
+    ema_state = init_ema_state(model) if float(model.config.ema_decay) > 0.0 else None
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
     amp_enabled = bool(use_amp and resolved_device.type == "cuda")
     scaler = _make_cuda_grad_scaler(enabled=amp_enabled)
@@ -2454,10 +2734,20 @@ def train_direct_flux_model(
         "examples_per_sec": [],
         "on_policy_cache_age": [],
         "cache_refresh_sec": [],
+        "cache_tau_min": [],
+        "cache_tau_mean": [],
+        "cache_tau_max": [],
+        "off_loss": [],
+        "off_div_cos": [],
+        "off_target_rms": [],
+        "off_pred_rms": [],
+        "on_loss": [],
+        "on_div_cos": [],
+        "on_target_rms": [],
+        "on_pred_rms": [],
     }
 
     replay_cache: OnPolicyReplayCache | None = None
-    last_cache_refresh_sec = 0.0
     preview_path = None if preview_dir is None or preview_every <= 0 else Path(preview_dir)
     if preview_path is not None:
         preview_path.mkdir(parents=True, exist_ok=True)
@@ -2465,6 +2755,7 @@ def train_direct_flux_model(
     bar = _progress(range(int(train_steps)), total=int(train_steps), desc="train flux", disable=not show_progress)
     for step_index in bar:
         iter_start = time.perf_counter()
+        cache_refresh_sec_this_step = 0.0
         use_on_policy = (
             str(model.config.on_policy_mode) != "off"
             and int(step_index) >= int(model.config.on_policy_warmup_steps)
@@ -2478,21 +2769,27 @@ def train_direct_flux_model(
                 or replay_cache.size < min(int(batch_size), int(model.config.on_policy_batch_size))
             )
             if cache_stale:
-                replay_cache = build_on_policy_replay_cache(
-                    model,
-                    images,
-                    labels,
-                    model.config,
-                    cache_size=int(model.config.on_policy_cache_size),
-                    rollout_batch_size=int(model.config.on_policy_cache_rollout_batch_size),
-                    device=resolved_device,
-                    rng=rng,
-                    dtype=torch.float32,
-                    class_means=class_means,
-                    ot_cache=ot_cache,
-                    step_index=int(step_index),
+                cache_context = (
+                    temporary_ema_weights(model, ema_state)
+                    if bool(model.config.use_ema_for_cache) and ema_state is not None
+                    else nullcontext(model)
                 )
-                last_cache_refresh_sec = float(replay_cache.refresh_seconds)
+                with cache_context:
+                    replay_cache = build_on_policy_replay_cache(
+                        model,
+                        images,
+                        labels,
+                        model.config,
+                        cache_size=int(model.config.on_policy_cache_size),
+                        rollout_batch_size=int(model.config.on_policy_cache_rollout_batch_size),
+                        device=resolved_device,
+                        rng=rng,
+                        dtype=torch.float32,
+                        class_means=class_means,
+                        ot_cache=ot_cache,
+                        step_index=int(step_index),
+                    )
+                cache_refresh_sec_this_step = float(replay_cache.refresh_seconds)
             assert replay_cache is not None
             batch = sample_on_policy_replay_batch(
                 replay_cache,
@@ -2533,13 +2830,37 @@ def train_direct_flux_model(
         metrics["on_policy"] = 1.0 if use_on_policy else 0.0
         metrics["on_policy_tau_frac"] = float((batch.tau / max(natural_horizon(model.config), 1e-12)).mean().detach().cpu()) if use_on_policy else -1.0
         metrics["on_policy_cache_age"] = -1.0 if replay_cache is None else float(int(step_index) - int(replay_cache.created_step))
-        metrics["cache_refresh_sec"] = float(last_cache_refresh_sec)
+        metrics["cache_refresh_sec"] = float(cache_refresh_sec_this_step)
+        metrics["cache_tau_min"] = float("nan") if replay_cache is None else float(replay_cache.tau_min)
+        metrics["cache_tau_mean"] = float("nan") if replay_cache is None else float(replay_cache.tau_mean)
+        metrics["cache_tau_max"] = float("nan") if replay_cache is None else float(replay_cache.tau_max)
+        inactive = float("nan")
+        if use_on_policy:
+            metrics["on_loss"] = metrics["loss"]
+            metrics["on_div_cos"] = metrics["div_cos"]
+            metrics["on_target_rms"] = metrics["target_rms"]
+            metrics["on_pred_rms"] = metrics["pred_rms"]
+            metrics["off_loss"] = inactive
+            metrics["off_div_cos"] = inactive
+            metrics["off_target_rms"] = inactive
+            metrics["off_pred_rms"] = inactive
+        else:
+            metrics["off_loss"] = metrics["loss"]
+            metrics["off_div_cos"] = metrics["div_cos"]
+            metrics["off_target_rms"] = metrics["target_rms"]
+            metrics["off_pred_rms"] = metrics["pred_rms"]
+            metrics["on_loss"] = inactive
+            metrics["on_div_cos"] = inactive
+            metrics["on_target_rms"] = inactive
+            metrics["on_pred_rms"] = inactive
         scaler.scale(loss).backward()
         if grad_clip > 0.0:
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(grad_clip))
         scaler.step(optimizer)
         scaler.update()
+        if ema_state is not None:
+            update_ema_state(ema_state, model, float(model.config.ema_decay))
         elapsed = max(time.perf_counter() - iter_start, 1e-12)
         metrics["sec_per_step"] = float(elapsed)
         metrics["examples_per_sec"] = float(batch.states.shape[0]) / elapsed
@@ -2569,6 +2890,9 @@ def train_direct_flux_model(
                 eps=metrics.get("examples_per_sec", 0.0),
                 cache_age=metrics.get("on_policy_cache_age", -1.0),
                 cache_s=metrics.get("cache_refresh_sec", 0.0),
+                c_tau=metrics.get("cache_tau_mean", float("nan")),
+                on_cos=metrics.get("on_div_cos", float("nan")),
+                off_cos=metrics.get("off_div_cos", float("nan")),
                 mean_p=float(anchor_prob) if model.config.target_mode in {"poisson-flow", "poisson-ot-flow"} else 0.0,
             )
 
@@ -2623,6 +2947,8 @@ def train_direct_flux_model(
                 pass
             finally:
                 model.train()
+    if ema_state is not None and bool(model.config.use_ema_for_sampling):
+        model.load_state_dict(ema_state, strict=False)
     return history
 
 
@@ -3448,7 +3774,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--rollout-loss-warmup-steps", type=int, default=1500)
     parser.add_argument("--rollout-loss-every", type=int, default=2)
     parser.add_argument("--rollout-loss-prob", type=float, default=1.0)
-    parser.add_argument("--rollout-image-grad-loss-weight", type=float, default=0.05)
+    parser.add_argument("--rollout-image-grad-loss-weight", type=float, default=0.03)
     parser.add_argument("--target-tv-loss-weight", type=float, default=0.0)
     parser.add_argument("--target-entropy-loss-weight", type=float, default=0.0)
     parser.add_argument("--project-main-loss", action="store_true", help="Project predicted flux before the main flux/divergence losses; slower but exact for projected mode.")
@@ -3476,9 +3802,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--on-policy-batch-size", type=int, default=64)
     parser.add_argument("--on-policy-mode", choices=ON_POLICY_MODES, default="replay")
     parser.add_argument("--on-policy-cache-size", type=int, default=2048)
-    parser.add_argument("--on-policy-cache-refresh-interval", type=int, default=250)
+    parser.add_argument("--on-policy-cache-refresh-interval", type=int, default=100)
     parser.add_argument("--on-policy-cache-rollout-batch-size", type=int, default=128)
     parser.add_argument("--on-policy-cache-device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--on-policy-cache-mode", choices=ON_POLICY_CACHE_MODES, default="trajectory")
+    parser.add_argument("--on-policy-cache-snapshots-per-traj", type=int, default=16)
+    parser.add_argument("--on-policy-target-mode", choices=ON_POLICY_TARGET_MODES, default="safe-residual")
+    parser.add_argument("--on-policy-residual-max-ratio", type=float, default=1.5)
+    parser.add_argument("--ema-decay", type=float, default=0.999)
+    parser.add_argument("--use-ema-for-sampling", dest="use_ema_for_sampling", action="store_true", default=True)
+    parser.add_argument("--no-use-ema-for-sampling", dest="use_ema_for_sampling", action="store_false")
+    parser.add_argument("--use-ema-for-cache", dest="use_ema_for_cache", action="store_true", default=True)
+    parser.add_argument("--no-use-ema-for-cache", dest="use_ema_for_cache", action="store_false")
     parser.add_argument("--adaptive-sampling", action="store_true")
     parser.add_argument("--clip-target", type=float, default=0.03)
     parser.add_argument("--max-substeps", type=int, default=4)
@@ -3590,6 +3925,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         on_policy_cache_refresh_interval=int(args.on_policy_cache_refresh_interval),
         on_policy_cache_rollout_batch_size=int(args.on_policy_cache_rollout_batch_size),
         on_policy_cache_device=str(args.on_policy_cache_device),
+        on_policy_cache_mode=str(args.on_policy_cache_mode),
+        on_policy_cache_snapshots_per_traj=int(args.on_policy_cache_snapshots_per_traj),
+        on_policy_target_mode=str(args.on_policy_target_mode),
+        on_policy_residual_max_ratio=float(args.on_policy_residual_max_ratio),
+        ema_decay=float(args.ema_decay),
+        use_ema_for_sampling=bool(args.use_ema_for_sampling),
+        use_ema_for_cache=bool(args.use_ema_for_cache),
         adaptive_sampling=bool(args.adaptive_sampling),
         clip_target=float(args.clip_target),
         max_substeps=int(args.max_substeps),
@@ -3597,14 +3939,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     device = torch.device(
         "cuda" if args.device is None and torch.cuda.is_available() else "cpu" if args.device is None else args.device
     )
-    print(f"Experiment 10i direct-flux MNIST on device={device}")
+    print(f"Experiment 10j direct-flux MNIST on device={device}")
     print(
         "Laptop-friendly settings: "
         f"target_mode={config.target_mode}, source_mode={config.source_mode}, "
         f"ot={config.ot_cost_mode}/{config.ot_lowres_size}, match={config.ot_match_mode}, tau={config.tau_sampling}, "
         f"source_cond={config.condition_on_source}, upsample={config.upsample_mode}, flux_param={config.flux_parameterization}, velocity={config.velocity_target}, "
         f"free_aware={config.free_aware_target}, sde_curr={config.sde_curriculum}, edge_alpha={config.edge_alpha_mode}, "
-        f"on_policy={config.on_policy_prob}, onp_mode={config.on_policy_mode}, cache={config.on_policy_cache_size}/{config.on_policy_cache_refresh_interval}, onp_sde=({config.on_policy_use_free},{config.on_policy_use_noise}), "
+        f"on_policy={config.on_policy_prob}, onp_mode={config.on_policy_mode}/{config.on_policy_cache_mode}, cache={config.on_policy_cache_size}/{config.on_policy_cache_refresh_interval}/snap{config.on_policy_cache_snapshots_per_traj}, onp_target={config.on_policy_target_mode}, ema={config.ema_decay}, onp_sde=({config.on_policy_use_free},{config.on_policy_use_noise}), "
         f"step_loss={config.step_loss_weight}, rollout={config.rollout_loss_weight}/{config.rollout_loss_steps}/every{config.rollout_loss_every}, rollout_img={config.rollout_image_grad_loss_weight}, project_main={config.project_main_loss}, curl={config.curl_loss_weight}, stochastic_step={config.stochastic_step_loss}, adaptive={config.adaptive_sampling}, "
         f"train_steps={args.train_steps}, batch={args.batch_size}, base_channels={args.base_channels}, "
         f"horizon={natural_horizon(config):.3e}, sample_steps={args.sample_steps}, "
