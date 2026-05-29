@@ -26,6 +26,8 @@ from mnist.eulerian_flux_mnist import (
     ON_POLICY_CACHE_MODES,
     ON_POLICY_TARGET_MODES,
     UPSAMPLE_MODES,
+    SAMPLE_SELECTION_METRICS,
+    CLASSIFIER_LOSS_MODES,
     FluxTrainingBatch,
     make_experiment10_run_dir,
     _ot_coupled_target_indices,
@@ -48,6 +50,10 @@ from mnist.eulerian_flux_mnist import (
     save_diffusion_process_figure,
     nearest_class_mean_metrics,
     classifier_generation_metrics,
+    compute_class_shape_statistics,
+    compute_shape_statistics_np,
+    write_goodbad_sample_report,
+    select_generation_result_by_classifier,
     analyze_goodbad_annotations,
     step_component_rms_torch,
     sample_flux_training_batch,
@@ -244,6 +250,8 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
     assert "replay" in ON_POLICY_MODES
     assert "trajectory" in ON_POLICY_CACHE_MODES
     assert "safe-residual" in ON_POLICY_TARGET_MODES
+    assert "composite" in SAMPLE_SELECTION_METRICS
+    assert "low-confidence-terminal" in CLASSIFIER_LOSS_MODES
     images, labels = _toy_digit_measures(grid_size=config.grid_size)
     batch = sample_flux_training_batch(images, labels, config, batch_size=4, device="cpu", rng=np.random.default_rng(5), step_index=2000)
     model = DirectFluxUNet(config, base_channels=4, num_classes=10)
@@ -263,6 +271,10 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
         terminal_active,
         terminal_tau_mean,
         terminal_scale,
+        shape_loss,
+        shape_entropy_loss,
+        shape_tv_loss,
+        shape_maxmass_loss,
     ) = direct_flux_rollout_consistency_loss(model, batch, max_items=2, steps=1, return_extra=True)
     assert torch.isfinite(rollout_loss)
     assert torch.isfinite(endpoint_l2)
@@ -274,9 +286,13 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
     assert torch.isfinite(classifier_conf_loss)
     assert torch.isfinite(terminal_active)
     assert torch.isfinite(terminal_scale)
+    assert torch.isfinite(shape_loss)
+    assert torch.isfinite(shape_entropy_loss)
+    assert torch.isfinite(shape_tv_loss)
+    assert torch.isfinite(shape_maxmass_loss)
     loss, metrics = direct_flux_matching_loss(model, batch)
     assert torch.isfinite(loss)
-    for key in ["rollout_loss", "rollout_image_grad_loss", "target_tv_loss", "image_grad_loss", "curl_loss", "checkerboard_loss"]:
+    for key in ["rollout_loss", "rollout_image_grad_loss", "target_tv_loss", "terminal_shape_loss", "image_grad_loss", "curl_loss", "checkerboard_loss"]:
         assert key in metrics
     assert image_total_variation(batch.states, grid_size=config.grid_size) >= 0
     assert checkerboard_energy_torch(batch.states, grid_size=config.grid_size) >= 0
@@ -330,6 +346,8 @@ def test_replay_cache_and_process_figure_smoke(tmp_path) -> None:
     assert 0.0 <= replay.tau_min <= replay.tau_mean <= replay.tau_max <= 1.0
     assert ON_POLICY_CACHE_MODES == ("independent", "trajectory")
     assert "safe-residual" in ON_POLICY_TARGET_MODES
+    assert "composite" in SAMPLE_SELECTION_METRICS
+    assert "low-confidence-terminal" in CLASSIFIER_LOSS_MODES
     batch = sample_on_policy_replay_batch(replay, batch_size=3, device=torch.device("cpu"), rng=rng, step_index=11)
     assert batch.states.shape[0] == 3
     assert batch.target_velocity_mode == "safe-residual"
@@ -538,6 +556,45 @@ def test_terminal_classifier_metrics_and_goodbad_analysis() -> None:
     analysis = analyze_goodbad_annotations(tmp, images.reshape(8, -1), labels, classifier_metrics=metrics)
     assert analysis["human_good_rate"] == 0.5
     assert analysis["human_bad_count_by_label"].shape == (10,)
+
+
+def test_composite_selection_and_shape_statistics(tmp_path) -> None:
+    images, labels = _toy_digit_measures(num_samples=8, grid_size=8)
+    shape = compute_class_shape_statistics(images, labels, grid_size=8)
+    assert "entropy_q75" in shape
+    stats = compute_shape_statistics_np(images.reshape(8, -1), grid_size=8)
+    assert stats["tv"].shape == (8,)
+    clf = TinyMNISTClassifier(grid_size=8)
+    config = DirectFluxMNISTConfig(grid_size=8, horizon_scale=0.2, num_steps=2)
+    model = DirectFluxUNet(config, base_channels=4)
+    result = simulate_direct_flux_generation(
+        model,
+        labels=[0, 0, 1, 1],
+        num_steps=1,
+        deterministic=True,
+        device="cpu",
+        seed=9,
+        use_amp=False,
+        show_progress=False,
+    )
+    selected = select_generation_result_by_classifier(
+        result,
+        np.asarray([0, 1], dtype=np.int64),
+        factor=2,
+        classifier=clf,
+        grid_size=8,
+        device="cpu",
+        selection_metric="composite",
+        shape_stats=shape,
+        config=config,
+        report_path=tmp_path / "selection.csv",
+    )
+    assert selected.samples.shape[0] == 2
+    assert (tmp_path / "selection.csv").exists()
+    goodbad = tmp_path / "samples_goodbad.txt"
+    goodbad.write_text("goood bad")
+    write_goodbad_sample_report(tmp_path / "goodbad.csv", goodbad, selected.samples, selected.labels, grid_size=8)
+    assert (tmp_path / "goodbad.csv").exists()
 
 
 def test_terminal_snapshot_steps_include_late_tau() -> None:

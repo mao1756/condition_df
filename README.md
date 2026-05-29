@@ -423,3 +423,92 @@ For a presentation-style grid, add:
 This saves `experiment10_samples_raw.png` for the unselected candidates and
 `experiment10_samples.png` for the selected grid.  The raw grid should still be
 used when measuring actual generator quality.
+
+### Experiment 10n: terminal shape diagnostics and composite sample selection
+
+Experiment 10n treats the classifier as a diagnostic and optional weak terminal
+signal, not as the main quality objective.  It adds classwise shape statistics
+from real MNIST masses and uses them to penalize the measured failure mode of
+bad samples: high entropy, low total variation, and low peak mass near the
+terminal endpoint.  The terminal shape loss is gated by the same terminal-time
+mask as the 10l endpoint losses.
+
+New options include:
+
+```text
+--terminal-shape-loss-weight
+--terminal-shape-entropy-weight
+--terminal-shape-tv-weight
+--terminal-shape-maxmass-weight
+--classifier-loss-mode off|terminal|low-confidence-terminal
+--classifier-loss-confidence-threshold
+--sample-selection-metric composite
+--selection-classifier-weight
+--selection-entropy-weight
+--selection-tv-weight
+--selection-maxmass-weight
+--selection-checkerboard-weight
+```
+
+Recommended raw-quality run keeps classifier loss off and adds only terminal
+shape loss:
+
+```powershell
+.venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
+  --data-root mnist_data `
+  --run-name 10n-terminal-shape-raw `
+  --target-mode poisson-ot-flow `
+  --source-mode lowfreq `
+  --condition-on-source `
+  --ot-match-mode nearest `
+  --free-aware-target `
+  --sde-curriculum `
+  --sde-ramp-steps 3000 `
+  --target-free-weight 0.015 `
+  --target-noise-weight 0.002 `
+  --velocity-target mixed `
+  --on-policy-use-free `
+  --on-policy-use-noise `
+  --on-policy-mode replay `
+  --on-policy-cache-mode trajectory `
+  --on-policy-cache-terminal-fraction 0.35 `
+  --on-policy-target-mode safe-residual `
+  --ema-decay 0.999 `
+  --use-ema-for-sampling `
+  --use-ema-for-cache `
+  --rollout-loss-weight 0.15 `
+  --rollout-loss-steps 6 `
+  --rollout-image-grad-loss-weight 0.03 `
+  --rollout-endpoint-l2-weight 0 `
+  --rollout-endpoint-bce-weight 0 `
+  --rollout-endpoint-tv-weight 0 `
+  --terminal-shape-loss-weight 0.03 `
+  --terminal-shape-entropy-weight 1.0 `
+  --terminal-shape-tv-weight 1.0 `
+  --terminal-shape-maxmass-weight 0.5 `
+  --use-classifier-diagnostics `
+  --classifier-loss-mode off `
+  --upsample-mode resize-conv `
+  --flux-parameterization projected `
+  --curl-loss-weight 0.01 `
+  --checkerboard-loss-weight 0.001 `
+  --stochastic-step-loss `
+  --adaptive-sampling `
+  --train-steps 8000 `
+  --batch-size 256 `
+  --base-channels 32 `
+  --sample-steps 256 `
+  --num-samples 64 `
+  --save-ablation-samples `
+  --save-process-figure
+```
+
+For presentation-quality grids, add:
+
+```powershell
+  --sample-rejection-factor 4 `
+  --sample-selection-metric composite
+```
+
+The composite selector writes `experiment10_selection_report.csv`, and if
+`samples_goodbad.txt` exists the run also writes `experiment10_goodbad_report.csv`.

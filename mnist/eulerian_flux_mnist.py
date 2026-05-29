@@ -35,8 +35,10 @@ train and sample with stochastic dynamics.  Experiment 10h merges the rollout-sh
 """
 
 import argparse
+import csv
 import json
 import math
+import re
 import time
 from datetime import datetime
 from contextlib import contextmanager, nullcontext
@@ -69,7 +71,8 @@ ON_POLICY_CACHE_MODES = ("independent", "trajectory")
 ON_POLICY_TARGET_MODES = ("residual", "mixed", "constant", "safe-residual")
 UPSAMPLE_MODES = ("transpose", "resize-conv")
 FLUX_PARAMETERIZATION_MODES = ("edge", "projected")
-SAMPLE_SELECTION_METRICS = ("none", "classifier-confidence")
+SAMPLE_SELECTION_METRICS = ("none", "classifier-confidence", "composite")
+CLASSIFIER_LOSS_MODES = ("off", "terminal", "low-confidence-terminal")
 
 __all__ = [
     "DirectFluxMNISTConfig",
@@ -89,9 +92,13 @@ __all__ = [
     "UPSAMPLE_MODES",
     "FLUX_PARAMETERIZATION_MODES",
     "SAMPLE_SELECTION_METRICS",
+    "CLASSIFIER_LOSS_MODES",
     "TinyMNISTClassifier",
     "train_or_load_mnist_classifier",
     "classifier_generation_metrics",
+    "compute_shape_statistics_np",
+    "compute_class_shape_statistics",
+    "write_goodbad_sample_report",
     "select_generation_result_by_classifier",
     "analyze_goodbad_annotations",
     "DirectFluxUNet",
@@ -255,9 +262,20 @@ class DirectFluxMNISTConfig:
     target_tv_loss_weight: float = 0.0
     target_entropy_loss_weight: float = 0.0
     use_classifier_loss: bool = False
+    classifier_loss_mode: str = "off"
+    classifier_loss_confidence_threshold: float = 0.75
     classifier_loss_weight: float = 0.0
     classifier_confidence_loss_weight: float = 0.0
     classifier_loss_blur_sigma: float = 0.6
+    terminal_shape_loss_weight: float = 0.0
+    terminal_shape_entropy_weight: float = 1.0
+    terminal_shape_tv_weight: float = 1.0
+    terminal_shape_maxmass_weight: float = 0.5
+    selection_classifier_weight: float = 1.0
+    selection_entropy_weight: float = 0.5
+    selection_tv_weight: float = 0.5
+    selection_maxmass_weight: float = 0.25
+    selection_checkerboard_weight: float = 0.25
     curl_loss_weight: float = 0.01
     edge_laplacian_loss_weight: float = 0.0
     checkerboard_loss_weight: float = 0.001
@@ -449,12 +467,30 @@ class DirectFluxMNISTConfig:
             raise ValueError("target_entropy_loss_weight must be non-negative")
         if not isinstance(self.use_classifier_loss, bool):
             raise ValueError("use_classifier_loss must be a bool")
+        if self.classifier_loss_mode not in CLASSIFIER_LOSS_MODES:
+            raise ValueError(f"classifier_loss_mode must be one of {CLASSIFIER_LOSS_MODES}")
+        if not (0.0 <= self.classifier_loss_confidence_threshold <= 1.0):
+            raise ValueError("classifier_loss_confidence_threshold must be in [0, 1]")
         if self.classifier_loss_weight < 0.0:
             raise ValueError("classifier_loss_weight must be non-negative")
         if self.classifier_confidence_loss_weight < 0.0:
             raise ValueError("classifier_confidence_loss_weight must be non-negative")
         if self.classifier_loss_blur_sigma < 0.0 or not math.isfinite(self.classifier_loss_blur_sigma):
             raise ValueError("classifier_loss_blur_sigma must be non-negative and finite")
+        for name in (
+            "terminal_shape_loss_weight",
+            "terminal_shape_entropy_weight",
+            "terminal_shape_tv_weight",
+            "terminal_shape_maxmass_weight",
+            "selection_classifier_weight",
+            "selection_entropy_weight",
+            "selection_tv_weight",
+            "selection_maxmass_weight",
+            "selection_checkerboard_weight",
+        ):
+            value = float(getattr(self, name))
+            if value < 0.0 or not math.isfinite(value):
+                raise ValueError(f"{name} must be non-negative and finite")
         if self.rollout_loss_weight < 0.0:
             raise ValueError("rollout_loss_weight must be non-negative")
         if self.rollout_loss_steps < 0:
@@ -1170,13 +1206,109 @@ def classifier_generation_metrics(
     }
 
 
+
+def compute_shape_statistics_np(samples: np.ndarray, *, grid_size: int = 28) -> dict[str, np.ndarray]:
+    """Return per-sample entropy/TV/max-mass/checkerboard statistics."""
+    arr = np.asarray(samples, dtype=np.float64).reshape(-1, int(grid_size) * int(grid_size))
+    imgs = arr.reshape(arr.shape[0], int(grid_size), int(grid_size))
+    entropy = -(arr.clip(1e-30) * np.log(arr.clip(1e-30))).sum(axis=1)
+    tv = np.abs(np.roll(imgs, -1, axis=1) - imgs).sum(axis=(1, 2)) + np.abs(np.roll(imgs, -1, axis=2) - imgs).sum(axis=(1, 2))
+    maxmass = arr.max(axis=1)
+    yy, xx = np.mgrid[0:int(grid_size), 0:int(grid_size)]
+    checker_pattern = ((yy + xx) % 2) * 2.0 - 1.0
+    checkerboard = np.abs((imgs * checker_pattern[None]).sum(axis=(1, 2)))
+    return {"entropy": entropy, "tv": tv, "maxmass": maxmass, "checkerboard": checkerboard}
+
+
+def compute_class_shape_statistics(images: np.ndarray, labels: np.ndarray, *, grid_size: int = 28) -> dict[str, np.ndarray]:
+    """Classwise robust shape statistics for terminal-quality scoring/losses."""
+    stats = compute_shape_statistics_np(images, grid_size=int(grid_size))
+    labs = np.asarray(labels, dtype=np.int64).reshape(-1)
+    out: dict[str, np.ndarray] = {}
+    for name, values in stats.items():
+        q25 = np.full(10, np.nan, dtype=np.float64)
+        q50 = np.full(10, np.nan, dtype=np.float64)
+        q75 = np.full(10, np.nan, dtype=np.float64)
+        scale = np.full(10, np.nan, dtype=np.float64)
+        for digit in range(10):
+            mask = labs == digit
+            if mask.any():
+                vals = np.asarray(values[mask], dtype=np.float64)
+                q25[digit] = float(np.quantile(vals, 0.25))
+                q50[digit] = float(np.quantile(vals, 0.50))
+                q75[digit] = float(np.quantile(vals, 0.75))
+                scale[digit] = max(float(q75[digit] - q25[digit]), 1e-6)
+        out[f"{name}_q25"] = q25
+        out[f"{name}_median"] = q50
+        out[f"{name}_q75"] = q75
+        out[f"{name}_iqr"] = scale
+    return out
+
+
+def _shape_stats_to_torch(shape_stats: dict[str, np.ndarray] | None, *, device: torch.device, dtype: torch.dtype) -> dict[str, Tensor]:
+    if not shape_stats:
+        return {}
+    return {key: torch.as_tensor(value, dtype=dtype, device=device) for key, value in shape_stats.items()}
+
+
+def _per_sample_mass_entropy_torch(states: Tensor) -> Tensor:
+    flat = states.reshape(states.shape[0], -1).clamp_min(1e-30)
+    return -(flat * flat.log()).sum(dim=1)
+
+
+def _per_sample_max_mass_torch(states: Tensor) -> Tensor:
+    return states.reshape(states.shape[0], -1).amax(dim=1)
+
+
+def terminal_shape_loss_torch(
+    states: Tensor,
+    labels: Tensor,
+    shape_stats: dict[str, Tensor],
+    *,
+    grid_size: int,
+    weights: Tensor,
+    entropy_weight: float,
+    tv_weight: float,
+    maxmass_weight: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Bounded terminal shape penalty for high-entropy / low-TV / low-peak samples."""
+    if not shape_stats:
+        z = states.new_tensor(0.0)
+        return z, z, z, z
+    y = labels.to(device=states.device, dtype=torch.long).reshape(-1).clamp(0, 9)
+    ent = _per_sample_mass_entropy_torch(states)
+    tv = image_total_variation_per_sample(states, grid_size=int(grid_size))
+    maxmass = _per_sample_max_mass_torch(states)
+    ent_q75 = shape_stats["entropy_q75"].index_select(0, y)
+    ent_iqr = shape_stats["entropy_iqr"].index_select(0, y).clamp_min(1e-6)
+    tv_q25 = shape_stats["tv_q25"].index_select(0, y)
+    tv_iqr = shape_stats["tv_iqr"].index_select(0, y).clamp_min(1e-6)
+    max_q25 = shape_stats["maxmass_q25"].index_select(0, y)
+    max_iqr = shape_stats["maxmass_iqr"].index_select(0, y).clamp_min(1e-6)
+    ent_loss_per = (F.relu((ent - ent_q75) / ent_iqr)).square()
+    tv_loss_per = (F.relu((tv_q25 - tv) / tv_iqr)).square()
+    max_loss_per = (F.relu((max_q25 - maxmass) / max_iqr)).square()
+    ent_loss = _masked_mean_torch(ent_loss_per, weights)
+    tv_loss = _masked_mean_torch(tv_loss_per, weights)
+    max_loss = _masked_mean_torch(max_loss_per, weights)
+    total = float(entropy_weight) * ent_loss + float(tv_weight) * tv_loss + float(maxmass_weight) * max_loss
+    return total, ent_loss, tv_loss, max_loss
+
 def _parse_goodbad_tokens(path: str | Path) -> np.ndarray:
+    """Parse permissive whitespace/comma good/bad annotations.
+
+    Accepts common typos such as ``goood`` and ignores unrelated tokens like
+    indices or labels.  This makes quick hand annotation robust enough to use
+    as a diagnostic signal.
+    """
     tokens: list[bool] = []
     for raw in Path(path).read_text(encoding="utf-8", errors="ignore").replace(",", " ").split():
-        token = raw.strip().lower()
-        if token in {"good", "g", "1", "true", "ok", "yes"}:
+        token = re.sub(r"[^a-z0-9]+", "", raw.strip().lower())
+        if not token:
+            continue
+        if token in {"g", "1", "true", "ok", "yes", "y"} or re.fullmatch(r"go+d", token):
             tokens.append(True)
-        elif token in {"bad", "b", "0", "false", "no"}:
+        elif token in {"b", "0", "false", "no", "n"} or re.fullmatch(r"ba+d", token):
             tokens.append(False)
     return np.asarray(tokens, dtype=bool)
 
@@ -1232,6 +1364,125 @@ def analyze_goodbad_annotations(
     return result
 
 
+def write_goodbad_sample_report(
+    output_path: str | Path,
+    goodbad_path: str | Path,
+    samples: np.ndarray,
+    labels: np.ndarray,
+    *,
+    classifier_metrics: dict[str, float | np.ndarray] | None = None,
+    selection_scores: np.ndarray | None = None,
+    grid_size: int = 28,
+) -> None:
+    """Write a per-sample CSV combining human annotations and diagnostics."""
+    good = _parse_goodbad_tokens(goodbad_path)
+    count = min(int(good.size), int(samples.shape[0]))
+    if count <= 0:
+        return
+    stats = compute_shape_statistics_np(np.asarray(samples[:count]), grid_size=int(grid_size))
+    labs = np.asarray(labels[:count], dtype=np.int64)
+    preds = None
+    probs = None
+    margins = None
+    if classifier_metrics is not None:
+        preds = classifier_metrics.get("classifier_predictions")
+        probs = classifier_metrics.get("classifier_target_probs")
+        margins = classifier_metrics.get("classifier_margins")
+    scores = None if selection_scores is None else np.asarray(selection_scores, dtype=np.float64).reshape(-1)
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "index",
+                "label",
+                "human_good",
+                "classifier_pred",
+                "classifier_prob",
+                "classifier_margin",
+                "entropy",
+                "tv",
+                "maxmass",
+                "checkerboard",
+                "selection_score",
+            ],
+        )
+        writer.writeheader()
+        for i in range(count):
+            writer.writerow(
+                {
+                    "index": i,
+                    "label": int(labs[i]),
+                    "human_good": int(bool(good[i])),
+                    "classifier_pred": "" if not isinstance(preds, np.ndarray) or preds.shape[0] <= i else int(preds[i]),
+                    "classifier_prob": "" if not isinstance(probs, np.ndarray) or probs.shape[0] <= i else float(probs[i]),
+                    "classifier_margin": "" if not isinstance(margins, np.ndarray) or margins.shape[0] <= i else float(margins[i]),
+                    "entropy": float(stats["entropy"][i]),
+                    "tv": float(stats["tv"][i]),
+                    "maxmass": float(stats["maxmass"][i]),
+                    "checkerboard": float(stats["checkerboard"][i]),
+                    "selection_score": "" if scores is None or scores.shape[0] <= i else float(scores[i]),
+                }
+            )
+
+
+def selection_scores_for_candidates(
+    samples: np.ndarray,
+    labels: np.ndarray,
+    *,
+    metric: str,
+    classifier_metrics: dict[str, float | np.ndarray] | None,
+    shape_stats: dict[str, np.ndarray] | None,
+    grid_size: int,
+    classifier_weight: float,
+    entropy_weight: float,
+    tv_weight: float,
+    maxmass_weight: float,
+    checkerboard_weight: float,
+) -> np.ndarray:
+    """Score candidate samples; larger is better."""
+    labels = np.asarray(labels, dtype=np.int64).reshape(-1).clip(0, 9)
+    if metric == "none":
+        return np.zeros(labels.shape[0], dtype=np.float64)
+    cls_margin = np.zeros(labels.shape[0], dtype=np.float64)
+    if classifier_metrics is not None and isinstance(classifier_metrics.get("classifier_margins"), np.ndarray):
+        cls_margin = np.asarray(classifier_metrics["classifier_margins"], dtype=np.float64).reshape(-1)
+    if metric == "classifier-confidence":
+        if classifier_metrics is not None and isinstance(classifier_metrics.get("classifier_target_probs"), np.ndarray):
+            return np.asarray(classifier_metrics["classifier_target_probs"], dtype=np.float64).reshape(-1)
+        return cls_margin
+    if metric != "composite":
+        raise ValueError(f"unknown sample selection metric: {metric}")
+    stats = compute_shape_statistics_np(samples, grid_size=int(grid_size))
+    score = float(classifier_weight) * cls_margin.copy()
+    if shape_stats:
+        def penalty_high(name: str, values: np.ndarray, quantile: str, scale_name: str) -> np.ndarray:
+            ref = np.asarray(shape_stats[f"{name}_{quantile}"], dtype=np.float64)[labels]
+            scale = np.asarray(shape_stats[f"{name}_{scale_name}"], dtype=np.float64)[labels]
+            scale = np.maximum(scale, 1e-6)
+            return np.maximum(0.0, values - ref) / scale
+        def penalty_low(name: str, values: np.ndarray, quantile: str, scale_name: str) -> np.ndarray:
+            ref = np.asarray(shape_stats[f"{name}_{quantile}"], dtype=np.float64)[labels]
+            scale = np.asarray(shape_stats[f"{name}_{scale_name}"], dtype=np.float64)[labels]
+            scale = np.maximum(scale, 1e-6)
+            return np.maximum(0.0, ref - values) / scale
+        entropy_pen = penalty_high("entropy", stats["entropy"], "q75", "iqr")
+        tv_pen = penalty_low("tv", stats["tv"], "q25", "iqr")
+        max_pen = penalty_low("maxmass", stats["maxmass"], "q25", "iqr")
+    else:
+        entropy_pen = stats["entropy"] / max(float(np.nanmedian(stats["entropy"])), 1e-6)
+        tv_pen = np.maximum(0.0, np.nanmedian(stats["tv"]) - stats["tv"]) / max(float(np.nanmedian(stats["tv"])), 1e-6)
+        max_pen = np.zeros_like(tv_pen)
+    checker_scale = max(float(np.nanmedian(stats["checkerboard"])) * 4.0, 1e-4)
+    checker_pen = stats["checkerboard"] / checker_scale
+    score -= float(entropy_weight) * entropy_pen ** 2
+    score -= float(tv_weight) * tv_pen ** 2
+    score -= float(maxmass_weight) * max_pen ** 2
+    score -= float(checkerboard_weight) * checker_pen ** 2
+    return score
+
+
 def select_generation_result_by_classifier(
     result: FluxGenerationResult,
     requested_labels: np.ndarray,
@@ -1240,8 +1491,12 @@ def select_generation_result_by_classifier(
     classifier: TinyMNISTClassifier,
     grid_size: int,
     device: str | torch.device,
+    selection_metric: str = "classifier-confidence",
+    shape_stats: dict[str, np.ndarray] | None = None,
+    config: DirectFluxMNISTConfig | None = None,
+    report_path: str | Path | None = None,
 ) -> FluxGenerationResult:
-    """Select the best candidate per requested label by classifier target confidence."""
+    """Select one candidate per requested label by classifier or composite quality."""
     factor = int(factor)
     if factor <= 1:
         return result
@@ -1250,24 +1505,68 @@ def select_generation_result_by_classifier(
     if result.samples.shape[0] != expected:
         raise ValueError("candidate result size does not equal len(labels) * factor")
     metrics = classifier_generation_metrics(result.samples, result.labels, classifier, grid_size=int(grid_size), device=device)
-    probs = metrics.get("classifier_target_probs")
-    if not isinstance(probs, np.ndarray):
-        raise RuntimeError("classifier probabilities were not available for sample selection")
+    if config is None:
+        classifier_weight = 1.0
+        entropy_weight = 0.5
+        tv_weight = 0.5
+        maxmass_weight = 0.25
+        checkerboard_weight = 0.25
+    else:
+        classifier_weight = float(config.selection_classifier_weight)
+        entropy_weight = float(config.selection_entropy_weight)
+        tv_weight = float(config.selection_tv_weight)
+        maxmass_weight = float(config.selection_maxmass_weight)
+        checkerboard_weight = float(config.selection_checkerboard_weight)
+    scores = selection_scores_for_candidates(
+        result.samples,
+        result.labels,
+        metric=str(selection_metric),
+        classifier_metrics=metrics,
+        shape_stats=shape_stats,
+        grid_size=int(grid_size),
+        classifier_weight=classifier_weight,
+        entropy_weight=entropy_weight,
+        tv_weight=tv_weight,
+        maxmass_weight=maxmass_weight,
+        checkerboard_weight=checkerboard_weight,
+    )
     chosen: list[int] = []
     for i in range(labels.size):
         start = i * factor
         stop = start + factor
-        local = int(np.argmax(probs[start:stop]))
+        local = int(np.argmax(scores[start:stop]))
         chosen.append(start + local)
     idx = np.asarray(chosen, dtype=np.int64)
+    if report_path is not None:
+        stats = compute_shape_statistics_np(result.samples[:expected], grid_size=int(grid_size))
+        with Path(report_path).open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["slot", "candidate", "index", "label", "score", "classifier_prob", "classifier_margin", "entropy", "tv", "maxmass", "checkerboard", "selected"])
+            writer.writeheader()
+            probs = np.asarray(metrics.get("classifier_target_probs", np.full(expected, np.nan)), dtype=np.float64)
+            margins = np.asarray(metrics.get("classifier_margins", np.full(expected, np.nan)), dtype=np.float64)
+            for slot in range(labels.size):
+                for candidate in range(factor):
+                    flat = slot * factor + candidate
+                    writer.writerow({
+                        "slot": slot,
+                        "candidate": candidate,
+                        "index": flat,
+                        "label": int(result.labels[flat]),
+                        "score": float(scores[flat]),
+                        "classifier_prob": float(probs[flat]),
+                        "classifier_margin": float(margins[flat]),
+                        "entropy": float(stats["entropy"][flat]),
+                        "tv": float(stats["tv"][flat]),
+                        "maxmass": float(stats["maxmass"][flat]),
+                        "checkerboard": float(stats["checkerboard"][flat]),
+                        "selected": int(flat == idx[slot]),
+                    })
     def maybe_take(arr):
         return None if arr is None else np.asarray(arr)[idx]
     selected_samples = np.asarray(result.samples)[idx]
     selected_sources = maybe_take(result.sources)
     n = int(round(math.sqrt(selected_samples.shape[1])))
-    imgs = selected_samples.reshape(selected_samples.shape[0], n, n)
-    sample_entropy = float(-(selected_samples.clip(1e-30) * np.log(selected_samples.clip(1e-30))).sum(axis=1).mean())
-    sample_tv = float((np.abs(np.roll(imgs, -1, axis=1) - imgs).sum(axis=(1, 2)) + np.abs(np.roll(imgs, -1, axis=2) - imgs).sum(axis=(1, 2))).mean())
+    shape = compute_shape_statistics_np(selected_samples, grid_size=n)
     return FluxGenerationResult(
         samples=selected_samples,
         labels=np.asarray(result.labels)[idx],
@@ -1285,9 +1584,9 @@ def select_generation_result_by_classifier(
         noise_step_rms=result.noise_step_rms,
         free_to_learned_ratio=result.free_to_learned_ratio,
         noise_to_learned_ratio=result.noise_to_learned_ratio,
-        sample_entropy=sample_entropy,
-        sample_total_variation=sample_tv,
-        sample_checkerboard_energy=None,
+        sample_entropy=float(np.mean(shape["entropy"])),
+        sample_total_variation=float(np.mean(shape["tv"])),
+        sample_checkerboard_energy=float(np.mean(shape["checkerboard"] ** 2)),
         sample_highfreq_fraction=None,
     )
 
@@ -2358,7 +2657,8 @@ def direct_flux_rollout_consistency_loss(
     steps: int | None = None,
     return_extra: bool = False,
     terminal_classifier: TinyMNISTClassifier | None = None,
-) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    shape_stats: dict[str, Tensor] | None = None,
+) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Multi-step sampler-consistency loss on a small microbatch.
 
     The prediction is unrolled through the same differentiable conservative
@@ -2373,14 +2673,14 @@ def direct_flux_rollout_consistency_loss(
     rollout_steps = int(config.rollout_loss_steps if steps is None else steps)
     if rollout_steps <= 0:
         z = batch.states.new_tensor(0.0)
-        return (z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
+        return (z, z, z, z, z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
     count = int(batch.states.shape[0])
     if max_items is None:
         max_items = int(config.rollout_loss_batch_size)
     count = min(count, int(max_items))
     if count <= 0:
         z = batch.states.new_tensor(0.0)
-        return (z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
+        return (z, z, z, z, z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
     sl = slice(0, count)
     horizon = max(float(natural_horizon(config)), 1e-12)
     dt = horizon / float(max(int(config.num_steps), 1))
@@ -2456,7 +2756,10 @@ def direct_flux_rollout_consistency_loss(
 
     cls_loss = pred_state.new_tensor(0.0)
     cls_conf_loss = pred_state.new_tensor(0.0)
-    if terminal_classifier is not None and bool(config.use_classifier_loss) and (
+    classifier_mode = str(config.classifier_loss_mode)
+    if bool(config.use_classifier_loss) and classifier_mode == "off":
+        classifier_mode = "terminal"
+    if terminal_classifier is not None and classifier_mode != "off" and (
         float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0
     ):
         terminal_classifier.eval()
@@ -2466,11 +2769,30 @@ def direct_flux_rollout_consistency_loss(
             blur_sigma=float(config.classifier_loss_blur_sigma),
         )
         logits = terminal_classifier(cls_input)
-        ce_vec = F.cross_entropy(logits, labels, reduction="none")
-        cls_loss = terminal_loss_scale * _masked_mean_torch(ce_vec, terminal_mask)
         probs = logits.softmax(dim=1)
         target_prob = probs.gather(1, labels.view(-1, 1)).squeeze(1)
-        cls_conf_loss = terminal_loss_scale * _masked_mean_torch(1.0 - target_prob, terminal_mask)
+        classifier_mask = terminal_mask
+        if classifier_mode == "low-confidence-terminal":
+            classifier_mask = classifier_mask & (target_prob.detach() < float(config.classifier_loss_confidence_threshold))
+        ce_vec = F.cross_entropy(logits, labels, reduction="none")
+        cls_loss = terminal_loss_scale * _masked_mean_torch(ce_vec, classifier_mask)
+        cls_conf_loss = terminal_loss_scale * _masked_mean_torch(1.0 - target_prob, classifier_mask)
+
+    shape_loss = pred_state.new_tensor(0.0)
+    shape_entropy_loss = pred_state.new_tensor(0.0)
+    shape_tv_loss = pred_state.new_tensor(0.0)
+    shape_maxmass_loss = pred_state.new_tensor(0.0)
+    if shape_stats and float(config.terminal_shape_loss_weight) > 0.0:
+        shape_loss, shape_entropy_loss, shape_tv_loss, shape_maxmass_loss = terminal_shape_loss_torch(
+            pred_state,
+            labels,
+            shape_stats,
+            grid_size=int(config.grid_size),
+            weights=terminal_mask.to(dtype=pred_state.dtype) * terminal_loss_scale,
+            entropy_weight=float(config.terminal_shape_entropy_weight),
+            tv_weight=float(config.terminal_shape_tv_weight),
+            maxmass_weight=float(config.terminal_shape_maxmass_weight),
+        )
     return (
         rollout_l2,
         endpoint_l2,
@@ -2483,7 +2805,12 @@ def direct_flux_rollout_consistency_loss(
         terminal_active_fraction.detach(),
         terminal_tau_mean.detach(),
         terminal_loss_scale.detach(),
+        shape_loss,
+        shape_entropy_loss,
+        shape_tv_loss,
+        shape_maxmass_loss,
     )
+
 
 def direct_flux_matching_loss(
     model: DirectFluxUNet,
@@ -2491,6 +2818,7 @@ def direct_flux_matching_loss(
     *,
     step_index: int | None = None,
     terminal_classifier: TinyMNISTClassifier | None = None,
+    shape_stats: dict[str, Tensor] | None = None,
 ) -> tuple[Tensor, dict[str, float]]:
     """Return the direct-flux regression loss and scalar diagnostics."""
     config = model.config
@@ -2522,7 +2850,8 @@ def direct_flux_matching_loss(
             or float(config.rollout_endpoint_l2_weight) > 0.0
             or float(config.rollout_endpoint_bce_weight) > 0.0
             or float(config.rollout_endpoint_tv_weight) > 0.0
-            or (bool(config.use_classifier_loss) and (float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0))
+            or ((bool(config.use_classifier_loss) or str(config.classifier_loss_mode) != "off") and (float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0))
+            or float(config.terminal_shape_loss_weight) > 0.0
             or float(config.target_tv_loss_weight) > 0.0
             or float(config.target_entropy_loss_weight) > 0.0
         )
@@ -2577,6 +2906,10 @@ def direct_flux_matching_loss(
     rollout_endpoint_tv_loss = pred_norm.new_tensor(0.0)
     classifier_loss = pred_norm.new_tensor(0.0)
     classifier_confidence_loss = pred_norm.new_tensor(0.0)
+    terminal_shape_loss = pred_norm.new_tensor(0.0)
+    terminal_shape_entropy_loss = pred_norm.new_tensor(0.0)
+    terminal_shape_tv_loss = pred_norm.new_tensor(0.0)
+    terminal_shape_maxmass_loss = pred_norm.new_tensor(0.0)
     target_tv_loss = pred_norm.new_tensor(0.0)
     terminal_active_fraction = pred_norm.new_tensor(0.0)
     terminal_tau_mean = pred_norm.new_tensor(float("nan"))
@@ -2595,7 +2928,8 @@ def direct_flux_matching_loss(
         or float(config.rollout_endpoint_l2_weight) > 0.0
         or float(config.rollout_endpoint_bce_weight) > 0.0
         or float(config.rollout_endpoint_tv_weight) > 0.0
-        or (bool(config.use_classifier_loss) and (float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0))
+        or ((bool(config.use_classifier_loss) or str(config.classifier_loss_mode) != "off") and (float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0))
+        or float(config.terminal_shape_loss_weight) > 0.0
         or float(config.target_tv_loss_weight) > 0.0
     ):
         (
@@ -2610,7 +2944,11 @@ def direct_flux_matching_loss(
             terminal_active_fraction,
             terminal_tau_mean,
             terminal_loss_scale,
-        ) = direct_flux_rollout_consistency_loss(model, batch, return_extra=True, terminal_classifier=terminal_classifier)
+            terminal_shape_loss,
+            terminal_shape_entropy_loss,
+            terminal_shape_tv_loss,
+            terminal_shape_maxmass_loss,
+        ) = direct_flux_rollout_consistency_loss(model, batch, return_extra=True, terminal_classifier=terminal_classifier, shape_stats=shape_stats)
 
     curl_loss = flux_curl_torch(raw_pred_norm).square().mean()
     edge_lap_loss = edge_laplacian_energy_torch(raw_pred_norm)
@@ -2629,8 +2967,9 @@ def direct_flux_matching_loss(
         + float(config.rollout_image_grad_loss_weight) * rollout_image_grad_loss
         + float(config.target_tv_loss_weight) * target_tv_loss
         + float(config.target_entropy_loss_weight) * target_entropy_loss
-        + (float(config.classifier_loss_weight) * classifier_loss if bool(config.use_classifier_loss) else classifier_loss.new_tensor(0.0))
-        + (float(config.classifier_confidence_loss_weight) * classifier_confidence_loss if bool(config.use_classifier_loss) else classifier_confidence_loss.new_tensor(0.0))
+        + (float(config.classifier_loss_weight) * classifier_loss if (bool(config.use_classifier_loss) or str(config.classifier_loss_mode) != "off") else classifier_loss.new_tensor(0.0))
+        + (float(config.classifier_confidence_loss_weight) * classifier_confidence_loss if (bool(config.use_classifier_loss) or str(config.classifier_loss_mode) != "off") else classifier_confidence_loss.new_tensor(0.0))
+        + float(config.terminal_shape_loss_weight) * terminal_shape_loss
         + float(config.curl_loss_weight) * curl_loss
         + float(config.edge_laplacian_loss_weight) * edge_lap_loss
         + float(config.checkerboard_loss_weight) * checker_loss
@@ -2667,6 +3006,10 @@ def direct_flux_matching_loss(
         "target_entropy_loss": float(target_entropy_loss.detach().cpu()),
         "classifier_loss": float(classifier_loss.detach().cpu()),
         "classifier_confidence_loss": float(classifier_confidence_loss.detach().cpu()),
+        "terminal_shape_loss": float(terminal_shape_loss.detach().cpu()),
+        "terminal_shape_entropy_loss": float(terminal_shape_entropy_loss.detach().cpu()),
+        "terminal_shape_tv_loss": float(terminal_shape_tv_loss.detach().cpu()),
+        "terminal_shape_maxmass_loss": float(terminal_shape_maxmass_loss.detach().cpu()),
         "terminal_loss_active_fraction": float(terminal_active_fraction.detach().cpu()),
         "terminal_tau_mean": float(terminal_tau_mean.detach().cpu()),
         "terminal_loss_scale": float(terminal_loss_scale.detach().cpu()),
@@ -3224,6 +3567,7 @@ def train_direct_flux_model(
     preview_sample_steps: int = 64,
     preview_num_samples: int = 16,
     terminal_classifier: TinyMNISTClassifier | None = None,
+    class_shape_stats: dict[str, np.ndarray] | None = None,
 ) -> dict[str, list[float]]:
     """Train the direct-flux U-Net with an ETA progress bar and optional previews."""
     if train_steps <= 0 or batch_size <= 0:
@@ -3242,6 +3586,7 @@ def train_direct_flux_model(
     scaler = _make_cuda_grad_scaler(enabled=amp_enabled)
     ot_cache = build_classwise_ot_cache(images, labels, model.config)
     class_means = ot_cache.class_means
+    class_shape_stats_torch = _shape_stats_to_torch(class_shape_stats, device=resolved_device, dtype=torch.float32)
     history: dict[str, list[float]] = {
         "loss": [],
         "flux_loss": [],
@@ -3257,6 +3602,10 @@ def train_direct_flux_model(
         "target_entropy_loss": [],
         "classifier_loss": [],
         "classifier_confidence_loss": [],
+        "terminal_shape_loss": [],
+        "terminal_shape_entropy_loss": [],
+        "terminal_shape_tv_loss": [],
+        "terminal_shape_maxmass_loss": [],
         "terminal_loss_active_fraction": [],
         "terminal_tau_mean": [],
         "terminal_loss_scale": [],
@@ -3378,6 +3727,7 @@ def train_direct_flux_model(
                 batch,
                 step_index=int(step_index),
                 terminal_classifier=terminal_classifier,
+                shape_stats=class_shape_stats_torch,
             )
         metrics["on_policy"] = 1.0 if use_on_policy else 0.0
         metrics["on_policy_tau_frac"] = float((batch.tau / max(natural_horizon(model.config), 1e-12)).mean().detach().cpu()) if use_on_policy else -1.0
@@ -4399,9 +4749,20 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--target-entropy-loss-weight", type=float, default=0.0)
     parser.add_argument("--use-classifier-loss", dest="use_classifier_loss", action="store_true", default=False)
     parser.add_argument("--no-use-classifier-loss", dest="use_classifier_loss", action="store_false")
+    parser.add_argument("--classifier-loss-mode", choices=CLASSIFIER_LOSS_MODES, default="off")
+    parser.add_argument("--classifier-loss-confidence-threshold", type=float, default=0.75)
     parser.add_argument("--classifier-loss-weight", type=float, default=0.0)
     parser.add_argument("--classifier-confidence-loss-weight", type=float, default=0.0)
     parser.add_argument("--classifier-loss-blur-sigma", type=float, default=0.6)
+    parser.add_argument("--terminal-shape-loss-weight", type=float, default=0.0)
+    parser.add_argument("--terminal-shape-entropy-weight", type=float, default=1.0)
+    parser.add_argument("--terminal-shape-tv-weight", type=float, default=1.0)
+    parser.add_argument("--terminal-shape-maxmass-weight", type=float, default=0.5)
+    parser.add_argument("--selection-classifier-weight", type=float, default=1.0)
+    parser.add_argument("--selection-entropy-weight", type=float, default=0.5)
+    parser.add_argument("--selection-tv-weight", type=float, default=0.5)
+    parser.add_argument("--selection-maxmass-weight", type=float, default=0.25)
+    parser.add_argument("--selection-checkerboard-weight", type=float, default=0.25)
     parser.add_argument("--use-classifier-diagnostics", action="store_true")
     parser.add_argument("--classifier-cache-path", type=Path, default=None)
     parser.add_argument("--classifier-train-epochs", type=int, default=2)
@@ -4558,9 +4919,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         target_tv_loss_weight=float(args.target_tv_loss_weight),
         target_entropy_loss_weight=float(args.target_entropy_loss_weight),
         use_classifier_loss=bool(args.use_classifier_loss),
+        classifier_loss_mode=str(args.classifier_loss_mode),
+        classifier_loss_confidence_threshold=float(args.classifier_loss_confidence_threshold),
         classifier_loss_weight=float(args.classifier_loss_weight),
         classifier_confidence_loss_weight=float(args.classifier_confidence_loss_weight),
         classifier_loss_blur_sigma=float(args.classifier_loss_blur_sigma),
+        terminal_shape_loss_weight=float(args.terminal_shape_loss_weight),
+        terminal_shape_entropy_weight=float(args.terminal_shape_entropy_weight),
+        terminal_shape_tv_weight=float(args.terminal_shape_tv_weight),
+        terminal_shape_maxmass_weight=float(args.terminal_shape_maxmass_weight),
+        selection_classifier_weight=float(args.selection_classifier_weight),
+        selection_entropy_weight=float(args.selection_entropy_weight),
+        selection_tv_weight=float(args.selection_tv_weight),
+        selection_maxmass_weight=float(args.selection_maxmass_weight),
+        selection_checkerboard_weight=float(args.selection_checkerboard_weight),
         use_classifier_diagnostics=bool(args.use_classifier_diagnostics),
         classifier_train_epochs=int(args.classifier_train_epochs),
         classifier_cache_path="" if args.classifier_cache_path is None else str(args.classifier_cache_path),
@@ -4650,7 +5022,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     model = DirectFluxUNet(config, base_channels=int(args.base_channels))
     classifier_needed = (
         bool(config.use_classifier_diagnostics)
-        or (bool(config.use_classifier_loss) and (float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0))
+        or ((bool(config.use_classifier_loss) or str(config.classifier_loss_mode) != "off") and (float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0))
         or int(config.sample_rejection_factor) > 1
     )
     terminal_classifier: TinyMNISTClassifier | None = None
@@ -4670,6 +5042,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             show_progress=not bool(args.no_progress),
         )
     final_class_means = _compute_class_mean_measures(dataset.train_images, dataset.train_labels, config.grid_size)
+    class_shape_stats = compute_class_shape_statistics(dataset.train_images, dataset.train_labels, grid_size=int(config.grid_size))
     preview_dir = args.out_dir / "previews" if int(args.preview_every) > 0 else None
     history = train_direct_flux_model(
         model,
@@ -4687,6 +5060,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         preview_sample_steps=int(args.preview_sample_steps),
         preview_num_samples=int(args.preview_num_samples),
         terminal_classifier=terminal_classifier,
+        class_shape_stats=class_shape_stats,
     )
 
     print("Training complete; starting generation")
@@ -4695,10 +5069,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     candidate_labels = labels
     selection_factor = int(config.sample_rejection_factor)
     if selection_factor > 1:
-        if terminal_classifier is None or str(config.sample_selection_metric) != "classifier-confidence":
-            raise RuntimeError("sample rejection requires --use-classifier-diagnostics or classifier loss plus classifier-confidence selection")
+        if terminal_classifier is None or str(config.sample_selection_metric) not in {"classifier-confidence", "composite"}:
+            raise RuntimeError("sample rejection requires classifier diagnostics and classifier-confidence or composite selection")
         candidate_labels = np.repeat(labels, selection_factor)
-        print(f"Generating {selection_factor} classifier-ranked candidates per requested sample")
+        print(f"Generating {selection_factor} {config.sample_selection_metric}-ranked candidates per requested sample")
     result = simulate_direct_flux_generation(
         model,
         candidate_labels,
@@ -4726,6 +5100,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             classifier=terminal_classifier,
             grid_size=int(config.grid_size),
             device=device,
+            selection_metric=str(config.sample_selection_metric),
+            shape_stats=class_shape_stats,
+            config=config,
+            report_path=args.out_dir / "experiment10_selection_report.csv",
         )
 
     print("Generation complete; saving run outputs")
@@ -4757,6 +5135,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             json.dumps(serializable_goodbad, indent=2),
             encoding="utf-8",
         )
+        write_goodbad_sample_report(
+            args.out_dir / "experiment10_goodbad_report.csv",
+            goodbad_path,
+            result.samples,
+            result.labels,
+            classifier_metrics=classifier_metrics,
+            grid_size=int(config.grid_size),
+        )
     source_metrics = source_batch_diagnostics(
         result.sources if result.sources is not None else result.samples,
         requested_labels=result.labels,
@@ -4779,6 +5165,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "clipping_fraction": result.clipping_fraction,
             "final_metrics": final_metrics,
             "classifier_metrics": {k: v for k, v in classifier_metrics.items() if not isinstance(v, np.ndarray)},
+            "class_shape_stats": {k: v.tolist() for k, v in class_shape_stats.items()},
             "goodbad_metrics": {k: v for k, v in goodbad_metrics.items() if not isinstance(v, np.ndarray)},
             "source_metrics": source_metrics,
             "component_metrics": {
@@ -4820,6 +5207,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         classifier_predictions=np.asarray(classifier_metrics.get("classifier_predictions", []), dtype=np.int64),
         classifier_target_probs=np.asarray(classifier_metrics.get("classifier_target_probs", []), dtype=np.float64),
         classifier_margins=np.asarray(classifier_metrics.get("classifier_margins", []), dtype=np.float64),
+        class_entropy_q75=np.asarray(class_shape_stats.get("entropy_q75", []), dtype=np.float64),
+        class_tv_q25=np.asarray(class_shape_stats.get("tv_q25", []), dtype=np.float64),
+        class_maxmass_q25=np.asarray(class_shape_stats.get("maxmass_q25", []), dtype=np.float64),
         human_good_rate=np.asarray([float(goodbad_metrics.get("human_good_rate", np.nan))], dtype=np.float64),
         human_good_by_label=np.asarray(goodbad_metrics.get("human_good_by_label", []), dtype=np.float64),
         human_bad_count_by_label=np.asarray(goodbad_metrics.get("human_bad_count_by_label", []), dtype=np.int64),
