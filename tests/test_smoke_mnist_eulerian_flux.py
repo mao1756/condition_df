@@ -52,6 +52,8 @@ from mnist.eulerian_flux_mnist import (
     classifier_generation_metrics,
     compute_class_shape_statistics,
     compute_shape_statistics_np,
+    local_shape_metrics_np,
+    terminal_local_shape_loss_torch,
     write_goodbad_sample_report,
     select_generation_result_by_classifier,
     analyze_goodbad_annotations,
@@ -251,6 +253,8 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
     assert "trajectory" in ON_POLICY_CACHE_MODES
     assert "safe-residual" in ON_POLICY_TARGET_MODES
     assert "composite" in SAMPLE_SELECTION_METRICS
+    assert "composite-local" in SAMPLE_SELECTION_METRICS
+    assert "composite-gap" in SAMPLE_SELECTION_METRICS
     assert "low-confidence-terminal" in CLASSIFIER_LOSS_MODES
     images, labels = _toy_digit_measures(grid_size=config.grid_size)
     batch = sample_flux_training_batch(images, labels, config, batch_size=4, device="cpu", rng=np.random.default_rng(5), step_index=2000)
@@ -275,6 +279,15 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
         shape_entropy_loss,
         shape_tv_loss,
         shape_maxmass_loss,
+        local_shape_loss,
+        local_support_loss,
+        local_edge_loss,
+        negative_space_loss,
+        gap_shape_loss,
+        missing_support_loss,
+        extra_support_loss,
+        gap_loss,
+        strict_negative_space_loss,
     ) = direct_flux_rollout_consistency_loss(model, batch, max_items=2, steps=1, return_extra=True)
     assert torch.isfinite(rollout_loss)
     assert torch.isfinite(endpoint_l2)
@@ -290,9 +303,18 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
     assert torch.isfinite(shape_entropy_loss)
     assert torch.isfinite(shape_tv_loss)
     assert torch.isfinite(shape_maxmass_loss)
+    assert torch.isfinite(local_shape_loss)
+    assert torch.isfinite(local_support_loss)
+    assert torch.isfinite(local_edge_loss)
+    assert torch.isfinite(negative_space_loss)
+    assert torch.isfinite(gap_shape_loss)
+    assert torch.isfinite(missing_support_loss)
+    assert torch.isfinite(extra_support_loss)
+    assert torch.isfinite(gap_loss)
+    assert torch.isfinite(strict_negative_space_loss)
     loss, metrics = direct_flux_matching_loss(model, batch)
     assert torch.isfinite(loss)
-    for key in ["rollout_loss", "rollout_image_grad_loss", "target_tv_loss", "terminal_shape_loss", "image_grad_loss", "curl_loss", "checkerboard_loss"]:
+    for key in ["rollout_loss", "rollout_image_grad_loss", "target_tv_loss", "terminal_shape_loss", "terminal_gap_shape_loss", "terminal_gap_loss", "terminal_strict_negative_space_loss", "image_grad_loss", "curl_loss", "checkerboard_loss"]:
         assert key in metrics
     assert image_total_variation(batch.states, grid_size=config.grid_size) >= 0
     assert checkerboard_energy_torch(batch.states, grid_size=config.grid_size) >= 0
@@ -562,6 +584,9 @@ def test_composite_selection_and_shape_statistics(tmp_path) -> None:
     images, labels = _toy_digit_measures(num_samples=8, grid_size=8)
     shape = compute_class_shape_statistics(images, labels, grid_size=8)
     assert "entropy_q75" in shape
+    assert "local_support_mean" in shape
+    local_metrics = local_shape_metrics_np(images.reshape(8, -1), labels, shape, grid_size=8)
+    assert local_metrics["negative_space_mass"].shape == (8,)
     stats = compute_shape_statistics_np(images.reshape(8, -1), grid_size=8)
     assert stats["tv"].shape == (8,)
     clf = TinyMNISTClassifier(grid_size=8)
@@ -584,7 +609,7 @@ def test_composite_selection_and_shape_statistics(tmp_path) -> None:
         classifier=clf,
         grid_size=8,
         device="cpu",
-        selection_metric="composite",
+        selection_metric="composite-local",
         shape_stats=shape,
         config=config,
         report_path=tmp_path / "selection.csv",
@@ -595,6 +620,27 @@ def test_composite_selection_and_shape_statistics(tmp_path) -> None:
     goodbad.write_text("goood bad")
     write_goodbad_sample_report(tmp_path / "goodbad.csv", goodbad, selected.samples, selected.labels, grid_size=8)
     assert (tmp_path / "goodbad.csv").exists()
+
+
+def test_terminal_local_shape_loss_smoke() -> None:
+    images, labels = _toy_digit_measures(num_samples=8, grid_size=8)
+    shape = compute_class_shape_statistics(images, labels, grid_size=8, local_shape_size=4)
+    shape_torch = {k: torch.as_tensor(v, dtype=torch.float32) for k, v in shape.items()}
+    config = DirectFluxMNISTConfig(
+        grid_size=8,
+        horizon_scale=0.2,
+        num_steps=4,
+        terminal_local_shape_size=4,
+        terminal_local_shape_loss_weight=0.1,
+    )
+    states = torch.as_tensor(images.reshape(8, -1), dtype=torch.float32)
+    labels_t = torch.as_tensor(labels, dtype=torch.long)
+    weights = torch.ones(8)
+    total, support, edge, negative = terminal_local_shape_loss_torch(states, states, labels_t, shape_torch, config, weights=weights)
+    assert torch.isfinite(total)
+    assert support.item() >= 0.0
+    assert edge.item() >= 0.0
+    assert negative.item() >= 0.0
 
 
 def test_terminal_snapshot_steps_include_late_tau() -> None:

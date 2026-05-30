@@ -71,8 +71,9 @@ ON_POLICY_CACHE_MODES = ("independent", "trajectory")
 ON_POLICY_TARGET_MODES = ("residual", "mixed", "constant", "safe-residual")
 UPSAMPLE_MODES = ("transpose", "resize-conv")
 FLUX_PARAMETERIZATION_MODES = ("edge", "projected")
-SAMPLE_SELECTION_METRICS = ("none", "classifier-confidence", "composite")
+SAMPLE_SELECTION_METRICS = ("none", "classifier-confidence", "composite", "composite-local", "composite-gap")
 CLASSIFIER_LOSS_MODES = ("off", "terminal", "low-confidence-terminal")
+TERMINAL_LOSS_MODES = ("fixed", "near-terminal", "to-terminal")
 
 __all__ = [
     "DirectFluxMNISTConfig",
@@ -93,11 +94,14 @@ __all__ = [
     "FLUX_PARAMETERIZATION_MODES",
     "SAMPLE_SELECTION_METRICS",
     "CLASSIFIER_LOSS_MODES",
+    "TERMINAL_LOSS_MODES",
     "TinyMNISTClassifier",
     "train_or_load_mnist_classifier",
     "classifier_generation_metrics",
     "compute_shape_statistics_np",
     "compute_class_shape_statistics",
+    "terminal_local_shape_loss_torch",
+    "local_shape_metrics_np",
     "write_goodbad_sample_report",
     "select_generation_result_by_classifier",
     "analyze_goodbad_annotations",
@@ -106,6 +110,7 @@ __all__ = [
     "natural_horizon",
     "load_mnist_measure_dataset",
     "sample_flux_training_batch",
+    "sample_terminal_flux_training_batch",
     "terminal_potential_and_log_gradient_torch",
     "terminal_conditioning_flux_torch",
     "free_drift_flux_torch",
@@ -257,8 +262,19 @@ class DirectFluxMNISTConfig:
     rollout_endpoint_l2_weight: float = 0.0
     rollout_endpoint_bce_weight: float = 0.0
     rollout_endpoint_tv_weight: float = 0.0
-    terminal_loss_tau_max_fraction: float = 0.18
+    terminal_loss_tau_max_fraction: float = 0.06
     terminal_loss_ramp_steps: int = 3000
+    terminal_loss_mode: str = "near-terminal"
+    terminal_rollout_max_steps: int = 16
+    terminal_loss_every: int = 4
+    terminal_rollout_batch_size: int = 32
+    terminal_batch_prob: float = 0.25
+    terminal_batch_size: int = 64
+    terminal_tau_min_fraction: float = 0.00
+    terminal_tau_max_fraction: float = 0.06
+    hard_label_sampling: bool = False
+    hard_labels: tuple[int, ...] = (2, 5, 6, 7, 9)
+    hard_label_prob: float = 0.35
     target_tv_loss_weight: float = 0.0
     target_entropy_loss_weight: float = 0.0
     use_classifier_loss: bool = False
@@ -271,11 +287,33 @@ class DirectFluxMNISTConfig:
     terminal_shape_entropy_weight: float = 1.0
     terminal_shape_tv_weight: float = 1.0
     terminal_shape_maxmass_weight: float = 0.5
+    # Experiment 10o: local low-resolution terminal support/edge/gap losses.
+    terminal_local_shape_loss_weight: float = 0.0
+    terminal_target_support_weight: float = 1.0
+    terminal_target_edge_weight: float = 0.5
+    terminal_negative_space_weight: float = 0.5
+    # Experiment 10p: safer one-sided/gap local losses and stricter negative-space diagnostics.
+    terminal_negative_space_mode: str = "strict"
+    terminal_negative_space_threshold: float = 0.08
+    terminal_negative_space_temperature: float = 0.03
+    terminal_gap_loss_weight: float = 0.0
+    terminal_gap_threshold: float = 0.12
+    terminal_gap_dilate_radius: int = 1
+    terminal_missing_support_weight: float = 0.0
+    terminal_extra_support_weight: float = 0.0
+    terminal_extra_support_margin: float = 0.10
+    terminal_local_shape_size: int = 14
+    terminal_local_shape_blur_sigma: float = 0.7
     selection_classifier_weight: float = 1.0
     selection_entropy_weight: float = 0.5
     selection_tv_weight: float = 0.5
     selection_maxmass_weight: float = 0.25
     selection_checkerboard_weight: float = 0.25
+    selection_local_support_weight: float = 0.5
+    selection_local_edge_weight: float = 0.25
+    selection_negative_space_weight: float = 0.5
+    selection_gap_weight: float = 0.5
+    selection_extra_support_weight: float = 0.25
     curl_loss_weight: float = 0.01
     edge_laplacian_loss_weight: float = 0.0
     checkerboard_loss_weight: float = 0.001
@@ -294,9 +332,9 @@ class DirectFluxMNISTConfig:
     on_policy_cache_device: str = "cpu"
     on_policy_cache_mode: str = "trajectory"
     on_policy_cache_snapshots_per_traj: int = 16
-    on_policy_cache_terminal_fraction: float = 0.35
-    on_policy_cache_terminal_min_tau: float = 0.02
-    on_policy_cache_terminal_max_tau: float = 0.18
+    on_policy_cache_terminal_fraction: float = 0.50
+    on_policy_cache_terminal_min_tau: float = 0.00
+    on_policy_cache_terminal_max_tau: float = 0.08
     on_policy_target_mode: str = "safe-residual"
     on_policy_residual_max_ratio: float = 1.5
     ema_decay: float = 0.999
@@ -461,6 +499,30 @@ class DirectFluxMNISTConfig:
             raise ValueError("terminal_loss_tau_max_fraction must be in [0, 1]")
         if self.terminal_loss_ramp_steps < 0:
             raise ValueError("terminal_loss_ramp_steps must be non-negative")
+        if self.terminal_loss_mode not in TERMINAL_LOSS_MODES:
+            raise ValueError(f"terminal_loss_mode must be one of {TERMINAL_LOSS_MODES}")
+        if self.terminal_rollout_max_steps <= 0:
+            raise ValueError("terminal_rollout_max_steps must be positive")
+        if self.terminal_loss_every <= 0:
+            raise ValueError("terminal_loss_every must be positive")
+        if self.terminal_rollout_batch_size <= 0:
+            raise ValueError("terminal_rollout_batch_size must be positive")
+        if not (0.0 <= self.terminal_batch_prob <= 1.0):
+            raise ValueError("terminal_batch_prob must be in [0, 1]")
+        if self.terminal_batch_size <= 0:
+            raise ValueError("terminal_batch_size must be positive")
+        if not (0.0 <= self.terminal_tau_min_fraction <= 1.0):
+            raise ValueError("terminal_tau_min_fraction must be in [0, 1]")
+        if not (0.0 <= self.terminal_tau_max_fraction <= 1.0):
+            raise ValueError("terminal_tau_max_fraction must be in [0, 1]")
+        if self.terminal_tau_min_fraction > self.terminal_tau_max_fraction:
+            raise ValueError("terminal_tau_min_fraction must be <= max fraction")
+        if not isinstance(self.hard_label_sampling, bool):
+            raise ValueError("hard_label_sampling must be a bool")
+        if not (0.0 <= self.hard_label_prob <= 1.0):
+            raise ValueError("hard_label_prob must be in [0, 1]")
+        if len(self.hard_labels) == 0 or any((int(label) < 0 or int(label) > 9) for label in self.hard_labels):
+            raise ValueError("hard_labels must be a non-empty tuple of digits in [0, 9]")
         if self.target_tv_loss_weight < 0.0:
             raise ValueError("target_tv_loss_weight must be non-negative")
         if self.target_entropy_loss_weight < 0.0:
@@ -482,15 +544,40 @@ class DirectFluxMNISTConfig:
             "terminal_shape_entropy_weight",
             "terminal_shape_tv_weight",
             "terminal_shape_maxmass_weight",
+            "terminal_local_shape_loss_weight",
+            "terminal_target_support_weight",
+            "terminal_target_edge_weight",
+            "terminal_negative_space_weight",
+            "terminal_gap_loss_weight",
+            "terminal_missing_support_weight",
+            "terminal_extra_support_weight",
+            "terminal_local_shape_blur_sigma",
             "selection_classifier_weight",
             "selection_entropy_weight",
             "selection_tv_weight",
             "selection_maxmass_weight",
             "selection_checkerboard_weight",
+            "selection_local_support_weight",
+            "selection_local_edge_weight",
+            "selection_negative_space_weight",
+            "selection_gap_weight",
+            "selection_extra_support_weight",
         ):
             value = float(getattr(self, name))
             if value < 0.0 or not math.isfinite(value):
                 raise ValueError(f"{name} must be non-negative and finite")
+        if self.terminal_negative_space_mode not in {"mean", "strict"}:
+            raise ValueError("terminal_negative_space_mode must be 'mean' or 'strict'")
+        if not (0.0 <= self.terminal_negative_space_threshold <= 1.0):
+            raise ValueError("terminal_negative_space_threshold must be in [0, 1]")
+        if self.terminal_negative_space_temperature <= 0.0 or not math.isfinite(self.terminal_negative_space_temperature):
+            raise ValueError("terminal_negative_space_temperature must be positive and finite")
+        if not (0.0 <= self.terminal_gap_threshold <= 1.0):
+            raise ValueError("terminal_gap_threshold must be in [0, 1]")
+        if self.terminal_gap_dilate_radius < 0:
+            raise ValueError("terminal_gap_dilate_radius must be non-negative")
+        if self.terminal_extra_support_margin < 0.0:
+            raise ValueError("terminal_extra_support_margin must be non-negative")
         if self.rollout_loss_weight < 0.0:
             raise ValueError("rollout_loss_weight must be non-negative")
         if self.rollout_loss_steps < 0:
@@ -571,6 +658,8 @@ class DirectFluxMNISTConfig:
             raise ValueError("classifier_batch_size must be positive")
         if self.classifier_lr <= 0.0 or not math.isfinite(self.classifier_lr):
             raise ValueError("classifier_lr must be positive and finite")
+        if self.terminal_local_shape_size <= 1:
+            raise ValueError("terminal_local_shape_size must be at least 2")
         if self.sample_rejection_factor <= 0:
             raise ValueError("sample_rejection_factor must be positive")
         if self.sample_selection_metric not in SAMPLE_SELECTION_METRICS:
@@ -1220,7 +1309,138 @@ def compute_shape_statistics_np(samples: np.ndarray, *, grid_size: int = 28) -> 
     return {"entropy": entropy, "tv": tv, "maxmass": maxmass, "checkerboard": checkerboard}
 
 
-def compute_class_shape_statistics(images: np.ndarray, labels: np.ndarray, *, grid_size: int = 28) -> dict[str, np.ndarray]:
+def _gaussian_kernel1d_np(sigma: float) -> np.ndarray:
+    radius = max(1, int(math.ceil(3.0 * float(sigma))))
+    offsets = np.arange(-radius, radius + 1, dtype=np.float64)
+    kernel = np.exp(-0.5 * (offsets / float(sigma)) ** 2)
+    return kernel / max(float(kernel.sum()), 1e-12)
+
+
+def _periodic_gaussian_blur_np(images: np.ndarray, *, sigma: float) -> np.ndarray:
+    if sigma <= 0.0:
+        return np.asarray(images, dtype=np.float64)
+    arr = np.asarray(images, dtype=np.float64)
+    kernel = _gaussian_kernel1d_np(float(sigma))
+    out = arr.copy()
+    tmp = np.zeros_like(out)
+    radius = int((kernel.size - 1) // 2)
+    for offset, weight in zip(range(-radius, radius + 1), kernel):
+        tmp += float(weight) * np.roll(out, shift=offset, axis=-1)
+    out2 = np.zeros_like(out)
+    for offset, weight in zip(range(-radius, radius + 1), kernel):
+        out2 += float(weight) * np.roll(tmp, shift=offset, axis=-2)
+    return out2
+
+
+def _local_downsample_np(images: np.ndarray, *, size: int) -> np.ndarray:
+    arr = np.asarray(images, dtype=np.float64)
+    h, w = int(arr.shape[-2]), int(arr.shape[-1])
+    size = int(size)
+    if h == size and w == size:
+        return arr.copy()
+    if h % size == 0 and w % size == 0:
+        fh, fw = h // size, w // size
+        return arr.reshape(arr.shape[0], size, fh, size, fw).mean(axis=(2, 4))
+    # Fallback nearest-area binning for unusual sizes.
+    ys = np.linspace(0, h, size + 1).round().astype(int)
+    xs = np.linspace(0, w, size + 1).round().astype(int)
+    out = np.zeros((arr.shape[0], size, size), dtype=np.float64)
+    for i in range(size):
+        for j in range(size):
+            patch = arr[:, ys[i] : max(ys[i + 1], ys[i] + 1), xs[j] : max(xs[j + 1], xs[j] + 1)]
+            out[:, i, j] = patch.mean(axis=(1, 2))
+    return out
+
+
+def _binary_dilate_np(mask: np.ndarray, *, radius: int = 1) -> np.ndarray:
+    """Periodic binary dilation for small low-resolution diagnostic masks."""
+    arr = np.asarray(mask, dtype=bool)
+    radius = int(radius)
+    if radius <= 0:
+        return arr.astype(np.float64)
+    out = arr.copy()
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dy == 0 and dx == 0:
+                continue
+            out |= np.roll(np.roll(arr, dy, axis=-2), dx, axis=-1)
+    return out.astype(np.float64)
+
+
+def local_shape_maps_np(samples: np.ndarray, *, grid_size: int = 28, local_shape_size: int = 14, blur_sigma: float = 0.7) -> dict[str, np.ndarray]:
+    """Low-resolution blurred support and edge maps for shape diagnostics."""
+    n = int(grid_size)
+    arr = np.asarray(samples, dtype=np.float64).reshape(-1, n, n)
+    density = np.clip(arr * float(n * n), 0.0, 1.0)
+    blurred = _periodic_gaussian_blur_np(density, sigma=float(blur_sigma))
+    low = np.clip(_local_downsample_np(blurred, size=int(local_shape_size)), 0.0, 1.0)
+    dx = np.roll(low, -1, axis=-1) - low
+    dy = np.roll(low, -1, axis=-2) - low
+    edge = np.sqrt(dx * dx + dy * dy + 1e-12)
+    return {"local_support": low, "local_edge": edge}
+
+
+def local_shape_metrics_np(
+    samples: np.ndarray,
+    labels: np.ndarray,
+    shape_stats: dict[str, np.ndarray] | None,
+    *,
+    grid_size: int = 28,
+    negative_space_mode: str = "strict",
+    negative_space_threshold: float = 0.08,
+    negative_space_temperature: float = 0.03,
+    gap_threshold: float = 0.12,
+    gap_dilate_radius: int = 1,
+    extra_support_margin: float = 0.10,
+) -> dict[str, np.ndarray]:
+    """Per-sample local support/edge/gap/negative-space penalties."""
+    count = int(np.asarray(samples).reshape(np.asarray(samples).shape[0], -1).shape[0])
+    z = np.zeros((count,), dtype=np.float64)
+    if not shape_stats or "local_support_mean" not in shape_stats:
+        return {
+            "local_support_loss": z,
+            "local_edge_loss": z,
+            "negative_space_mass": z,
+            "strict_negative_space_mass": z,
+            "gap_mass": z,
+            "missing_support_loss": z,
+            "extra_support_loss": z,
+        }
+    support_ref_all = np.asarray(shape_stats["local_support_mean"], dtype=np.float64)
+    size = int(support_ref_all.shape[-1])
+    blur_sigma = float(shape_stats.get("local_blur_sigma", np.asarray([0.7]))[0]) if "local_blur_sigma" in shape_stats else 0.7
+    maps = local_shape_maps_np(samples, grid_size=int(grid_size), local_shape_size=size, blur_sigma=blur_sigma)
+    labs = np.asarray(labels, dtype=np.int64).reshape(-1).clip(0, 9)
+    support_ref = support_ref_all[labs]
+    edge_ref = np.asarray(shape_stats["local_edge_mean"], dtype=np.float64)[labs]
+    neg_ref = np.asarray(shape_stats["local_negative_space"], dtype=np.float64)[labs]
+    support_q90_all = np.asarray(shape_stats.get("local_support_q90", support_ref_all), dtype=np.float64)
+    support_q90 = support_q90_all[labs]
+    temp = max(float(negative_space_temperature), 1e-6)
+    if str(negative_space_mode) == "strict":
+        strict_neg = 1.0 / (1.0 + np.exp((support_q90 - float(negative_space_threshold)) / temp))
+    else:
+        strict_neg = neg_ref
+    stroke = support_ref > float(gap_threshold)
+    gap_mask = (support_ref < float(gap_threshold)).astype(np.float64) * _binary_dilate_np(stroke, radius=int(gap_dilate_radius))
+    support_loss = np.mean(np.abs(maps["local_support"] - support_ref), axis=(1, 2))
+    edge_loss = np.mean(np.abs(maps["local_edge"] - edge_ref), axis=(1, 2))
+    negative_mass = np.mean(maps["local_support"] * neg_ref, axis=(1, 2))
+    strict_negative_mass = np.mean(maps["local_support"] * strict_neg, axis=(1, 2))
+    gap_mass = np.mean(maps["local_support"] * gap_mask, axis=(1, 2))
+    missing = np.mean(np.maximum(0.0, support_ref - maps["local_support"]) ** 2, axis=(1, 2))
+    extra = np.mean(np.maximum(0.0, maps["local_support"] - support_ref - float(extra_support_margin)) ** 2, axis=(1, 2))
+    return {
+        "local_support_loss": support_loss,
+        "local_edge_loss": edge_loss,
+        "negative_space_mass": negative_mass,
+        "strict_negative_space_mass": strict_negative_mass,
+        "gap_mass": gap_mass,
+        "missing_support_loss": missing,
+        "extra_support_loss": extra,
+    }
+
+def compute_class_shape_statistics(images: np.ndarray, labels: np.ndarray, *, grid_size: int = 28, local_shape_size: int = 14, local_blur_sigma: float = 0.7) -> dict[str, np.ndarray]:
     """Classwise robust shape statistics for terminal-quality scoring/losses."""
     stats = compute_shape_statistics_np(images, grid_size=int(grid_size))
     labs = np.asarray(labels, dtype=np.int64).reshape(-1)
@@ -1242,6 +1462,25 @@ def compute_class_shape_statistics(images: np.ndarray, labels: np.ndarray, *, gr
         out[f"{name}_median"] = q50
         out[f"{name}_q75"] = q75
         out[f"{name}_iqr"] = scale
+    # Low-resolution local support/edge/negative-space references for 10o.
+    local_maps = local_shape_maps_np(images, grid_size=int(grid_size), local_shape_size=int(local_shape_size), blur_sigma=float(local_blur_sigma))
+    support_mean = np.zeros((10, int(local_shape_size), int(local_shape_size)), dtype=np.float64)
+    support_q90 = np.zeros_like(support_mean)
+    edge_mean = np.zeros_like(support_mean)
+    negative = np.zeros_like(support_mean)
+    for digit in range(10):
+        mask = labs == digit
+        if mask.any():
+            support_mean[digit] = local_maps["local_support"][mask].mean(axis=0)
+            support_q90[digit] = np.quantile(local_maps["local_support"][mask], 0.90, axis=0)
+            edge_mean[digit] = local_maps["local_edge"][mask].mean(axis=0)
+        negative[digit] = np.clip(1.0 - support_mean[digit], 0.0, 1.0)
+    out["local_support_mean"] = support_mean
+    out["local_support_q90"] = support_q90
+    out["local_edge_mean"] = edge_mean
+    out["local_negative_space"] = negative
+    out["local_shape_size"] = np.asarray([int(local_shape_size)], dtype=np.int64)
+    out["local_blur_sigma"] = np.asarray([float(local_blur_sigma)], dtype=np.float64)
     return out
 
 
@@ -1294,23 +1533,178 @@ def terminal_shape_loss_torch(
     total = float(entropy_weight) * ent_loss + float(tv_weight) * tv_loss + float(maxmass_weight) * max_loss
     return total, ent_loss, tv_loss, max_loss
 
-def _parse_goodbad_tokens(path: str | Path) -> np.ndarray:
-    """Parse permissive whitespace/comma good/bad annotations.
+def _local_shape_maps_torch(states: Tensor, config: DirectFluxMNISTConfig) -> tuple[Tensor, Tensor]:
+    """Return blurred low-res support and edge maps for mass states."""
+    n = int(config.grid_size)
+    size = int(config.terminal_local_shape_size)
+    density = (states.reshape(-1, 1, n, n) * float(n * n)).clamp(0.0, 1.0)
+    if float(config.terminal_local_shape_blur_sigma) > 0.0:
+        density = _periodic_gaussian_blur_torch(density, sigma=float(config.terminal_local_shape_blur_sigma))
+    if size != n:
+        low = F.interpolate(density, size=(size, size), mode="area")
+    else:
+        low = density
+    low = low.clamp(0.0, 1.0)
+    dx = torch.roll(low, shifts=-1, dims=-1) - low
+    dy = torch.roll(low, shifts=-1, dims=-2) - low
+    edge = torch.sqrt(dx.square() + dy.square() + 1e-12)
+    return low, edge
 
-    Accepts common typos such as ``goood`` and ignores unrelated tokens like
-    indices or labels.  This makes quick hand annotation robust enough to use
-    as a diagnostic signal.
+
+def _binary_dilate_torch(mask: Tensor, *, radius: int = 1) -> Tensor:
+    """Periodic dilation for small support masks."""
+    radius = int(radius)
+    if radius <= 0:
+        return mask.to(dtype=torch.float32)
+    mask_f = mask.to(dtype=torch.float32)
+    dilated = mask_f
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dy == 0 and dx == 0:
+                continue
+            dilated = torch.maximum(dilated, torch.roll(torch.roll(mask_f, dy, dims=-2), dx, dims=-1))
+    return dilated
+
+
+def _strict_negative_space_mask_torch(labels: Tensor, shape_stats: dict[str, Tensor] | None, config: DirectFluxMNISTConfig, fallback: Tensor) -> Tensor:
+    """Classwise strict negative-space mask from high-quantile real support."""
+    if shape_stats is None:
+        return fallback
+    y = labels.to(dtype=torch.long, device=fallback.device).reshape(-1).clamp(0, 9)
+    if str(config.terminal_negative_space_mode) == "strict" and "local_support_q90" in shape_stats:
+        support_q90 = shape_stats["local_support_q90"].to(device=fallback.device, dtype=fallback.dtype).index_select(0, y).unsqueeze(1)
+        temp = max(float(config.terminal_negative_space_temperature), 1e-6)
+        return torch.sigmoid((float(config.terminal_negative_space_threshold) - support_q90) / temp)
+    if "local_negative_space" in shape_stats:
+        return shape_stats["local_negative_space"].to(device=fallback.device, dtype=fallback.dtype).index_select(0, y).unsqueeze(1)
+    return fallback
+
+
+def terminal_gap_shape_loss_torch(
+    states: Tensor,
+    targets: Tensor,
+    labels: Tensor,
+    shape_stats: dict[str, Tensor] | None,
+    config: DirectFluxMNISTConfig,
+    *,
+    weights: Tensor,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """One-sided terminal local losses for gaps and support without exact matching."""
+    pred_low, _pred_edge = _local_shape_maps_torch(states, config)
+    with torch.no_grad():
+        target_low, _target_edge = _local_shape_maps_torch(targets, config)
+        stroke = (target_low > float(config.terminal_gap_threshold)).to(dtype=pred_low.dtype)
+        near_stroke = _binary_dilate_torch(stroke, radius=int(config.terminal_gap_dilate_radius))
+        gap_mask = (target_low < float(config.terminal_gap_threshold)).to(dtype=pred_low.dtype) * near_stroke
+        strict_negative = _strict_negative_space_mask_torch(labels, shape_stats, config, fallback=(1.0 - target_low).detach())
+    missing_per = F.relu(target_low - pred_low).square().flatten(1).mean(dim=1)
+    extra_per = F.relu(pred_low - target_low - float(config.terminal_extra_support_margin)).square().flatten(1).mean(dim=1)
+    gap_per = (pred_low * gap_mask).flatten(1).mean(dim=1)
+    strict_negative_per = (pred_low * strict_negative).flatten(1).mean(dim=1)
+    missing_loss = _masked_mean_torch(missing_per, weights)
+    extra_loss = _masked_mean_torch(extra_per, weights)
+    gap_loss = _masked_mean_torch(gap_per, weights)
+    strict_negative_loss = _masked_mean_torch(strict_negative_per, weights)
+    total = (
+        float(config.terminal_missing_support_weight) * missing_loss
+        + float(config.terminal_extra_support_weight) * extra_loss
+        + float(config.terminal_gap_loss_weight) * gap_loss
+        + float(config.terminal_negative_space_weight) * strict_negative_loss
+    )
+    return total, missing_loss, extra_loss, gap_loss, strict_negative_loss
+
+
+def terminal_local_shape_loss_torch(
+    states: Tensor,
+    targets: Tensor,
+    labels: Tensor,
+    shape_stats: dict[str, Tensor] | None,
+    config: DirectFluxMNISTConfig,
+    *,
+    weights: Tensor,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Low-res terminal support/edge/negative-space loss for local stroke topology."""
+    pred_low, pred_edge = _local_shape_maps_torch(states, config)
+    with torch.no_grad():
+        target_low, target_edge = _local_shape_maps_torch(targets, config)
+    support_per = F.smooth_l1_loss(pred_low, target_low, reduction="none").flatten(1).mean(dim=1)
+    edge_per = F.smooth_l1_loss(pred_edge, target_edge, reduction="none").flatten(1).mean(dim=1)
+    if shape_stats is not None and "local_negative_space" in shape_stats:
+        y = labels.to(device=states.device, dtype=torch.long).reshape(-1).clamp(0, 9)
+        neg = shape_stats["local_negative_space"].to(device=states.device, dtype=states.dtype).index_select(0, y).unsqueeze(1)
+    else:
+        neg = (1.0 - target_low).detach()
+    negative_per = (pred_low * neg).flatten(1).mean(dim=1)
+    support_loss = _masked_mean_torch(support_per, weights)
+    edge_loss = _masked_mean_torch(edge_per, weights)
+    negative_loss = _masked_mean_torch(negative_per, weights)
+    total = (
+        float(config.terminal_target_support_weight) * support_loss
+        + float(config.terminal_target_edge_weight) * edge_loss
+        + float(config.terminal_negative_space_weight) * negative_loss
+    )
+    return total, support_loss, edge_loss, negative_loss
+
+
+def _normalize_goodbad_token(raw: str) -> bool | None:
+    token = re.sub(r"[^a-z0-9]+", "", raw.strip().lower())
+    if not token:
+        return None
+    if token in {"g", "1", "true", "ok", "yes", "y"} or re.fullmatch(r"go+d", token):
+        return True
+    if token in {"b", "0", "false", "no", "n"} or re.fullmatch(r"ba+d", token):
+        return False
+    return None
+
+
+def parse_goodbad_annotation_file(path: str | Path, *, expected_count: int | None = None, grid_cols: int = 8) -> tuple[np.ndarray, list[str]]:
+    """Parse the first good/bad annotation block and return warnings.
+
+    Only the first contiguous block of annotation rows is parsed. Blank lines
+    or comment-like lines after the block stop parsing, so explanatory notes do
+    not accidentally add extra ``bad`` tokens. Row token counts are checked
+    against the expected grid width.
     """
-    tokens: list[bool] = []
-    for raw in Path(path).read_text(encoding="utf-8", errors="ignore").replace(",", " ").split():
-        token = re.sub(r"[^a-z0-9]+", "", raw.strip().lower())
-        if not token:
+    values: list[bool] = []
+    warnings: list[str] = []
+    started = False
+    for line_no, line in enumerate(Path(path).read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            if started:
+                break
             continue
-        if token in {"g", "1", "true", "ok", "yes", "y"} or re.fullmatch(r"go+d", token):
-            tokens.append(True)
-        elif token in {"b", "0", "false", "no", "n"} or re.fullmatch(r"ba+d", token):
-            tokens.append(False)
-    return np.asarray(tokens, dtype=bool)
+        if stripped.startswith("#"):
+            if started:
+                break
+            continue
+        row: list[bool] = []
+        for raw in stripped.replace(",", " ").split():
+            parsed = _normalize_goodbad_token(raw)
+            if parsed is not None:
+                row.append(parsed)
+        if not row:
+            if started:
+                break
+            continue
+        started = True
+        if grid_cols > 0 and len(row) != int(grid_cols):
+            warnings.append(f"line {line_no}: expected {grid_cols} annotation tokens, found {len(row)}")
+        values.extend(row)
+        if expected_count is not None and len(values) >= int(expected_count):
+            if len(values) > int(expected_count):
+                warnings.append(f"annotation block has extra tokens; truncating {len(values)} to {expected_count}")
+            values = values[: int(expected_count)]
+            break
+    if expected_count is not None and len(values) != int(expected_count):
+        warnings.append(f"expected {expected_count} annotation tokens, parsed {len(values)}")
+    return np.asarray(values, dtype=bool), warnings
+
+
+def _parse_goodbad_tokens(path: str | Path, *, expected_count: int | None = None) -> np.ndarray:
+    """Backward-compatible parser returning only the boolean annotations."""
+    values, _warnings = parse_goodbad_annotation_file(path, expected_count=expected_count)
+    return values
 
 
 def analyze_goodbad_annotations(
@@ -1321,7 +1715,7 @@ def analyze_goodbad_annotations(
     classifier_metrics: dict[str, float | np.ndarray] | None = None,
 ) -> dict[str, float | np.ndarray]:
     """Analyze optional human good/bad labels for a saved sample grid."""
-    good = _parse_goodbad_tokens(path)
+    good, parse_warnings = parse_goodbad_annotation_file(path, expected_count=int(samples.shape[0]))
     count = min(int(good.size), int(samples.shape[0]))
     if count <= 0:
         return {}
@@ -1345,6 +1739,9 @@ def analyze_goodbad_annotations(
         "human_bad_count": float((~good).sum()),
         "human_good_by_label": good_by_label,
         "human_bad_count_by_label": bad_count_by_label,
+        "annotation_token_count": float(good.size),
+        "annotation_warning": "; ".join(parse_warnings),
+        "annotation_parse_ok": float(0 if parse_warnings else 1),
         "entropy_good_mean": float(entropy[good].mean()) if good.any() else float("nan"),
         "entropy_bad_mean": float(entropy[~good].mean()) if (~good).any() else float("nan"),
         "tv_good_mean": float(tv[good].mean()) if good.any() else float("nan"),
@@ -1375,7 +1772,7 @@ def write_goodbad_sample_report(
     grid_size: int = 28,
 ) -> None:
     """Write a per-sample CSV combining human annotations and diagnostics."""
-    good = _parse_goodbad_tokens(goodbad_path)
+    good, parse_warnings = parse_goodbad_annotation_file(goodbad_path, expected_count=int(samples.shape[0]))
     count = min(int(good.size), int(samples.shape[0]))
     if count <= 0:
         return
@@ -1396,6 +1793,8 @@ def write_goodbad_sample_report(
             handle,
             fieldnames=[
                 "index",
+                "row",
+                "col",
                 "label",
                 "human_good",
                 "classifier_pred",
@@ -1413,6 +1812,8 @@ def write_goodbad_sample_report(
             writer.writerow(
                 {
                     "index": i,
+                    "row": int(i // 8),
+                    "col": int(i % 8),
                     "label": int(labs[i]),
                     "human_good": int(bool(good[i])),
                     "classifier_pred": "" if not isinstance(preds, np.ndarray) or preds.shape[0] <= i else int(preds[i]),
@@ -1422,6 +1823,92 @@ def write_goodbad_sample_report(
                     "tv": float(stats["tv"][i]),
                     "maxmass": float(stats["maxmass"][i]),
                     "checkerboard": float(stats["checkerboard"][i]),
+                    "selection_score": "" if scores is None or scores.shape[0] <= i else float(scores[i]),
+                }
+            )
+
+
+def write_local_shape_report(
+    output_path: str | Path,
+    samples: np.ndarray,
+    labels: np.ndarray,
+    shape_stats: dict[str, np.ndarray] | None,
+    *,
+    classifier_metrics: dict[str, float | np.ndarray] | None = None,
+    selection_scores: np.ndarray | None = None,
+    grid_size: int = 28,
+    negative_space_mode: str = "strict",
+    negative_space_threshold: float = 0.08,
+    negative_space_temperature: float = 0.03,
+    gap_threshold: float = 0.12,
+    gap_dilate_radius: int = 1,
+    extra_support_margin: float = 0.10,
+) -> None:
+    """Write per-sample local shape diagnostics used by 10o/10p."""
+    samples_arr = np.asarray(samples, dtype=np.float64)
+    labels_arr = np.asarray(labels, dtype=np.int64).reshape(-1)
+    stats = compute_shape_statistics_np(samples_arr, grid_size=int(grid_size))
+    local = local_shape_metrics_np(
+        samples_arr,
+        labels_arr,
+        shape_stats,
+        grid_size=int(grid_size),
+        negative_space_mode=str(negative_space_mode),
+        negative_space_threshold=float(negative_space_threshold),
+        negative_space_temperature=float(negative_space_temperature),
+        gap_threshold=float(gap_threshold),
+        gap_dilate_radius=int(gap_dilate_radius),
+        extra_support_margin=float(extra_support_margin),
+    )
+    preds = classifier_metrics.get("classifier_predictions") if classifier_metrics else None
+    probs = classifier_metrics.get("classifier_target_probs") if classifier_metrics else None
+    margins = classifier_metrics.get("classifier_margins") if classifier_metrics else None
+    scores = None if selection_scores is None else np.asarray(selection_scores, dtype=np.float64).reshape(-1)
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "index",
+                "label",
+                "classifier_pred",
+                "classifier_prob",
+                "classifier_margin",
+                "entropy",
+                "tv",
+                "maxmass",
+                "checkerboard",
+                "local_support_loss",
+                "local_edge_loss",
+                "negative_space_mass",
+                "strict_negative_space_mass",
+                "gap_mass",
+                "missing_support_loss",
+                "extra_support_loss",
+                "selection_score",
+            ],
+        )
+        writer.writeheader()
+        for i in range(samples_arr.shape[0]):
+            writer.writerow(
+                {
+                    "index": i,
+                    "label": int(labels_arr[i]),
+                    "classifier_pred": "" if not isinstance(preds, np.ndarray) or preds.shape[0] <= i else int(preds[i]),
+                    "classifier_prob": "" if not isinstance(probs, np.ndarray) or probs.shape[0] <= i else float(probs[i]),
+                    "classifier_margin": "" if not isinstance(margins, np.ndarray) or margins.shape[0] <= i else float(margins[i]),
+                    "entropy": float(stats["entropy"][i]),
+                    "tv": float(stats["tv"][i]),
+                    "maxmass": float(stats["maxmass"][i]),
+                    "checkerboard": float(stats["checkerboard"][i]),
+                    "local_support_loss": float(local["local_support_loss"][i]),
+                    "local_edge_loss": float(local["local_edge_loss"][i]),
+                    "negative_space_mass": float(local["negative_space_mass"][i]),
+                    "strict_negative_space_mass": float(local["strict_negative_space_mass"][i]),
+                    "gap_mass": float(local["gap_mass"][i]),
+                    "missing_support_loss": float(local["missing_support_loss"][i]),
+                    "extra_support_loss": float(local["extra_support_loss"][i]),
                     "selection_score": "" if scores is None or scores.shape[0] <= i else float(scores[i]),
                 }
             )
@@ -1440,6 +1927,17 @@ def selection_scores_for_candidates(
     tv_weight: float,
     maxmass_weight: float,
     checkerboard_weight: float,
+    local_support_weight: float = 0.5,
+    local_edge_weight: float = 0.25,
+    negative_space_weight: float = 0.5,
+    gap_weight: float = 0.5,
+    extra_support_weight: float = 0.25,
+    negative_space_mode: str = "strict",
+    negative_space_threshold: float = 0.08,
+    negative_space_temperature: float = 0.03,
+    gap_threshold: float = 0.12,
+    gap_dilate_radius: int = 1,
+    extra_support_margin: float = 0.10,
 ) -> np.ndarray:
     """Score candidate samples; larger is better."""
     labels = np.asarray(labels, dtype=np.int64).reshape(-1).clip(0, 9)
@@ -1452,7 +1950,7 @@ def selection_scores_for_candidates(
         if classifier_metrics is not None and isinstance(classifier_metrics.get("classifier_target_probs"), np.ndarray):
             return np.asarray(classifier_metrics["classifier_target_probs"], dtype=np.float64).reshape(-1)
         return cls_margin
-    if metric != "composite":
+    if metric not in {"composite", "composite-local", "composite-gap"}:
         raise ValueError(f"unknown sample selection metric: {metric}")
     stats = compute_shape_statistics_np(samples, grid_size=int(grid_size))
     score = float(classifier_weight) * cls_margin.copy()
@@ -1480,6 +1978,29 @@ def selection_scores_for_candidates(
     score -= float(tv_weight) * tv_pen ** 2
     score -= float(maxmass_weight) * max_pen ** 2
     score -= float(checkerboard_weight) * checker_pen ** 2
+    if metric in {"composite-local", "composite-gap"}:
+        local = local_shape_metrics_np(
+            samples,
+            labels,
+            shape_stats,
+            grid_size=int(grid_size),
+            negative_space_mode=str(negative_space_mode),
+            negative_space_threshold=float(negative_space_threshold),
+            negative_space_temperature=float(negative_space_temperature),
+            gap_threshold=float(gap_threshold),
+            gap_dilate_radius=int(gap_dilate_radius),
+            extra_support_margin=float(extra_support_margin),
+        )
+        if metric == "composite-local":
+            score -= float(local_support_weight) * local["local_support_loss"]
+            score -= float(local_edge_weight) * local["local_edge_loss"]
+            score -= float(negative_space_weight) * local["negative_space_mass"]
+        else:
+            score -= float(local_support_weight) * local["missing_support_loss"]
+            score -= float(extra_support_weight) * local["extra_support_loss"]
+            score -= float(gap_weight) * local["gap_mass"]
+            score -= float(negative_space_weight) * local["strict_negative_space_mass"]
+            score -= float(local_edge_weight) * local["local_edge_loss"]
     return score
 
 
@@ -1511,12 +2032,34 @@ def select_generation_result_by_classifier(
         tv_weight = 0.5
         maxmass_weight = 0.25
         checkerboard_weight = 0.25
+        local_support_weight = 0.5
+        local_edge_weight = 0.25
+        negative_space_weight = 0.5
+        gap_weight = 0.5
+        extra_support_weight = 0.25
+        neg_mode = "strict"
+        neg_threshold = 0.08
+        neg_temp = 0.03
+        gap_threshold = 0.12
+        gap_radius = 1
+        extra_margin = 0.10
     else:
         classifier_weight = float(config.selection_classifier_weight)
         entropy_weight = float(config.selection_entropy_weight)
         tv_weight = float(config.selection_tv_weight)
         maxmass_weight = float(config.selection_maxmass_weight)
         checkerboard_weight = float(config.selection_checkerboard_weight)
+        local_support_weight = float(config.selection_local_support_weight)
+        local_edge_weight = float(config.selection_local_edge_weight)
+        negative_space_weight = float(config.selection_negative_space_weight)
+        gap_weight = float(config.selection_gap_weight)
+        extra_support_weight = float(config.selection_extra_support_weight)
+        neg_mode = str(config.terminal_negative_space_mode)
+        neg_threshold = float(config.terminal_negative_space_threshold)
+        neg_temp = float(config.terminal_negative_space_temperature)
+        gap_threshold = float(config.terminal_gap_threshold)
+        gap_radius = int(config.terminal_gap_dilate_radius)
+        extra_margin = float(config.terminal_extra_support_margin)
     scores = selection_scores_for_candidates(
         result.samples,
         result.labels,
@@ -1529,6 +2072,17 @@ def select_generation_result_by_classifier(
         tv_weight=tv_weight,
         maxmass_weight=maxmass_weight,
         checkerboard_weight=checkerboard_weight,
+        local_support_weight=local_support_weight,
+        local_edge_weight=local_edge_weight,
+        negative_space_weight=negative_space_weight,
+        gap_weight=gap_weight,
+        extra_support_weight=extra_support_weight,
+        negative_space_mode=neg_mode,
+        negative_space_threshold=neg_threshold,
+        negative_space_temperature=neg_temp,
+        gap_threshold=gap_threshold,
+        gap_dilate_radius=gap_radius,
+        extra_support_margin=extra_margin,
     )
     chosen: list[int] = []
     for i in range(labels.size):
@@ -1540,7 +2094,19 @@ def select_generation_result_by_classifier(
     if report_path is not None:
         stats = compute_shape_statistics_np(result.samples[:expected], grid_size=int(grid_size))
         with Path(report_path).open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["slot", "candidate", "index", "label", "score", "classifier_prob", "classifier_margin", "entropy", "tv", "maxmass", "checkerboard", "selected"])
+            local = local_shape_metrics_np(
+                result.samples[:expected],
+                result.labels[:expected],
+                shape_stats,
+                grid_size=int(grid_size),
+                negative_space_mode=neg_mode,
+                negative_space_threshold=neg_threshold,
+                negative_space_temperature=neg_temp,
+                gap_threshold=gap_threshold,
+                gap_dilate_radius=gap_radius,
+                extra_support_margin=extra_margin,
+            )
+            writer = csv.DictWriter(handle, fieldnames=["slot", "candidate", "index", "label", "score", "classifier_prob", "classifier_margin", "entropy", "tv", "maxmass", "checkerboard", "local_support_loss", "local_edge_loss", "negative_space_mass", "strict_negative_space_mass", "gap_mass", "missing_support_loss", "extra_support_loss", "selected"])
             writer.writeheader()
             probs = np.asarray(metrics.get("classifier_target_probs", np.full(expected, np.nan)), dtype=np.float64)
             margins = np.asarray(metrics.get("classifier_margins", np.full(expected, np.nan)), dtype=np.float64)
@@ -1559,6 +2125,9 @@ def select_generation_result_by_classifier(
                         "tv": float(stats["tv"][flat]),
                         "maxmass": float(stats["maxmass"][flat]),
                         "checkerboard": float(stats["checkerboard"][flat]),
+                        "local_support_loss": float(local["local_support_loss"][flat]),
+                        "local_edge_loss": float(local["local_edge_loss"][flat]),
+                        "negative_space_mass": float(local["negative_space_mass"][flat]),
                         "selected": int(flat == idx[slot]),
                     })
     def maybe_take(arr):
@@ -2604,6 +3173,83 @@ def sample_flux_training_batch(
         train_noise_weight=float(train_noise_weight),
     )
 
+
+def _with_terminal_tau_window(batch: FluxTrainingBatch, config: DirectFluxMNISTConfig, *, rng: np.random.Generator) -> FluxTrainingBatch:
+    """Move a sampled bridge batch into a configurable near-terminal tau window."""
+    horizon = max(float(natural_horizon(config)), 1e-12)
+    lo = float(config.terminal_tau_min_fraction)
+    hi = float(config.terminal_tau_max_fraction)
+    if hi < lo:
+        lo, hi = hi, lo
+    u = rng.uniform(lo, hi, size=int(batch.states.shape[0])).astype(np.float32)
+    tau = torch.as_tensor(u, dtype=batch.states.dtype, device=batch.states.device) * float(horizon)
+    mix = (tau / horizon).pow(float(config.bridge_power)).view(-1, 1)
+    states = (1.0 - mix) * batch.targets + mix * batch.sources
+    states = _renormalize_masses(states, floor=float(config.mass_floor))
+    return FluxTrainingBatch(
+        tau=tau,
+        states=states,
+        labels=batch.labels,
+        targets=batch.targets,
+        sources=batch.sources,
+        source_indices=batch.source_indices,
+        source_labels=batch.source_labels,
+        target_indices=batch.target_indices,
+        target_velocity_mode=batch.target_velocity_mode,
+        step_index=batch.step_index,
+        train_free_weight=batch.train_free_weight,
+        train_noise_weight=batch.train_noise_weight,
+    )
+
+
+def sample_terminal_flux_training_batch(
+    images: np.ndarray,
+    labels: np.ndarray,
+    config: DirectFluxMNISTConfig,
+    *,
+    batch_size: int,
+    device: str | torch.device,
+    rng: np.random.Generator | None = None,
+    dtype: torch.dtype = torch.float32,
+    class_means: np.ndarray | None = None,
+    ot_cache: ClasswiseOTCache | None = None,
+    step_index: int | None = None,
+) -> FluxTrainingBatch:
+    """Sample a dedicated near-terminal training microbatch.
+
+    The pair/source assignment is the ordinary teacher assignment, but tau is
+    forced into ``[terminal_tau_min_fraction, terminal_tau_max_fraction]``.
+    Optional hard-label sampling restricts this microbatch to recurrent failure
+    classes without biasing the entire training stream.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    images_arr = np.asarray(images, dtype=np.float64)
+    labels_arr = np.asarray(labels, dtype=np.int64)
+    chosen_images = images_arr
+    chosen_labels = labels_arr
+    local_ot_cache = ot_cache
+    if bool(config.hard_label_sampling) and float(config.hard_label_prob) > 0.0 and rng.random() < float(config.hard_label_prob):
+        hard = np.asarray(tuple(int(x) for x in config.hard_labels), dtype=np.int64)
+        mask = np.isin(labels_arr, hard)
+        if bool(mask.any()):
+            chosen_images = images_arr[mask]
+            chosen_labels = labels_arr[mask]
+            local_ot_cache = None
+    batch = sample_flux_training_batch(
+        chosen_images,
+        chosen_labels,
+        config,
+        batch_size=int(batch_size),
+        device=device,
+        rng=rng,
+        dtype=dtype,
+        class_means=None if chosen_images is not images_arr else class_means,
+        ot_cache=local_ot_cache,
+        step_index=step_index,
+    )
+    return _with_terminal_tau_window(batch, config, rng=rng)
+
+
 def training_target_velocity_torch(batch: FluxTrainingBatch, config: DirectFluxMNISTConfig, mode: str | None = None) -> Tensor:
     """Node velocity teacher used before the Poisson edge-flux solve."""
     horizon = max(natural_horizon(config), 1e-12)
@@ -2658,7 +3304,8 @@ def direct_flux_rollout_consistency_loss(
     return_extra: bool = False,
     terminal_classifier: TinyMNISTClassifier | None = None,
     shape_stats: dict[str, Tensor] | None = None,
-) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    enable_terminal_losses: bool = True,
+) -> tuple[Tensor, ...]:
     """Multi-step sampler-consistency loss on a small microbatch.
 
     The prediction is unrolled through the same differentiable conservative
@@ -2673,14 +3320,14 @@ def direct_flux_rollout_consistency_loss(
     rollout_steps = int(config.rollout_loss_steps if steps is None else steps)
     if rollout_steps <= 0:
         z = batch.states.new_tensor(0.0)
-        return (z, z, z, z, z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
+        return (z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
     count = int(batch.states.shape[0])
     if max_items is None:
         max_items = int(config.rollout_loss_batch_size)
     count = min(count, int(max_items))
     if count <= 0:
         z = batch.states.new_tensor(0.0)
-        return (z, z, z, z, z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
+        return (z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
     sl = slice(0, count)
     horizon = max(float(natural_horizon(config)), 1e-12)
     dt = horizon / float(max(int(config.num_steps), 1))
@@ -2690,6 +3337,9 @@ def direct_flux_rollout_consistency_loss(
     sources = batch.sources[sl]
     targets = batch.targets[sl]
     tau = batch.tau[sl]
+    if enable_terminal_losses and steps is None and str(config.terminal_loss_mode) == "to-terminal":
+        needed = int(torch.ceil((tau.max() / max(dt, 1e-12)).detach()).item())
+        rollout_steps = max(1, min(needed, int(config.terminal_rollout_max_steps)))
     free_w = float(batch.train_free_weight) if bool(config.stochastic_step_loss) else 0.0
     for _ in range(rollout_steps):
         pred_flux = model.predict_flux(tau, pred_state, labels, sources)
@@ -2729,7 +3379,13 @@ def direct_flux_rollout_consistency_loss(
     rollout_l2 = F.mse_loss(pred_scaled, teacher_state * scale)
 
     tau_frac_after = (tau / horizon).clamp(0.0, 1.0)
-    terminal_mask = tau_frac_after <= float(config.terminal_loss_tau_max_fraction)
+    effective_terminal_tau_max = float(config.terminal_loss_tau_max_fraction)
+    if str(config.terminal_loss_mode) in {"near-terminal", "to-terminal"}:
+        effective_terminal_tau_max = min(
+            effective_terminal_tau_max,
+            float(config.terminal_rollout_max_steps) / float(max(int(config.num_steps), 1)),
+        )
+    terminal_mask = (tau_frac_after <= effective_terminal_tau_max) if enable_terminal_losses else torch.zeros_like(tau_frac_after, dtype=torch.bool)
     terminal_active_fraction = terminal_mask.float().mean()
     terminal_tau_mean = _masked_mean_torch(tau_frac_after, terminal_mask)
     terminal_loss_scale = _safe_terminal_loss_scale(batch.step_index, config, pred_state)
@@ -2793,6 +3449,38 @@ def direct_flux_rollout_consistency_loss(
             tv_weight=float(config.terminal_shape_tv_weight),
             maxmass_weight=float(config.terminal_shape_maxmass_weight),
         )
+
+    local_shape_loss = pred_state.new_tensor(0.0)
+    local_support_loss = pred_state.new_tensor(0.0)
+    local_edge_loss = pred_state.new_tensor(0.0)
+    negative_space_loss = pred_state.new_tensor(0.0)
+    gap_shape_loss = pred_state.new_tensor(0.0)
+    missing_support_loss = pred_state.new_tensor(0.0)
+    extra_support_loss = pred_state.new_tensor(0.0)
+    gap_loss = pred_state.new_tensor(0.0)
+    strict_negative_space_loss = pred_state.new_tensor(0.0)
+    if float(config.terminal_local_shape_loss_weight) > 0.0:
+        local_shape_loss, local_support_loss, local_edge_loss, negative_space_loss = terminal_local_shape_loss_torch(
+            pred_state,
+            targets,
+            labels,
+            shape_stats,
+            config,
+            weights=terminal_mask.to(dtype=pred_state.dtype) * terminal_loss_scale,
+        )
+    if (
+        float(config.terminal_gap_loss_weight) > 0.0
+        or float(config.terminal_missing_support_weight) > 0.0
+        or float(config.terminal_extra_support_weight) > 0.0
+    ):
+        gap_shape_loss, missing_support_loss, extra_support_loss, gap_loss, strict_negative_space_loss = terminal_gap_shape_loss_torch(
+            pred_state,
+            targets,
+            labels,
+            shape_stats,
+            config,
+            weights=terminal_mask.to(dtype=pred_state.dtype) * terminal_loss_scale,
+        )
     return (
         rollout_l2,
         endpoint_l2,
@@ -2809,6 +3497,15 @@ def direct_flux_rollout_consistency_loss(
         shape_entropy_loss,
         shape_tv_loss,
         shape_maxmass_loss,
+        local_shape_loss,
+        local_support_loss,
+        local_edge_loss,
+        negative_space_loss,
+        gap_shape_loss,
+        missing_support_loss,
+        extra_support_loss,
+        gap_loss,
+        strict_negative_space_loss,
     )
 
 
@@ -2852,6 +3549,10 @@ def direct_flux_matching_loss(
             or float(config.rollout_endpoint_tv_weight) > 0.0
             or ((bool(config.use_classifier_loss) or str(config.classifier_loss_mode) != "off") and (float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0))
             or float(config.terminal_shape_loss_weight) > 0.0
+            or float(config.terminal_local_shape_loss_weight) > 0.0
+            or float(config.terminal_gap_loss_weight) > 0.0
+            or float(config.terminal_missing_support_weight) > 0.0
+            or float(config.terminal_extra_support_weight) > 0.0
             or float(config.target_tv_loss_weight) > 0.0
             or float(config.target_entropy_loss_weight) > 0.0
         )
@@ -2910,28 +3611,50 @@ def direct_flux_matching_loss(
     terminal_shape_entropy_loss = pred_norm.new_tensor(0.0)
     terminal_shape_tv_loss = pred_norm.new_tensor(0.0)
     terminal_shape_maxmass_loss = pred_norm.new_tensor(0.0)
+    terminal_local_shape_loss = pred_norm.new_tensor(0.0)
+    terminal_local_support_loss = pred_norm.new_tensor(0.0)
+    terminal_local_edge_loss = pred_norm.new_tensor(0.0)
+    terminal_negative_space_loss = pred_norm.new_tensor(0.0)
+    terminal_gap_shape_loss = pred_norm.new_tensor(0.0)
+    terminal_missing_support_loss = pred_norm.new_tensor(0.0)
+    terminal_extra_support_loss = pred_norm.new_tensor(0.0)
+    terminal_gap_loss = pred_norm.new_tensor(0.0)
+    terminal_strict_negative_space_loss = pred_norm.new_tensor(0.0)
     target_tv_loss = pred_norm.new_tensor(0.0)
     terminal_active_fraction = pred_norm.new_tensor(0.0)
     terminal_tau_mean = pred_norm.new_tensor(float("nan"))
     terminal_loss_scale = pred_norm.new_tensor(0.0)
     rollout_ready = batch.step_index is None or int(batch.step_index) >= int(config.rollout_loss_warmup_steps)
     rollout_due = True
+    terminal_due = True
     if batch.step_index is not None:
         rollout_due = int(batch.step_index) % int(config.rollout_loss_every) == 0
+        terminal_due = int(batch.step_index) % int(config.terminal_loss_every) == 0
         if rollout_due and float(config.rollout_loss_prob) < 1.0:
             # Deterministic gate avoids adding another RNG stream to the loss.
             gate = math.fmod(abs(math.sin(float(int(batch.step_index) + 1) * 12.9898) * 43758.5453), 1.0)
             rollout_due = gate < float(config.rollout_loss_prob)
-    if rollout_ready and rollout_due and int(config.rollout_loss_steps) > 0 and (
+    has_core_rollout_losses = (
         float(config.rollout_loss_weight) > 0.0
         or float(config.rollout_image_grad_loss_weight) > 0.0
-        or float(config.rollout_endpoint_l2_weight) > 0.0
+    )
+    has_terminal_losses = (
+        float(config.rollout_endpoint_l2_weight) > 0.0
         or float(config.rollout_endpoint_bce_weight) > 0.0
         or float(config.rollout_endpoint_tv_weight) > 0.0
         or ((bool(config.use_classifier_loss) or str(config.classifier_loss_mode) != "off") and (float(config.classifier_loss_weight) > 0.0 or float(config.classifier_confidence_loss_weight) > 0.0))
         or float(config.terminal_shape_loss_weight) > 0.0
+        or float(config.terminal_local_shape_loss_weight) > 0.0
+        or float(config.terminal_gap_loss_weight) > 0.0
+        or float(config.terminal_missing_support_weight) > 0.0
+        or float(config.terminal_extra_support_weight) > 0.0
         or float(config.target_tv_loss_weight) > 0.0
-    ):
+    )
+    should_rollout = (has_core_rollout_losses and rollout_due) or (has_terminal_losses and terminal_due)
+    if rollout_ready and should_rollout and int(config.rollout_loss_steps) > 0:
+        rollout_max_items = int(config.rollout_loss_batch_size)
+        if terminal_due and has_terminal_losses and not (has_core_rollout_losses and rollout_due):
+            rollout_max_items = int(config.terminal_rollout_batch_size)
         (
             rollout_loss,
             rollout_endpoint_l2,
@@ -2948,7 +3671,25 @@ def direct_flux_matching_loss(
             terminal_shape_entropy_loss,
             terminal_shape_tv_loss,
             terminal_shape_maxmass_loss,
-        ) = direct_flux_rollout_consistency_loss(model, batch, return_extra=True, terminal_classifier=terminal_classifier, shape_stats=shape_stats)
+            terminal_local_shape_loss,
+            terminal_local_support_loss,
+            terminal_local_edge_loss,
+            terminal_negative_space_loss,
+            terminal_gap_shape_loss,
+            terminal_missing_support_loss,
+            terminal_extra_support_loss,
+            terminal_gap_loss,
+            terminal_strict_negative_space_loss,
+        ) = direct_flux_rollout_consistency_loss(
+            model,
+            batch,
+            max_items=rollout_max_items,
+            return_extra=True,
+            terminal_classifier=terminal_classifier,
+            shape_stats=shape_stats,
+            enable_terminal_losses=terminal_due,
+        )
+
 
     curl_loss = flux_curl_torch(raw_pred_norm).square().mean()
     edge_lap_loss = edge_laplacian_energy_torch(raw_pred_norm)
@@ -2970,6 +3711,8 @@ def direct_flux_matching_loss(
         + (float(config.classifier_loss_weight) * classifier_loss if (bool(config.use_classifier_loss) or str(config.classifier_loss_mode) != "off") else classifier_loss.new_tensor(0.0))
         + (float(config.classifier_confidence_loss_weight) * classifier_confidence_loss if (bool(config.use_classifier_loss) or str(config.classifier_loss_mode) != "off") else classifier_confidence_loss.new_tensor(0.0))
         + float(config.terminal_shape_loss_weight) * terminal_shape_loss
+        + float(config.terminal_local_shape_loss_weight) * terminal_local_shape_loss
+        + terminal_gap_shape_loss
         + float(config.curl_loss_weight) * curl_loss
         + float(config.edge_laplacian_loss_weight) * edge_lap_loss
         + float(config.checkerboard_loss_weight) * checker_loss
@@ -3010,6 +3753,15 @@ def direct_flux_matching_loss(
         "terminal_shape_entropy_loss": float(terminal_shape_entropy_loss.detach().cpu()),
         "terminal_shape_tv_loss": float(terminal_shape_tv_loss.detach().cpu()),
         "terminal_shape_maxmass_loss": float(terminal_shape_maxmass_loss.detach().cpu()),
+        "terminal_local_shape_loss": float(terminal_local_shape_loss.detach().cpu()),
+        "terminal_local_support_loss": float(terminal_local_support_loss.detach().cpu()),
+        "terminal_local_edge_loss": float(terminal_local_edge_loss.detach().cpu()),
+        "terminal_negative_space_loss": float(terminal_negative_space_loss.detach().cpu()),
+        "terminal_gap_shape_loss": float(terminal_gap_shape_loss.detach().cpu()),
+        "terminal_missing_support_loss": float(terminal_missing_support_loss.detach().cpu()),
+        "terminal_extra_support_loss": float(terminal_extra_support_loss.detach().cpu()),
+        "terminal_gap_loss": float(terminal_gap_loss.detach().cpu()),
+        "terminal_strict_negative_space_loss": float(terminal_strict_negative_space_loss.detach().cpu()),
         "terminal_loss_active_fraction": float(terminal_active_fraction.detach().cpu()),
         "terminal_tau_mean": float(terminal_tau_mean.detach().cpu()),
         "terminal_loss_scale": float(terminal_loss_scale.detach().cpu()),
@@ -3606,6 +4358,15 @@ def train_direct_flux_model(
         "terminal_shape_entropy_loss": [],
         "terminal_shape_tv_loss": [],
         "terminal_shape_maxmass_loss": [],
+        "terminal_local_shape_loss": [],
+        "terminal_local_support_loss": [],
+        "terminal_local_edge_loss": [],
+        "terminal_negative_space_loss": [],
+        "terminal_gap_shape_loss": [],
+        "terminal_missing_support_loss": [],
+        "terminal_extra_support_loss": [],
+        "terminal_gap_loss": [],
+        "terminal_strict_negative_space_loss": [],
         "terminal_loss_active_fraction": [],
         "terminal_tau_mean": [],
         "terminal_loss_scale": [],
@@ -3614,6 +4375,14 @@ def train_direct_flux_model(
         "edge_laplacian_loss": [],
         "checkerboard_loss": [],
         "on_policy": [],
+        "terminal_batch": [],
+        "terminal_batch_loss": [],
+        "terminal_batch_gap_loss": [],
+        "terminal_batch_missing_support_loss": [],
+        "terminal_batch_extra_support_loss": [],
+        "terminal_batch_entropy": [],
+        "terminal_batch_tv": [],
+        "terminal_batch_active_fraction": [],
         "on_policy_tau_frac": [],
         "div_cos": [],
         "pred_rms": [],
@@ -3652,13 +4421,31 @@ def train_direct_flux_model(
     for step_index in bar:
         iter_start = time.perf_counter()
         cache_refresh_sec_this_step = 0.0
+        use_terminal_batch = (
+            float(model.config.terminal_batch_prob) > 0.0
+            and int(step_index) >= int(model.config.rollout_loss_warmup_steps)
+            and rng.random() < float(model.config.terminal_batch_prob)
+        )
         use_on_policy = (
-            str(model.config.on_policy_mode) != "off"
+            not use_terminal_batch
+            and str(model.config.on_policy_mode) != "off"
             and int(step_index) >= int(model.config.on_policy_warmup_steps)
             and float(model.config.on_policy_prob) > 0.0
             and rng.random() < float(model.config.on_policy_prob)
         )
-        if use_on_policy and str(model.config.on_policy_mode) == "replay":
+        if use_terminal_batch:
+            batch = sample_terminal_flux_training_batch(
+                images,
+                labels,
+                model.config,
+                batch_size=min(int(batch_size), int(model.config.terminal_batch_size)),
+                device=resolved_device,
+                rng=rng,
+                class_means=class_means,
+                ot_cache=ot_cache,
+                step_index=int(step_index),
+            )
+        elif use_on_policy and str(model.config.on_policy_mode) == "replay":
             cache_stale = (
                 replay_cache is None
                 or int(step_index) - int(replay_cache.created_step) >= int(model.config.on_policy_cache_refresh_interval)
@@ -3730,14 +4517,31 @@ def train_direct_flux_model(
                 shape_stats=class_shape_stats_torch,
             )
         metrics["on_policy"] = 1.0 if use_on_policy else 0.0
+        metrics["terminal_batch"] = 1.0 if use_terminal_batch else 0.0
         metrics["on_policy_tau_frac"] = float((batch.tau / max(natural_horizon(model.config), 1e-12)).mean().detach().cpu()) if use_on_policy else -1.0
+        inactive = float("nan")
+        if use_terminal_batch:
+            metrics["terminal_batch_loss"] = metrics["loss"]
+            metrics["terminal_batch_gap_loss"] = metrics.get("terminal_gap_loss", 0.0)
+            metrics["terminal_batch_missing_support_loss"] = metrics.get("terminal_missing_support_loss", 0.0)
+            metrics["terminal_batch_extra_support_loss"] = metrics.get("terminal_extra_support_loss", 0.0)
+            metrics["terminal_batch_entropy"] = metrics.get("terminal_shape_entropy_loss", 0.0)
+            metrics["terminal_batch_tv"] = metrics.get("terminal_shape_tv_loss", 0.0)
+            metrics["terminal_batch_active_fraction"] = metrics.get("terminal_loss_active_fraction", 0.0)
+        else:
+            metrics["terminal_batch_loss"] = inactive
+            metrics["terminal_batch_gap_loss"] = inactive
+            metrics["terminal_batch_missing_support_loss"] = inactive
+            metrics["terminal_batch_extra_support_loss"] = inactive
+            metrics["terminal_batch_entropy"] = inactive
+            metrics["terminal_batch_tv"] = inactive
+            metrics["terminal_batch_active_fraction"] = inactive
         metrics["on_policy_cache_age"] = -1.0 if replay_cache is None else float(int(step_index) - int(replay_cache.created_step))
         metrics["cache_refresh_sec"] = float(cache_refresh_sec_this_step)
         metrics["cache_tau_min"] = float("nan") if replay_cache is None else float(replay_cache.tau_min)
         metrics["cache_tau_mean"] = float("nan") if replay_cache is None else float(replay_cache.tau_mean)
         metrics["cache_tau_max"] = float("nan") if replay_cache is None else float(replay_cache.tau_max)
         metrics["cache_terminal_fraction"] = float("nan") if replay_cache is None else float(replay_cache.terminal_fraction)
-        inactive = float("nan")
         if use_on_policy:
             metrics["on_loss"] = metrics["loss"]
             metrics["on_div_cos"] = metrics["div_cos"]
@@ -3790,6 +4594,8 @@ def train_direct_flux_model(
                 pred=metrics["pred_rms"],
                 tgt=metrics["target_rms"],
                 onp=metrics.get("on_policy", 0.0),
+                tb=metrics.get("terminal_batch", 0.0),
+                tbg=metrics.get("terminal_batch_gap_loss", 0.0),
                 on_tau=metrics.get("on_policy_tau_frac", -1.0),
                 free_r=metrics.get("free_to_learned_ratio", 0.0),
                 noise_r=metrics.get("noise_to_learned_ratio", 0.0),
@@ -4743,8 +5549,20 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--rollout-endpoint-l2-weight", type=float, default=0.0)
     parser.add_argument("--rollout-endpoint-bce-weight", type=float, default=0.0)
     parser.add_argument("--rollout-endpoint-tv-weight", type=float, default=0.0)
-    parser.add_argument("--terminal-loss-tau-max-fraction", type=float, default=0.18)
+    parser.add_argument("--terminal-loss-tau-max-fraction", type=float, default=0.06)
     parser.add_argument("--terminal-loss-ramp-steps", type=int, default=3000)
+    parser.add_argument("--terminal-loss-mode", choices=TERMINAL_LOSS_MODES, default="near-terminal")
+    parser.add_argument("--terminal-rollout-max-steps", type=int, default=16)
+    parser.add_argument("--terminal-loss-every", type=int, default=4)
+    parser.add_argument("--terminal-rollout-batch-size", type=int, default=32)
+    parser.add_argument("--terminal-batch-prob", type=float, default=0.25)
+    parser.add_argument("--terminal-batch-size", type=int, default=64)
+    parser.add_argument("--terminal-tau-min-fraction", type=float, default=0.0)
+    parser.add_argument("--terminal-tau-max-fraction", type=float, default=0.06)
+    parser.add_argument("--hard-label-sampling", dest="hard_label_sampling", action="store_true", default=False)
+    parser.add_argument("--no-hard-label-sampling", dest="hard_label_sampling", action="store_false")
+    parser.add_argument("--hard-labels", type=str, default="2,5,6,7,9")
+    parser.add_argument("--hard-label-prob", type=float, default=0.35)
     parser.add_argument("--target-tv-loss-weight", type=float, default=0.0)
     parser.add_argument("--target-entropy-loss-weight", type=float, default=0.0)
     parser.add_argument("--use-classifier-loss", dest="use_classifier_loss", action="store_true", default=False)
@@ -4758,11 +5576,31 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--terminal-shape-entropy-weight", type=float, default=1.0)
     parser.add_argument("--terminal-shape-tv-weight", type=float, default=1.0)
     parser.add_argument("--terminal-shape-maxmass-weight", type=float, default=0.5)
+    parser.add_argument("--terminal-local-shape-loss-weight", type=float, default=0.0)
+    parser.add_argument("--terminal-target-support-weight", type=float, default=1.0)
+    parser.add_argument("--terminal-target-edge-weight", type=float, default=0.5)
+    parser.add_argument("--terminal-negative-space-weight", type=float, default=0.5)
+    parser.add_argument("--terminal-negative-space-mode", choices=("mean", "strict"), default="strict")
+    parser.add_argument("--terminal-negative-space-threshold", type=float, default=0.08)
+    parser.add_argument("--terminal-negative-space-temperature", type=float, default=0.03)
+    parser.add_argument("--terminal-gap-loss-weight", type=float, default=0.0)
+    parser.add_argument("--terminal-gap-threshold", type=float, default=0.12)
+    parser.add_argument("--terminal-gap-dilate-radius", type=int, default=1)
+    parser.add_argument("--terminal-missing-support-weight", type=float, default=0.0)
+    parser.add_argument("--terminal-extra-support-weight", type=float, default=0.0)
+    parser.add_argument("--terminal-extra-support-margin", type=float, default=0.10)
+    parser.add_argument("--terminal-local-shape-size", type=int, default=14)
+    parser.add_argument("--terminal-local-shape-blur-sigma", type=float, default=0.7)
     parser.add_argument("--selection-classifier-weight", type=float, default=1.0)
     parser.add_argument("--selection-entropy-weight", type=float, default=0.5)
     parser.add_argument("--selection-tv-weight", type=float, default=0.5)
     parser.add_argument("--selection-maxmass-weight", type=float, default=0.25)
     parser.add_argument("--selection-checkerboard-weight", type=float, default=0.25)
+    parser.add_argument("--selection-local-support-weight", type=float, default=0.5)
+    parser.add_argument("--selection-local-edge-weight", type=float, default=0.25)
+    parser.add_argument("--selection-negative-space-weight", type=float, default=0.5)
+    parser.add_argument("--selection-gap-weight", type=float, default=0.5)
+    parser.add_argument("--selection-extra-support-weight", type=float, default=0.25)
     parser.add_argument("--use-classifier-diagnostics", action="store_true")
     parser.add_argument("--classifier-cache-path", type=Path, default=None)
     parser.add_argument("--classifier-train-epochs", type=int, default=2)
@@ -4770,6 +5608,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--classifier-lr", type=float, default=1e-3)
     parser.add_argument("--sample-rejection-factor", type=int, default=1)
     parser.add_argument("--sample-selection-metric", choices=SAMPLE_SELECTION_METRICS, default="none")
+    parser.add_argument("--eval-source-batch-path", type=Path, default=None, help="Optional NPZ with fixed labels and source masses for sample-by-sample evaluation.")
+    parser.add_argument("--save-eval-source-batch", action="store_true", help="Save the source masses used by the final sample grid.")
+    parser.add_argument("--eval-fixed-source-seed", type=int, default=None, help="Optional seed used only for final source sampling.")
     parser.add_argument("--analyze-goodbad-file", dest="analyze_goodbad_file", action="store_true", default=True)
     parser.add_argument("--no-analyze-goodbad-file", dest="analyze_goodbad_file", action="store_false")
     parser.add_argument("--project-main-loss", action="store_true", help="Project predicted flux before the main flux/divergence losses; slower but exact for projected mode.")
@@ -4802,9 +5643,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--on-policy-cache-device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--on-policy-cache-mode", choices=ON_POLICY_CACHE_MODES, default="trajectory")
     parser.add_argument("--on-policy-cache-snapshots-per-traj", type=int, default=16)
-    parser.add_argument("--on-policy-cache-terminal-fraction", type=float, default=0.35)
-    parser.add_argument("--on-policy-cache-terminal-min-tau", type=float, default=0.02)
-    parser.add_argument("--on-policy-cache-terminal-max-tau", type=float, default=0.18)
+    parser.add_argument("--on-policy-cache-terminal-fraction", type=float, default=0.50)
+    parser.add_argument("--on-policy-cache-terminal-min-tau", type=float, default=0.00)
+    parser.add_argument("--on-policy-cache-terminal-max-tau", type=float, default=0.08)
     parser.add_argument("--on-policy-target-mode", choices=ON_POLICY_TARGET_MODES, default="safe-residual")
     parser.add_argument("--on-policy-residual-max-ratio", type=float, default=1.5)
     parser.add_argument("--ema-decay", type=float, default=0.999)
@@ -4916,6 +5757,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         rollout_endpoint_tv_weight=float(args.rollout_endpoint_tv_weight),
         terminal_loss_tau_max_fraction=float(args.terminal_loss_tau_max_fraction),
         terminal_loss_ramp_steps=int(args.terminal_loss_ramp_steps),
+        terminal_loss_mode=str(args.terminal_loss_mode),
+        terminal_rollout_max_steps=int(args.terminal_rollout_max_steps),
+        terminal_loss_every=int(args.terminal_loss_every),
+        terminal_rollout_batch_size=int(args.terminal_rollout_batch_size),
+        terminal_batch_prob=float(args.terminal_batch_prob),
+        terminal_batch_size=int(args.terminal_batch_size),
+        terminal_tau_min_fraction=float(args.terminal_tau_min_fraction),
+        terminal_tau_max_fraction=float(args.terminal_tau_max_fraction),
+        hard_label_sampling=bool(args.hard_label_sampling),
+        hard_labels=tuple(int(x.strip()) for x in str(args.hard_labels).split(",") if x.strip()),
+        hard_label_prob=float(args.hard_label_prob),
         target_tv_loss_weight=float(args.target_tv_loss_weight),
         target_entropy_loss_weight=float(args.target_entropy_loss_weight),
         use_classifier_loss=bool(args.use_classifier_loss),
@@ -4928,11 +5780,31 @@ def main(argv: Sequence[str] | None = None) -> None:
         terminal_shape_entropy_weight=float(args.terminal_shape_entropy_weight),
         terminal_shape_tv_weight=float(args.terminal_shape_tv_weight),
         terminal_shape_maxmass_weight=float(args.terminal_shape_maxmass_weight),
+        terminal_local_shape_loss_weight=float(args.terminal_local_shape_loss_weight),
+        terminal_target_support_weight=float(args.terminal_target_support_weight),
+        terminal_target_edge_weight=float(args.terminal_target_edge_weight),
+        terminal_negative_space_weight=float(args.terminal_negative_space_weight),
+        terminal_negative_space_mode=str(args.terminal_negative_space_mode),
+        terminal_negative_space_threshold=float(args.terminal_negative_space_threshold),
+        terminal_negative_space_temperature=float(args.terminal_negative_space_temperature),
+        terminal_gap_loss_weight=float(args.terminal_gap_loss_weight),
+        terminal_gap_threshold=float(args.terminal_gap_threshold),
+        terminal_gap_dilate_radius=int(args.terminal_gap_dilate_radius),
+        terminal_missing_support_weight=float(args.terminal_missing_support_weight),
+        terminal_extra_support_weight=float(args.terminal_extra_support_weight),
+        terminal_extra_support_margin=float(args.terminal_extra_support_margin),
+        terminal_local_shape_size=int(args.terminal_local_shape_size),
+        terminal_local_shape_blur_sigma=float(args.terminal_local_shape_blur_sigma),
         selection_classifier_weight=float(args.selection_classifier_weight),
         selection_entropy_weight=float(args.selection_entropy_weight),
         selection_tv_weight=float(args.selection_tv_weight),
         selection_maxmass_weight=float(args.selection_maxmass_weight),
         selection_checkerboard_weight=float(args.selection_checkerboard_weight),
+        selection_local_support_weight=float(args.selection_local_support_weight),
+        selection_local_edge_weight=float(args.selection_local_edge_weight),
+        selection_negative_space_weight=float(args.selection_negative_space_weight),
+        selection_gap_weight=float(args.selection_gap_weight),
+        selection_extra_support_weight=float(args.selection_extra_support_weight),
         use_classifier_diagnostics=bool(args.use_classifier_diagnostics),
         classifier_train_epochs=int(args.classifier_train_epochs),
         classifier_cache_path="" if args.classifier_cache_path is None else str(args.classifier_cache_path),
@@ -4999,7 +5871,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"source_cond={config.condition_on_source}, upsample={config.upsample_mode}, flux_param={config.flux_parameterization}, velocity={config.velocity_target}, "
         f"free_aware={config.free_aware_target}, sde_curr={config.sde_curriculum}, edge_alpha={config.edge_alpha_mode}, "
         f"on_policy={config.on_policy_prob}, onp_mode={config.on_policy_mode}/{config.on_policy_cache_mode}, cache={config.on_policy_cache_size}/{config.on_policy_cache_refresh_interval}/snap{config.on_policy_cache_snapshots_per_traj}, onp_target={config.on_policy_target_mode}, ema={config.ema_decay}, onp_sde=({config.on_policy_use_free},{config.on_policy_use_noise}), "
-        f"step_loss={config.step_loss_weight}, rollout={config.rollout_loss_weight}/{config.rollout_loss_steps}/every{config.rollout_loss_every}, rollout_img={config.rollout_image_grad_loss_weight}, terminal_tau<={config.terminal_loss_tau_max_fraction}, cls_loss={config.use_classifier_loss}/{config.classifier_loss_weight}, project_main={config.project_main_loss}, curl={config.curl_loss_weight}, stochastic_step={config.stochastic_step_loss}, adaptive={config.adaptive_sampling}, "
+        f"step_loss={config.step_loss_weight}, rollout={config.rollout_loss_weight}/{config.rollout_loss_steps}/every{config.rollout_loss_every}, rollout_img={config.rollout_image_grad_loss_weight}, terminal_tau<={config.terminal_loss_tau_max_fraction}, shape={config.terminal_shape_loss_weight}, local_shape={config.terminal_local_shape_loss_weight}, cls_loss={config.use_classifier_loss}/{config.classifier_loss_weight}, project_main={config.project_main_loss}, curl={config.curl_loss_weight}, stochastic_step={config.stochastic_step_loss}, adaptive={config.adaptive_sampling}, "
         f"train_steps={args.train_steps}, batch={args.batch_size}, base_channels={args.base_channels}, "
         f"horizon={natural_horizon(config):.3e}, sample_steps={args.sample_steps}, "
         f"weights=(free={config.free_weight}, noise={config.noise_weight}, learned={config.learned_weight})"
@@ -5042,7 +5914,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             show_progress=not bool(args.no_progress),
         )
     final_class_means = _compute_class_mean_measures(dataset.train_images, dataset.train_labels, config.grid_size)
-    class_shape_stats = compute_class_shape_statistics(dataset.train_images, dataset.train_labels, grid_size=int(config.grid_size))
+    class_shape_stats = compute_class_shape_statistics(
+        dataset.train_images,
+        dataset.train_labels,
+        grid_size=int(config.grid_size),
+        local_shape_size=max(2, min(int(config.terminal_local_shape_size), int(config.grid_size))),
+        local_blur_sigma=float(config.terminal_local_shape_blur_sigma),
+    )
     preview_dir = args.out_dir / "previews" if int(args.preview_every) > 0 else None
     history = train_direct_flux_model(
         model,
@@ -5066,22 +5944,33 @@ def main(argv: Sequence[str] | None = None) -> None:
     print("Training complete; starting generation")
     labels = _parse_label_sequence(args.labels, int(args.num_samples))
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    eval_initial_states: np.ndarray | None = None
+    if args.eval_source_batch_path is not None and Path(args.eval_source_batch_path).exists():
+        fixed = np.load(Path(args.eval_source_batch_path), allow_pickle=True)
+        eval_initial_states = np.asarray(fixed["sources"], dtype=np.float32).reshape(-1, int(config.grid_size * config.grid_size))
+        labels = np.asarray(fixed["labels"], dtype=np.int64).reshape(-1)
+        print(f"Loaded fixed evaluation source batch: {args.eval_source_batch_path} ({labels.shape[0]} samples)")
     candidate_labels = labels
+    candidate_initial_states = eval_initial_states
     selection_factor = int(config.sample_rejection_factor)
     if selection_factor > 1:
-        if terminal_classifier is None or str(config.sample_selection_metric) not in {"classifier-confidence", "composite"}:
-            raise RuntimeError("sample rejection requires classifier diagnostics and classifier-confidence or composite selection")
+        if terminal_classifier is None or str(config.sample_selection_metric) not in {"classifier-confidence", "composite", "composite-local", "composite-gap"}:
+            raise RuntimeError("sample rejection requires classifier diagnostics and classifier-confidence/composite/composite-local/composite-gap selection")
         candidate_labels = np.repeat(labels, selection_factor)
+        if eval_initial_states is not None:
+            candidate_initial_states = np.repeat(eval_initial_states, selection_factor, axis=0)
         print(f"Generating {selection_factor} {config.sample_selection_metric}-ranked candidates per requested sample")
+    sample_seed = int(args.eval_fixed_source_seed) if args.eval_fixed_source_seed is not None else int(args.seed) + 1
     result = simulate_direct_flux_generation(
         model,
         candidate_labels,
         num_steps=int(args.sample_steps),
         deterministic=bool(args.deterministic_sampling),
         device=device,
-        seed=int(args.seed) + 1,
+        seed=sample_seed,
         use_amp=not bool(args.no_amp),
         show_progress=not bool(args.no_progress),
+        initial_states=candidate_initial_states,
         source_images=dataset.train_images,
         source_labels=dataset.train_labels,
     )
@@ -5106,6 +5995,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             report_path=args.out_dir / "experiment10_selection_report.csv",
         )
 
+    if bool(args.save_eval_source_batch) and result.sources is not None:
+        eval_path = args.out_dir / "experiment10_eval_source_batch.npz"
+        np.savez_compressed(eval_path, labels=result.labels, sources=result.sources)
+        print(f"Saved fixed evaluation source batch: {eval_path}")
+
     print("Generation complete; saving run outputs")
     ckpt_path = args.out_dir / "experiment10_direct_flux_mnist.pt"
     samples_path = args.out_dir / "experiment10_samples.npz"
@@ -5117,6 +6011,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         terminal_classifier,
         grid_size=int(config.grid_size),
         device=device,
+    )
+    local_final_metrics = local_shape_metrics_np(
+        result.samples,
+        result.labels,
+        class_shape_stats,
+        grid_size=int(config.grid_size),
+        negative_space_mode=str(config.terminal_negative_space_mode),
+        negative_space_threshold=float(config.terminal_negative_space_threshold),
+        negative_space_temperature=float(config.terminal_negative_space_temperature),
+        gap_threshold=float(config.terminal_gap_threshold),
+        gap_dilate_radius=int(config.terminal_gap_dilate_radius),
+        extra_support_margin=float(config.terminal_extra_support_margin),
     )
     goodbad_metrics: dict[str, float | np.ndarray] = {}
     goodbad_path = args.out_dir / "samples_goodbad.txt"
@@ -5143,6 +6049,20 @@ def main(argv: Sequence[str] | None = None) -> None:
             classifier_metrics=classifier_metrics,
             grid_size=int(config.grid_size),
         )
+    write_local_shape_report(
+        args.out_dir / "experiment10_local_shape_report.csv",
+        result.samples,
+        result.labels,
+        class_shape_stats,
+        classifier_metrics=classifier_metrics,
+        grid_size=int(config.grid_size),
+        negative_space_mode=str(config.terminal_negative_space_mode),
+        negative_space_threshold=float(config.terminal_negative_space_threshold),
+        negative_space_temperature=float(config.terminal_negative_space_temperature),
+        gap_threshold=float(config.terminal_gap_threshold),
+        gap_dilate_radius=int(config.terminal_gap_dilate_radius),
+        extra_support_margin=float(config.terminal_extra_support_margin),
+    )
     source_metrics = source_batch_diagnostics(
         result.sources if result.sources is not None else result.samples,
         requested_labels=result.labels,
@@ -5210,6 +6130,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         class_entropy_q75=np.asarray(class_shape_stats.get("entropy_q75", []), dtype=np.float64),
         class_tv_q25=np.asarray(class_shape_stats.get("tv_q25", []), dtype=np.float64),
         class_maxmass_q25=np.asarray(class_shape_stats.get("maxmass_q25", []), dtype=np.float64),
+        local_support_loss=np.asarray(local_final_metrics.get("local_support_loss", []), dtype=np.float64),
+        local_edge_loss=np.asarray(local_final_metrics.get("local_edge_loss", []), dtype=np.float64),
+        negative_space_mass=np.asarray(local_final_metrics.get("negative_space_mass", []), dtype=np.float64),
+        strict_negative_space_mass=np.asarray(local_final_metrics.get("strict_negative_space_mass", []), dtype=np.float64),
+        gap_mass=np.asarray(local_final_metrics.get("gap_mass", []), dtype=np.float64),
+        missing_support_loss=np.asarray(local_final_metrics.get("missing_support_loss", []), dtype=np.float64),
+        extra_support_loss=np.asarray(local_final_metrics.get("extra_support_loss", []), dtype=np.float64),
+        class_local_support_mean=np.asarray(class_shape_stats.get("local_support_mean", []), dtype=np.float64),
+        class_local_support_q90=np.asarray(class_shape_stats.get("local_support_q90", []), dtype=np.float64),
+        class_local_edge_mean=np.asarray(class_shape_stats.get("local_edge_mean", []), dtype=np.float64),
+        class_local_negative_space=np.asarray(class_shape_stats.get("local_negative_space", []), dtype=np.float64),
         human_good_rate=np.asarray([float(goodbad_metrics.get("human_good_rate", np.nan))], dtype=np.float64),
         human_good_by_label=np.asarray(goodbad_metrics.get("human_good_by_label", []), dtype=np.float64),
         human_bad_count_by_label=np.asarray(goodbad_metrics.get("human_bad_count_by_label", []), dtype=np.int64),

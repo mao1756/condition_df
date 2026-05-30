@@ -512,3 +512,285 @@ For presentation-quality grids, add:
 
 The composite selector writes `experiment10_selection_report.csv`, and if
 `samples_goodbad.txt` exists the run also writes `experiment10_goodbad_report.csv`.
+
+### Experiment 10o: local terminal shape and gap diagnostics
+
+Experiment 10o extends 10n with a blurred low-resolution local terminal shape
+loss.  The new loss compares terminal rollout endpoints with the matched target
+at low resolution and penalizes mass in classwise negative-space masks.  This is
+intended to reduce recurring local topology failures such as closed-bottom 9s,
+5-to-8 crossings, and melting strokes without reintroducing checkerboard.
+
+New options include:
+
+```text
+--terminal-local-shape-loss-weight
+--terminal-target-support-weight
+--terminal-target-edge-weight
+--terminal-negative-space-weight
+--terminal-local-shape-size
+--terminal-local-shape-blur-sigma
+--sample-selection-metric composite-local
+--selection-local-support-weight
+--selection-local-edge-weight
+--selection-negative-space-weight
+```
+
+Recommended first raw-quality run:
+
+```powershell
+.venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
+  --data-root mnist_data `
+  --run-name 10o-local-terminal-shape-raw `
+  --target-mode poisson-ot-flow `
+  --source-mode lowfreq `
+  --condition-on-source `
+  --ot-match-mode nearest `
+  --free-aware-target `
+  --sde-curriculum `
+  --sde-ramp-steps 3000 `
+  --target-free-weight 0.015 `
+  --target-noise-weight 0.002 `
+  --velocity-target mixed `
+  --on-policy-use-free `
+  --on-policy-use-noise `
+  --on-policy-mode replay `
+  --on-policy-cache-mode trajectory `
+  --on-policy-cache-terminal-fraction 0.35 `
+  --on-policy-target-mode safe-residual `
+  --ema-decay 0.999 `
+  --use-ema-for-sampling `
+  --use-ema-for-cache `
+  --rollout-loss-weight 0.15 `
+  --rollout-loss-steps 6 `
+  --rollout-image-grad-loss-weight 0.03 `
+  --rollout-endpoint-l2-weight 0 `
+  --rollout-endpoint-bce-weight 0 `
+  --rollout-endpoint-tv-weight 0 `
+  --terminal-shape-loss-weight 0.03 `
+  --terminal-shape-entropy-weight 1.0 `
+  --terminal-shape-tv-weight 1.0 `
+  --terminal-shape-maxmass-weight 0.5 `
+  --terminal-local-shape-loss-weight 0.02 `
+  --terminal-target-support-weight 1.0 `
+  --terminal-target-edge-weight 0.5 `
+  --terminal-negative-space-weight 0.5 `
+  --terminal-local-shape-size 14 `
+  --terminal-local-shape-blur-sigma 0.7 `
+  --use-classifier-diagnostics `
+  --classifier-loss-mode off `
+  --upsample-mode resize-conv `
+  --flux-parameterization projected `
+  --curl-loss-weight 0.01 `
+  --checkerboard-loss-weight 0.001 `
+  --stochastic-step-loss `
+  --adaptive-sampling `
+  --train-steps 8000 `
+  --batch-size 256 `
+  --base-channels 32 `
+  --sample-steps 256 `
+  --num-samples 64 `
+  --save-ablation-samples `
+  --save-process-figure
+```
+
+For presentation-quality grids, add:
+
+```powershell
+  --sample-rejection-factor 4 `
+  --sample-selection-metric composite-local
+```
+
+The local diagnostics are saved in `experiment10_local_shape_report.csv`.
+
+### Experiment 10p: one-sided gap/local diagnostics
+
+Experiment 10p keeps 10n/10o diagnostics but changes the local terminal objective to avoid
+smoothing valid stroke variation.  The old symmetric local-shape training loss remains available
+but is not the recommended default.  New one-sided losses target missing support, extra support,
+and explicit low-resolution gap mass near target strokes.  Negative-space diagnostics now support
+a stricter high-quantile class mask.
+
+New options include:
+
+```text
+--terminal-negative-space-mode mean|strict
+--terminal-negative-space-threshold
+--terminal-negative-space-temperature
+--terminal-gap-loss-weight
+--terminal-gap-threshold
+--terminal-gap-dilate-radius
+--terminal-missing-support-weight
+--terminal-extra-support-weight
+--terminal-extra-support-margin
+--sample-selection-metric composite-gap
+--selection-gap-weight
+--selection-extra-support-weight
+--save-eval-source-batch
+--eval-source-batch-path
+--eval-fixed-source-seed
+```
+
+Recommended first raw-quality run:
+
+```powershell
+.venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
+  --data-root mnist_data `
+  --run-name 10p-gap-diagnostics-raw `
+  --target-mode poisson-ot-flow `
+  --source-mode lowfreq `
+  --condition-on-source `
+  --ot-match-mode nearest `
+  --free-aware-target `
+  --sde-curriculum `
+  --sde-ramp-steps 3000 `
+  --target-free-weight 0.015 `
+  --target-noise-weight 0.002 `
+  --velocity-target mixed `
+  --on-policy-use-free `
+  --on-policy-use-noise `
+  --on-policy-mode replay `
+  --on-policy-cache-mode trajectory `
+  --on-policy-cache-terminal-fraction 0.35 `
+  --on-policy-target-mode safe-residual `
+  --ema-decay 0.999 `
+  --use-ema-for-sampling `
+  --use-ema-for-cache `
+  --rollout-loss-weight 0.15 `
+  --rollout-loss-steps 6 `
+  --rollout-image-grad-loss-weight 0.03 `
+  --rollout-endpoint-l2-weight 0 `
+  --rollout-endpoint-bce-weight 0 `
+  --rollout-endpoint-tv-weight 0 `
+  --terminal-shape-loss-weight 0.03 `
+  --terminal-shape-entropy-weight 1.0 `
+  --terminal-shape-tv-weight 1.0 `
+  --terminal-shape-maxmass-weight 0.5 `
+  --terminal-local-shape-loss-weight 0 `
+  --terminal-gap-loss-weight 0.005 `
+  --terminal-missing-support-weight 0.005 `
+  --terminal-extra-support-weight 0.002 `
+  --terminal-negative-space-mode strict `
+  --terminal-negative-space-threshold 0.08 `
+  --terminal-gap-threshold 0.12 `
+  --terminal-gap-dilate-radius 1 `
+  --use-classifier-diagnostics `
+  --classifier-loss-mode off `
+  --upsample-mode resize-conv `
+  --flux-parameterization projected `
+  --curl-loss-weight 0.01 `
+  --checkerboard-loss-weight 0.001 `
+  --stochastic-step-loss `
+  --adaptive-sampling `
+  --train-steps 8000 `
+  --batch-size 256 `
+  --base-channels 32 `
+  --sample-steps 256 `
+  --num-samples 64 `
+  --save-ablation-samples `
+  --save-process-figure
+```
+
+For presentation-quality grids, add:
+
+```powershell
+  --sample-rejection-factor 4 `
+  --sample-selection-metric composite-gap
+```
+
+Use `--save-eval-source-batch` on one run and `--eval-source-batch-path <that npz>` on later
+runs to compare models on identical source masses and labels.
+
+### Experiment 10q: terminal-consistent local losses
+
+Experiment 10q keeps the 10p gap/local diagnostics but fixes the timing issue in terminal losses.
+Endpoint and local terminal losses are only applied to genuinely near-terminal rollout endpoints,
+or after a capped rollout toward tau=0.  The replay cache is biased toward the last few percent of
+the bridge, and an optional small terminal microbatch trains recurring hard labels without changing
+the whole data stream.
+
+New options include:
+
+```text
+--terminal-loss-mode fixed|near-terminal|to-terminal
+--terminal-rollout-max-steps
+--terminal-loss-every
+--terminal-rollout-batch-size
+--terminal-batch-prob
+--terminal-batch-size
+--terminal-tau-min-fraction
+--terminal-tau-max-fraction
+--hard-label-sampling
+--hard-labels 2,5,6,7,9
+--hard-label-prob
+```
+
+Recommended first raw-quality run:
+
+```powershell
+.venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
+  --data-root mnist_data `
+  --run-name 10q-terminal-consistent-raw `
+  --target-mode poisson-ot-flow `
+  --source-mode lowfreq `
+  --condition-on-source `
+  --ot-match-mode nearest `
+  --free-aware-target `
+  --sde-curriculum `
+  --sde-ramp-steps 3000 `
+  --target-free-weight 0.015 `
+  --target-noise-weight 0.002 `
+  --velocity-target mixed `
+  --on-policy-use-free `
+  --on-policy-use-noise `
+  --on-policy-mode replay `
+  --on-policy-cache-mode trajectory `
+  --on-policy-cache-terminal-fraction 0.50 `
+  --on-policy-cache-terminal-min-tau 0.00 `
+  --on-policy-cache-terminal-max-tau 0.08 `
+  --on-policy-target-mode safe-residual `
+  --ema-decay 0.999 `
+  --use-ema-for-sampling `
+  --use-ema-for-cache `
+  --rollout-loss-weight 0.15 `
+  --rollout-loss-steps 6 `
+  --rollout-image-grad-loss-weight 0.03 `
+  --terminal-loss-mode near-terminal `
+  --terminal-rollout-max-steps 16 `
+  --terminal-loss-every 4 `
+  --terminal-loss-tau-max-fraction 0.06 `
+  --terminal-batch-prob 0.25 `
+  --terminal-batch-size 64 `
+  --terminal-tau-min-fraction 0.00 `
+  --terminal-tau-max-fraction 0.06 `
+  --terminal-shape-loss-weight 0.03 `
+  --terminal-shape-entropy-weight 1.0 `
+  --terminal-shape-tv-weight 1.0 `
+  --terminal-shape-maxmass-weight 0.5 `
+  --terminal-local-shape-loss-weight 0 `
+  --terminal-gap-loss-weight 0.02 `
+  --terminal-missing-support-weight 0.01 `
+  --terminal-extra-support-weight 0.006 `
+  --terminal-negative-space-mode strict `
+  --terminal-negative-space-threshold 0.08 `
+  --terminal-gap-threshold 0.12 `
+  --terminal-gap-dilate-radius 1 `
+  --hard-label-sampling `
+  --hard-labels 2,5,6,7,9 `
+  --hard-label-prob 0.35 `
+  --use-classifier-diagnostics `
+  --classifier-loss-mode off `
+  --upsample-mode resize-conv `
+  --flux-parameterization projected `
+  --curl-loss-weight 0.01 `
+  --checkerboard-loss-weight 0.001 `
+  --stochastic-step-loss `
+  --adaptive-sampling `
+  --train-steps 8000 `
+  --batch-size 256 `
+  --base-channels 32 `
+  --sample-steps 256 `
+  --num-samples 64 `
+  --save-ablation-samples `
+  --save-process-figure
+```
