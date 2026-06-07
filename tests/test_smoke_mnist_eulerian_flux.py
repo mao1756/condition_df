@@ -63,6 +63,9 @@ from mnist.eulerian_flux_mnist import (
     simulate_teacher_flux_rollout,
     source_batch_diagnostics,
     terminal_conditioning_flux_torch,
+    sample_terminal_flux_training_batch,
+    _trajectory_snapshot_steps,
+    natural_horizon,
     train_direct_flux_model,
     training_target_flux_torch,
 )
@@ -288,6 +291,7 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
         extra_support_loss,
         gap_loss,
         strict_negative_space_loss,
+        foreground_recall_loss,
     ) = direct_flux_rollout_consistency_loss(model, batch, max_items=2, steps=1, return_extra=True)
     assert torch.isfinite(rollout_loss)
     assert torch.isfinite(endpoint_l2)
@@ -312,6 +316,7 @@ def test_anti_checkerboard_projected_flux_and_resize_conv_modes() -> None:
     assert torch.isfinite(extra_support_loss)
     assert torch.isfinite(gap_loss)
     assert torch.isfinite(strict_negative_space_loss)
+    assert torch.isfinite(foreground_recall_loss)
     loss, metrics = direct_flux_matching_loss(model, batch)
     assert torch.isfinite(loss)
     for key in ["rollout_loss", "rollout_image_grad_loss", "target_tv_loss", "terminal_shape_loss", "terminal_gap_shape_loss", "terminal_gap_loss", "terminal_strict_negative_space_loss", "image_grad_loss", "curl_loss", "checkerboard_loss"]:
@@ -365,6 +370,14 @@ def test_replay_cache_and_process_figure_smoke(tmp_path) -> None:
     )
     assert replay.size == 4
     assert replay.mode == "trajectory"
+    # In very short smoke-test horizons, the configured terminal tau window can
+    # be unreachable after de-duplicating integer prefix steps.  The stable cache
+    # builder should report that honestly rather than forcing duplicate terminal
+    # snapshots.
+    assert replay.terminal_snapshot_count == 0
+    assert replay.regular_snapshot_count == 2
+    assert abs(replay.terminal_requested_fraction - 0.0) < 1e-6
+    assert abs(replay.terminal_actual_fraction - replay.terminal_fraction) < 1e-6
     assert 0.0 <= replay.tau_min <= replay.tau_mean <= replay.tau_max <= 1.0
     assert ON_POLICY_CACHE_MODES == ("independent", "trajectory")
     assert "safe-residual" in ON_POLICY_TARGET_MODES

@@ -31,7 +31,7 @@ predict the h-transform conditioning flux, i.e. the desired total transport
 flux minus the free Dirichlet drift, while on-policy/step losses can use the
 same free/noisy SDE weights as the sampler.  The default remains learned-only
 for quick deterministic debugging; pass the SDE curriculum/free-aware flags to
-train and sample with stochastic dynamics.  Experiment 10h merges the rollout-sharpening machinery back into stochastic training, replaces transposed-convolution upsampling by resize-conv by default, and can project learned edge fluxes to their minimum-energy divergence-equivalent part to suppress checkerboard/curl artifacts.  Experiment 10i adds a replay on-policy cache, cheaper projected-flux losses, cached Poisson denominators, rollout-endpoint sharpening losses, timing diagnostics, and diffusion-process figures. Experiment 10j replaces independent replay rollouts with trajectory-snapshot replay, adds safe residual replay targets, and optionally uses EMA weights for cache building and sampling. Experiment 10k adds terminal classifier diagnostics/losses, terminal-biased replay snapshots, endpoint losses, optional classifier-based sample selection, and good/bad sample annotation analysis. Experiment 10l makes terminal/classifier losses safe by gating them to late-terminal states, separating classifier diagnostics from classifier training, and disabling unsafe endpoint TV by default.
+train and sample with stochastic dynamics.  Experiment 10h merges the rollout-sharpening machinery back into stochastic training, replaces transposed-convolution upsampling by resize-conv by default, and can project learned edge fluxes to their minimum-energy divergence-equivalent part to suppress checkerboard/curl artifacts.  Experiment 10i adds a replay on-policy cache, cheaper projected-flux losses, cached Poisson denominators, rollout-endpoint sharpening losses, timing diagnostics, and diffusion-process figures. Experiment 10j replaces independent replay rollouts with trajectory-snapshot replay, adds safe residual replay targets, and optionally uses EMA weights for cache building and sampling. Experiment 10k adds terminal classifier diagnostics/losses, terminal-biased replay snapshots, endpoint losses, optional classifier-based sample selection, and good/bad sample annotation analysis. Experiment 10l makes terminal/classifier losses safe by gating them to late-terminal states, separating classifier diagnostics from classifier training, and disabling unsafe endpoint TV by default. Experiment 10r attempted more aggressive terminal replay/targets. Experiment 10s reverts the unstable parts: terminal batches use the global/mixed flux teacher by default, trajectory replay de-duplicates terminal snapshots again, and rollout-to-zero is no longer triggered implicitly by terminal microbatches.
 """
 
 import argparse
@@ -268,6 +268,8 @@ class DirectFluxMNISTConfig:
     terminal_rollout_max_steps: int = 16
     terminal_loss_every: int = 4
     terminal_rollout_batch_size: int = 32
+    terminal_target_mode: str = "mixed"
+    terminal_batch_rollout_mode: str = "fixed"
     terminal_batch_prob: float = 0.25
     terminal_batch_size: int = 64
     terminal_tau_min_fraction: float = 0.00
@@ -291,7 +293,7 @@ class DirectFluxMNISTConfig:
     terminal_local_shape_loss_weight: float = 0.0
     terminal_target_support_weight: float = 1.0
     terminal_target_edge_weight: float = 0.5
-    terminal_negative_space_weight: float = 0.5
+    terminal_negative_space_weight: float = 0.0
     # Experiment 10p: safer one-sided/gap local losses and stricter negative-space diagnostics.
     terminal_negative_space_mode: str = "strict"
     terminal_negative_space_threshold: float = 0.08
@@ -302,6 +304,16 @@ class DirectFluxMNISTConfig:
     terminal_missing_support_weight: float = 0.0
     terminal_extra_support_weight: float = 0.0
     terminal_extra_support_margin: float = 0.10
+    # Experiment 10s: foreground recall and label-gated local topology losses.
+    terminal_foreground_recall_weight: float = 0.0
+    terminal_foreground_threshold: float = 0.18
+    terminal_foreground_temperature: float = 0.04
+    terminal_foreground_size: int = 14
+    terminal_foreground_blur_sigma: float = 0.7
+    terminal_gap_labels: tuple[int, ...] = (5, 9)
+    terminal_extra_support_labels: tuple[int, ...] = (5, 9)
+    terminal_foreground_labels: tuple[int, ...] = (2, 3, 6, 9)
+    terminal_local_loss_max_ratio: float = 0.25
     terminal_local_shape_size: int = 14
     terminal_local_shape_blur_sigma: float = 0.7
     selection_classifier_weight: float = 1.0
@@ -314,6 +326,7 @@ class DirectFluxMNISTConfig:
     selection_negative_space_weight: float = 0.5
     selection_gap_weight: float = 0.5
     selection_extra_support_weight: float = 0.25
+    selection_foreground_weight: float = 0.5
     curl_loss_weight: float = 0.01
     edge_laplacian_loss_weight: float = 0.0
     checkerboard_loss_weight: float = 0.001
@@ -501,6 +514,10 @@ class DirectFluxMNISTConfig:
             raise ValueError("terminal_loss_ramp_steps must be non-negative")
         if self.terminal_loss_mode not in TERMINAL_LOSS_MODES:
             raise ValueError(f"terminal_loss_mode must be one of {TERMINAL_LOSS_MODES}")
+        if self.terminal_target_mode not in VELOCITY_TARGET_MODES:
+            raise ValueError(f"terminal_target_mode must be one of {VELOCITY_TARGET_MODES}")
+        if self.terminal_batch_rollout_mode not in {"fixed", "to-zero"}:
+            raise ValueError("terminal_batch_rollout_mode must be 'fixed' or 'to-zero'")
         if self.terminal_rollout_max_steps <= 0:
             raise ValueError("terminal_rollout_max_steps must be positive")
         if self.terminal_loss_every <= 0:
@@ -551,6 +568,11 @@ class DirectFluxMNISTConfig:
             "terminal_gap_loss_weight",
             "terminal_missing_support_weight",
             "terminal_extra_support_weight",
+            "terminal_foreground_recall_weight",
+            "terminal_foreground_threshold",
+            "terminal_foreground_temperature",
+            "terminal_foreground_blur_sigma",
+            "terminal_local_loss_max_ratio",
             "terminal_local_shape_blur_sigma",
             "selection_classifier_weight",
             "selection_entropy_weight",
@@ -562,6 +584,7 @@ class DirectFluxMNISTConfig:
             "selection_negative_space_weight",
             "selection_gap_weight",
             "selection_extra_support_weight",
+            "selection_foreground_weight",
         ):
             value = float(getattr(self, name))
             if value < 0.0 or not math.isfinite(value):
@@ -578,6 +601,15 @@ class DirectFluxMNISTConfig:
             raise ValueError("terminal_gap_dilate_radius must be non-negative")
         if self.terminal_extra_support_margin < 0.0:
             raise ValueError("terminal_extra_support_margin must be non-negative")
+        if self.terminal_foreground_size <= 0:
+            raise ValueError("terminal_foreground_size must be positive")
+        for name, digits in (
+            ("terminal_gap_labels", self.terminal_gap_labels),
+            ("terminal_extra_support_labels", self.terminal_extra_support_labels),
+            ("terminal_foreground_labels", self.terminal_foreground_labels),
+        ):
+            if any((int(label) < 0 or int(label) > 9) for label in digits):
+                raise ValueError(f"{name} must contain digits in [0, 9]")
         if self.rollout_loss_weight < 0.0:
             raise ValueError("rollout_loss_weight must be non-negative")
         if self.rollout_loss_steps < 0:
@@ -714,6 +746,7 @@ class FluxTrainingBatch:
     step_index: int | None = None
     train_free_weight: float = 0.0
     train_noise_weight: float = 0.0
+    is_terminal_batch: bool = False
 
 
 @dataclass
@@ -728,6 +761,10 @@ class OnPolicyReplayCache:
     tau_mean: float = float("nan")
     tau_max: float = float("nan")
     terminal_fraction: float = float("nan")
+    terminal_requested_fraction: float = float("nan")
+    terminal_actual_fraction: float = float("nan")
+    terminal_snapshot_count: int = 0
+    regular_snapshot_count: int = 0
 
     @property
     def size(self) -> int:
@@ -1392,6 +1429,8 @@ def local_shape_metrics_np(
     gap_threshold: float = 0.12,
     gap_dilate_radius: int = 1,
     extra_support_margin: float = 0.10,
+    foreground_threshold: float = 0.18,
+    foreground_temperature: float = 0.04,
 ) -> dict[str, np.ndarray]:
     """Per-sample local support/edge/gap/negative-space penalties."""
     count = int(np.asarray(samples).reshape(np.asarray(samples).shape[0], -1).shape[0])
@@ -1405,6 +1444,8 @@ def local_shape_metrics_np(
             "gap_mass": z,
             "missing_support_loss": z,
             "extra_support_loss": z,
+            "foreground_recall_loss": z,
+            "foreground_mass_ratio": z,
         }
     support_ref_all = np.asarray(shape_stats["local_support_mean"], dtype=np.float64)
     size = int(support_ref_all.shape[-1])
@@ -1430,6 +1471,11 @@ def local_shape_metrics_np(
     gap_mass = np.mean(maps["local_support"] * gap_mask, axis=(1, 2))
     missing = np.mean(np.maximum(0.0, support_ref - maps["local_support"]) ** 2, axis=(1, 2))
     extra = np.mean(np.maximum(0.0, maps["local_support"] - support_ref - float(extra_support_margin)) ** 2, axis=(1, 2))
+    fg_temp = max(float(foreground_temperature), 1e-6)
+    foreground = 1.0 / (1.0 + np.exp(-(support_ref - float(foreground_threshold)) / fg_temp))
+    fg_denom = np.maximum(foreground.sum(axis=(1, 2)), 1e-6)
+    foreground_recall = (foreground * np.maximum(0.0, support_ref - maps["local_support"]) ** 2).sum(axis=(1, 2)) / fg_denom
+    foreground_mass = (foreground * maps["local_support"]).sum(axis=(1, 2)) / np.maximum((foreground * support_ref).sum(axis=(1, 2)), 1e-6)
     return {
         "local_support_loss": support_loss,
         "local_edge_loss": edge_loss,
@@ -1438,6 +1484,8 @@ def local_shape_metrics_np(
         "gap_mass": gap_mass,
         "missing_support_loss": missing,
         "extra_support_loss": extra,
+        "foreground_recall_loss": foreground_recall,
+        "foreground_mass_ratio": foreground_mass,
     }
 
 def compute_class_shape_statistics(images: np.ndarray, labels: np.ndarray, *, grid_size: int = 28, local_shape_size: int = 14, local_blur_sigma: float = 0.7) -> dict[str, np.ndarray]:
@@ -1533,15 +1581,22 @@ def terminal_shape_loss_torch(
     total = float(entropy_weight) * ent_loss + float(tv_weight) * tv_loss + float(maxmass_weight) * max_loss
     return total, ent_loss, tv_loss, max_loss
 
-def _local_shape_maps_torch(states: Tensor, config: DirectFluxMNISTConfig) -> tuple[Tensor, Tensor]:
+def _local_shape_maps_torch(
+    states: Tensor,
+    config: DirectFluxMNISTConfig,
+    *,
+    size: int | None = None,
+    blur_sigma: float | None = None,
+) -> tuple[Tensor, Tensor]:
     """Return blurred low-res support and edge maps for mass states."""
     n = int(config.grid_size)
-    size = int(config.terminal_local_shape_size)
+    resolved_size = int(config.terminal_local_shape_size if size is None else size)
+    resolved_sigma = float(config.terminal_local_shape_blur_sigma if blur_sigma is None else blur_sigma)
     density = (states.reshape(-1, 1, n, n) * float(n * n)).clamp(0.0, 1.0)
-    if float(config.terminal_local_shape_blur_sigma) > 0.0:
-        density = _periodic_gaussian_blur_torch(density, sigma=float(config.terminal_local_shape_blur_sigma))
-    if size != n:
-        low = F.interpolate(density, size=(size, size), mode="area")
+    if resolved_sigma > 0.0:
+        density = _periodic_gaussian_blur_torch(density, sigma=resolved_sigma)
+    if resolved_size != n:
+        low = F.interpolate(density, size=(resolved_size, resolved_size), mode="area")
     else:
         low = density
     low = low.clamp(0.0, 1.0)
@@ -1580,6 +1635,54 @@ def _strict_negative_space_mask_torch(labels: Tensor, shape_stats: dict[str, Ten
     return fallback
 
 
+
+
+def _label_gate_torch(labels: Tensor, allowed: tuple[int, ...]) -> Tensor:
+    """Return a float mask selecting labels in ``allowed``; empty means all labels."""
+    if len(tuple(allowed)) == 0:
+        return torch.ones_like(labels, dtype=torch.float32)
+    y = labels.to(dtype=torch.long).reshape(-1)
+    mask = torch.zeros_like(y, dtype=torch.bool)
+    for label in tuple(int(x) for x in allowed):
+        mask = mask | (y == int(label))
+    return mask.to(dtype=torch.float32)
+
+
+def terminal_foreground_recall_loss_torch(
+    states: Tensor,
+    targets: Tensor,
+    labels: Tensor,
+    config: DirectFluxMNISTConfig,
+    *,
+    weights: Tensor,
+) -> Tensor:
+    """Low-res one-sided recall loss on high-confidence target foreground.
+
+    This focuses on missing/faded strokes and avoids symmetric support matching.
+    It is label-gated by ``terminal_foreground_labels`` and terminal-gated by
+    the caller-supplied weights.
+    """
+    pred_low, _ = _local_shape_maps_torch(
+        states,
+        config,
+        size=int(config.terminal_foreground_size),
+        blur_sigma=float(config.terminal_foreground_blur_sigma),
+    )
+    with torch.no_grad():
+        target_low, _ = _local_shape_maps_torch(
+            targets,
+            config,
+            size=int(config.terminal_foreground_size),
+            blur_sigma=float(config.terminal_foreground_blur_sigma),
+        )
+        temp = max(float(config.terminal_foreground_temperature), 1e-6)
+        foreground = torch.sigmoid((target_low - float(config.terminal_foreground_threshold)) / temp)
+        denom = foreground.flatten(1).sum(dim=1).clamp_min(1e-6)
+    recall_per = (foreground * F.relu(target_low - pred_low).square()).flatten(1).sum(dim=1) / denom
+    label_gate = _label_gate_torch(labels, tuple(config.terminal_foreground_labels)).to(device=states.device, dtype=states.dtype)
+    return _masked_mean_torch(recall_per, weights * label_gate)
+
+
 def terminal_gap_shape_loss_torch(
     states: Tensor,
     targets: Tensor,
@@ -1601,9 +1704,12 @@ def terminal_gap_shape_loss_torch(
     extra_per = F.relu(pred_low - target_low - float(config.terminal_extra_support_margin)).square().flatten(1).mean(dim=1)
     gap_per = (pred_low * gap_mask).flatten(1).mean(dim=1)
     strict_negative_per = (pred_low * strict_negative).flatten(1).mean(dim=1)
-    missing_loss = _masked_mean_torch(missing_per, weights)
-    extra_loss = _masked_mean_torch(extra_per, weights)
-    gap_loss = _masked_mean_torch(gap_per, weights)
+    missing_gate = _label_gate_torch(labels, tuple(config.terminal_foreground_labels)).to(device=states.device, dtype=states.dtype)
+    extra_gate = _label_gate_torch(labels, tuple(config.terminal_extra_support_labels)).to(device=states.device, dtype=states.dtype)
+    gap_gate = _label_gate_torch(labels, tuple(config.terminal_gap_labels)).to(device=states.device, dtype=states.dtype)
+    missing_loss = _masked_mean_torch(missing_per, weights * missing_gate)
+    extra_loss = _masked_mean_torch(extra_per, weights * extra_gate)
+    gap_loss = _masked_mean_torch(gap_per, weights * gap_gate)
     strict_negative_loss = _masked_mean_torch(strict_negative_per, weights)
     total = (
         float(config.terminal_missing_support_weight) * missing_loss
@@ -1886,6 +1992,8 @@ def write_local_shape_report(
                 "gap_mass",
                 "missing_support_loss",
                 "extra_support_loss",
+                "foreground_recall_loss",
+                "foreground_mass_ratio",
                 "selection_score",
             ],
         )
@@ -1909,6 +2017,8 @@ def write_local_shape_report(
                     "gap_mass": float(local["gap_mass"][i]),
                     "missing_support_loss": float(local["missing_support_loss"][i]),
                     "extra_support_loss": float(local["extra_support_loss"][i]),
+                    "foreground_recall_loss": float(local["foreground_recall_loss"][i]),
+                    "foreground_mass_ratio": float(local["foreground_mass_ratio"][i]),
                     "selection_score": "" if scores is None or scores.shape[0] <= i else float(scores[i]),
                 }
             )
@@ -1932,12 +2042,15 @@ def selection_scores_for_candidates(
     negative_space_weight: float = 0.5,
     gap_weight: float = 0.5,
     extra_support_weight: float = 0.25,
+    foreground_weight: float = 0.5,
     negative_space_mode: str = "strict",
     negative_space_threshold: float = 0.08,
     negative_space_temperature: float = 0.03,
     gap_threshold: float = 0.12,
     gap_dilate_radius: int = 1,
     extra_support_margin: float = 0.10,
+    foreground_threshold: float = 0.18,
+    foreground_temperature: float = 0.04,
 ) -> np.ndarray:
     """Score candidate samples; larger is better."""
     labels = np.asarray(labels, dtype=np.int64).reshape(-1).clip(0, 9)
@@ -1990,6 +2103,8 @@ def selection_scores_for_candidates(
             gap_threshold=float(gap_threshold),
             gap_dilate_radius=int(gap_dilate_radius),
             extra_support_margin=float(extra_support_margin),
+            foreground_threshold=float(foreground_threshold),
+            foreground_temperature=float(foreground_temperature),
         )
         if metric == "composite-local":
             score -= float(local_support_weight) * local["local_support_loss"]
@@ -1998,6 +2113,7 @@ def selection_scores_for_candidates(
         else:
             score -= float(local_support_weight) * local["missing_support_loss"]
             score -= float(extra_support_weight) * local["extra_support_loss"]
+            score -= float(foreground_weight) * local["foreground_recall_loss"]
             score -= float(gap_weight) * local["gap_mass"]
             score -= float(negative_space_weight) * local["strict_negative_space_mass"]
             score -= float(local_edge_weight) * local["local_edge_loss"]
@@ -2037,12 +2153,15 @@ def select_generation_result_by_classifier(
         negative_space_weight = 0.5
         gap_weight = 0.5
         extra_support_weight = 0.25
+        foreground_weight = 0.5
         neg_mode = "strict"
         neg_threshold = 0.08
         neg_temp = 0.03
         gap_threshold = 0.12
         gap_radius = 1
         extra_margin = 0.10
+        fg_threshold = 0.18
+        fg_temp = 0.04
     else:
         classifier_weight = float(config.selection_classifier_weight)
         entropy_weight = float(config.selection_entropy_weight)
@@ -2054,12 +2173,15 @@ def select_generation_result_by_classifier(
         negative_space_weight = float(config.selection_negative_space_weight)
         gap_weight = float(config.selection_gap_weight)
         extra_support_weight = float(config.selection_extra_support_weight)
+        foreground_weight = float(config.selection_foreground_weight)
         neg_mode = str(config.terminal_negative_space_mode)
         neg_threshold = float(config.terminal_negative_space_threshold)
         neg_temp = float(config.terminal_negative_space_temperature)
         gap_threshold = float(config.terminal_gap_threshold)
         gap_radius = int(config.terminal_gap_dilate_radius)
         extra_margin = float(config.terminal_extra_support_margin)
+        fg_threshold = float(config.terminal_foreground_threshold)
+        fg_temp = float(config.terminal_foreground_temperature)
     scores = selection_scores_for_candidates(
         result.samples,
         result.labels,
@@ -2077,12 +2199,15 @@ def select_generation_result_by_classifier(
         negative_space_weight=negative_space_weight,
         gap_weight=gap_weight,
         extra_support_weight=extra_support_weight,
+        foreground_weight=foreground_weight,
         negative_space_mode=neg_mode,
         negative_space_threshold=neg_threshold,
         negative_space_temperature=neg_temp,
         gap_threshold=gap_threshold,
         gap_dilate_radius=gap_radius,
         extra_support_margin=extra_margin,
+        foreground_threshold=fg_threshold,
+        foreground_temperature=fg_temp,
     )
     chosen: list[int] = []
     for i in range(labels.size):
@@ -3195,10 +3320,16 @@ def _with_terminal_tau_window(batch: FluxTrainingBatch, config: DirectFluxMNISTC
         source_indices=batch.source_indices,
         source_labels=batch.source_labels,
         target_indices=batch.target_indices,
+        # Keep the primary flux teacher on the global velocity target.  The
+        # 10r hotfix found that forcing all near-terminal microbatches to
+        # safe-residual made the learned correction shrink and let free/noise
+        # dominate.  Dedicated terminal losses still see the near-terminal
+        # states through the ordinary masking/gating path.
         target_velocity_mode=batch.target_velocity_mode,
         step_index=batch.step_index,
         train_free_weight=batch.train_free_weight,
         train_noise_weight=batch.train_noise_weight,
+        is_terminal_batch=True,
     )
 
 
@@ -3320,14 +3451,14 @@ def direct_flux_rollout_consistency_loss(
     rollout_steps = int(config.rollout_loss_steps if steps is None else steps)
     if rollout_steps <= 0:
         z = batch.states.new_tensor(0.0)
-        return (z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
+        return (z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
     count = int(batch.states.shape[0])
     if max_items is None:
         max_items = int(config.rollout_loss_batch_size)
     count = min(count, int(max_items))
     if count <= 0:
         z = batch.states.new_tensor(0.0)
-        return (z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
+        return (z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z) if return_extra else (z, z)
     sl = slice(0, count)
     horizon = max(float(natural_horizon(config)), 1e-12)
     dt = horizon / float(max(int(config.num_steps), 1))
@@ -3337,9 +3468,14 @@ def direct_flux_rollout_consistency_loss(
     sources = batch.sources[sl]
     targets = batch.targets[sl]
     tau = batch.tau[sl]
-    if enable_terminal_losses and steps is None and str(config.terminal_loss_mode) == "to-terminal":
-        needed = int(torch.ceil((tau.max() / max(dt, 1e-12)).detach()).item())
-        rollout_steps = max(1, min(needed, int(config.terminal_rollout_max_steps)))
+    if enable_terminal_losses and steps is None:
+        # Only the explicit global to-terminal mode rolls all the way to tau=0.
+        # The 10r terminal-batch-specific to-zero path over-constrained a small
+        # near-terminal microbatch and collapsed the learned correction flux.
+        should_roll_to_zero = str(config.terminal_loss_mode) == "to-terminal"
+        if should_roll_to_zero:
+            needed = int(torch.ceil((tau.max() / max(dt, 1e-12)).detach()).item())
+            rollout_steps = max(1, min(needed, int(config.terminal_rollout_max_steps)))
     free_w = float(batch.train_free_weight) if bool(config.stochastic_step_loss) else 0.0
     for _ in range(rollout_steps):
         pred_flux = model.predict_flux(tau, pred_state, labels, sources)
@@ -3362,6 +3498,7 @@ def direct_flux_rollout_consistency_loss(
                 step_index=batch.step_index,
                 train_free_weight=batch.train_free_weight,
                 train_noise_weight=batch.train_noise_weight,
+                is_terminal_batch=batch.is_terminal_batch,
             )
             teacher_flux = training_target_flux_torch(teacher_batch, config)
             teacher_state = eulerian_flux_step_differentiable_torch(
@@ -3459,6 +3596,7 @@ def direct_flux_rollout_consistency_loss(
     extra_support_loss = pred_state.new_tensor(0.0)
     gap_loss = pred_state.new_tensor(0.0)
     strict_negative_space_loss = pred_state.new_tensor(0.0)
+    foreground_recall_loss = pred_state.new_tensor(0.0)
     if float(config.terminal_local_shape_loss_weight) > 0.0:
         local_shape_loss, local_support_loss, local_edge_loss, negative_space_loss = terminal_local_shape_loss_torch(
             pred_state,
@@ -3472,6 +3610,7 @@ def direct_flux_rollout_consistency_loss(
         float(config.terminal_gap_loss_weight) > 0.0
         or float(config.terminal_missing_support_weight) > 0.0
         or float(config.terminal_extra_support_weight) > 0.0
+        or float(config.terminal_foreground_recall_weight) > 0.0
     ):
         gap_shape_loss, missing_support_loss, extra_support_loss, gap_loss, strict_negative_space_loss = terminal_gap_shape_loss_torch(
             pred_state,
@@ -3481,6 +3620,15 @@ def direct_flux_rollout_consistency_loss(
             config,
             weights=terminal_mask.to(dtype=pred_state.dtype) * terminal_loss_scale,
         )
+        if float(config.terminal_foreground_recall_weight) > 0.0:
+            foreground_recall_loss = terminal_foreground_recall_loss_torch(
+                pred_state,
+                targets,
+                labels,
+                config,
+                weights=terminal_mask.to(dtype=pred_state.dtype) * terminal_loss_scale,
+            )
+            gap_shape_loss = gap_shape_loss + float(config.terminal_foreground_recall_weight) * foreground_recall_loss
     return (
         rollout_l2,
         endpoint_l2,
@@ -3506,6 +3654,7 @@ def direct_flux_rollout_consistency_loss(
         extra_support_loss,
         gap_loss,
         strict_negative_space_loss,
+        foreground_recall_loss,
     )
 
 
@@ -3553,6 +3702,7 @@ def direct_flux_matching_loss(
             or float(config.terminal_gap_loss_weight) > 0.0
             or float(config.terminal_missing_support_weight) > 0.0
             or float(config.terminal_extra_support_weight) > 0.0
+            or float(config.terminal_foreground_recall_weight) > 0.0
             or float(config.target_tv_loss_weight) > 0.0
             or float(config.target_entropy_loss_weight) > 0.0
         )
@@ -3620,6 +3770,7 @@ def direct_flux_matching_loss(
     terminal_extra_support_loss = pred_norm.new_tensor(0.0)
     terminal_gap_loss = pred_norm.new_tensor(0.0)
     terminal_strict_negative_space_loss = pred_norm.new_tensor(0.0)
+    terminal_foreground_recall_loss = pred_norm.new_tensor(0.0)
     target_tv_loss = pred_norm.new_tensor(0.0)
     terminal_active_fraction = pred_norm.new_tensor(0.0)
     terminal_tau_mean = pred_norm.new_tensor(float("nan"))
@@ -3648,6 +3799,7 @@ def direct_flux_matching_loss(
         or float(config.terminal_gap_loss_weight) > 0.0
         or float(config.terminal_missing_support_weight) > 0.0
         or float(config.terminal_extra_support_weight) > 0.0
+        or float(config.terminal_foreground_recall_weight) > 0.0
         or float(config.target_tv_loss_weight) > 0.0
     )
     should_rollout = (has_core_rollout_losses and rollout_due) or (has_terminal_losses and terminal_due)
@@ -3680,6 +3832,7 @@ def direct_flux_matching_loss(
             terminal_extra_support_loss,
             terminal_gap_loss,
             terminal_strict_negative_space_loss,
+            terminal_foreground_recall_loss,
         ) = direct_flux_rollout_consistency_loss(
             model,
             batch,
@@ -3690,6 +3843,16 @@ def direct_flux_matching_loss(
             enable_terminal_losses=terminal_due,
         )
 
+
+    terminal_local_loss_cap_scale = pred_norm.new_tensor(1.0)
+    if float(config.terminal_local_loss_max_ratio) > 0.0:
+        local_uncapped = (float(config.terminal_local_shape_loss_weight) * terminal_local_shape_loss) + terminal_gap_shape_loss
+        cap_ref = (float(config.rollout_loss_weight) * rollout_loss.detach()) + (float(config.terminal_shape_loss_weight) * terminal_shape_loss.detach())
+        cap_value = float(config.terminal_local_loss_max_ratio) * cap_ref.clamp_min(1e-4)
+        if bool((local_uncapped.detach() > cap_value).cpu()):
+            terminal_local_loss_cap_scale = (cap_value / local_uncapped.detach().clamp_min(1e-12)).to(dtype=pred_norm.dtype)
+            terminal_gap_shape_loss = terminal_gap_shape_loss * terminal_local_loss_cap_scale
+            terminal_local_shape_loss = terminal_local_shape_loss * terminal_local_loss_cap_scale
 
     curl_loss = flux_curl_torch(raw_pred_norm).square().mean()
     edge_lap_loss = edge_laplacian_energy_torch(raw_pred_norm)
@@ -3762,6 +3925,8 @@ def direct_flux_matching_loss(
         "terminal_extra_support_loss": float(terminal_extra_support_loss.detach().cpu()),
         "terminal_gap_loss": float(terminal_gap_loss.detach().cpu()),
         "terminal_strict_negative_space_loss": float(terminal_strict_negative_space_loss.detach().cpu()),
+        "terminal_foreground_recall_loss": float(terminal_foreground_recall_loss.detach().cpu()),
+        "terminal_local_loss_cap_scale": float(terminal_local_loss_cap_scale.detach().cpu()),
         "terminal_loss_active_fraction": float(terminal_active_fraction.detach().cpu()),
         "terminal_tau_mean": float(terminal_tau_mean.detach().cpu()),
         "terminal_loss_scale": float(terminal_loss_scale.detach().cpu()),
@@ -3903,6 +4068,7 @@ def _batch_to_device(batch: FluxTrainingBatch, device: torch.device, *, step_ind
         step_index=batch.step_index if step_index is None else int(step_index),
         train_free_weight=float(batch.train_free_weight),
         train_noise_weight=float(batch.train_noise_weight),
+        is_terminal_batch=bool(batch.is_terminal_batch),
     )
 
 
@@ -3929,6 +4095,7 @@ def _concat_training_batches(batches: list[FluxTrainingBatch], *, device: torch.
         step_index=step_index,
         train_free_weight=float(batches[0].train_free_weight),
         train_noise_weight=float(batches[0].train_noise_weight),
+        is_terminal_batch=any(bool(b.is_terminal_batch) for b in batches),
     )
 
 
@@ -3952,6 +4119,7 @@ def _subset_training_batch(batch: FluxTrainingBatch, indices: np.ndarray, *, dev
         step_index=step_index,
         train_free_weight=float(batch.train_free_weight),
         train_noise_weight=float(batch.train_noise_weight),
+        is_terminal_batch=bool(batch.is_terminal_batch),
     )
 
 
@@ -3968,9 +4136,11 @@ def _on_policy_prefix_bounds(config: DirectFluxMNISTConfig) -> tuple[int, int]:
 def _trajectory_snapshot_steps(config: DirectFluxMNISTConfig) -> np.ndarray:
     """Return replay snapshot prefix steps, including optional terminal-biased states.
 
-    ``tau`` decreases from one at the source to zero at the terminal digit.  The
-    terminal replay fraction intentionally samples large prefix steps so the
-    replay cache covers late endpoint corrections such as incomplete strokes.
+    ``tau`` decreases from one at the source to zero at the terminal digit. The
+    stable schedule de-duplicates integer snapshot steps.  The 10r exact-fraction
+    schedule over-filled the replay cache with terminal model-rollout states and
+    made on-policy training much harder; for stability we keep terminal replay
+    biased but not dominant.
     """
     min_prefix, max_prefix = _on_policy_prefix_bounds(config)
     if max_prefix <= 0 or max_prefix < min_prefix:
@@ -3989,7 +4159,9 @@ def _trajectory_snapshot_steps(config: DirectFluxMNISTConfig) -> np.ndarray:
         pieces.append(values)
     if terminal_count > 0:
         # Terminal tau fraction in [tau_min, tau_max] corresponds to prefix
-        # fraction in [1 - tau_max, 1 - tau_min].
+        # fraction in [1 - tau_max, 1 - tau_min].  Exclude the exact tau=0
+        # snapshot from replay caches: those states are produced by an imperfect
+        # model rollout and are too off-policy early in training.
         nsteps = max(int(config.num_steps), 1)
         lo = int(round((1.0 - float(config.on_policy_cache_terminal_max_tau)) * float(nsteps)))
         hi = int(round((1.0 - float(config.on_policy_cache_terminal_min_tau)) * float(nsteps)))
@@ -4002,6 +4174,19 @@ def _trajectory_snapshot_steps(config: DirectFluxMNISTConfig) -> np.ndarray:
     if steps.size == 0:
         steps = np.asarray([max_prefix], dtype=np.int64)
     return steps
+
+
+def _snapshot_terminal_stats(config: DirectFluxMNISTConfig, snapshot_steps: np.ndarray) -> tuple[float, int, int]:
+    """Return requested fraction, terminal count, and regular count for a snapshot plan."""
+    count = int(np.asarray(snapshot_steps).reshape(-1).size)
+    if count <= 0:
+        return float("nan"), 0, 0
+    nsteps = max(int(config.num_steps), 1)
+    terminal_lo = int(math.ceil((1.0 - float(config.on_policy_cache_terminal_max_tau)) * float(nsteps)))
+    terminal_lo = max(1, min(nsteps, terminal_lo))
+    terminal_count = int((np.asarray(snapshot_steps).reshape(-1) >= terminal_lo).sum())
+    regular_count = count - terminal_count
+    return float(terminal_count) / float(count), terminal_count, regular_count
 
 
 def _repeat_optional_array(arr: IntArray | None, repeats: int) -> IntArray | None:
@@ -4030,6 +4215,7 @@ def _build_trajectory_on_policy_replay_cache(
     start = time.perf_counter()
     cache_device = torch.device("cuda" if config.on_policy_cache_device == "cuda" and torch.cuda.is_available() else "cpu")
     snapshot_steps = _trajectory_snapshot_steps(config)
+    requested_terminal_fraction, terminal_snapshot_count, regular_snapshot_count = _snapshot_terminal_stats(config, snapshot_steps)
     if snapshot_steps.size == 0:
         batch = sample_flux_training_batch(
             images,
@@ -4068,6 +4254,10 @@ def _build_trajectory_on_policy_replay_cache(
             tau_mean=float(tau_frac.mean().detach().cpu()),
             tau_max=float(tau_frac.max().detach().cpu()),
             terminal_fraction=float((tau_frac <= float(config.on_policy_cache_terminal_max_tau)).float().mean().detach().cpu()),
+            terminal_requested_fraction=float(requested_terminal_fraction),
+            terminal_actual_fraction=float((tau_frac <= float(config.on_policy_cache_terminal_max_tau)).float().mean().detach().cpu()),
+            terminal_snapshot_count=int(terminal_snapshot_count),
+            regular_snapshot_count=int(regular_snapshot_count),
         )
     pieces: list[FluxTrainingBatch] = []
     produced = 0
@@ -4095,7 +4285,10 @@ def _build_trajectory_on_policy_replay_cache(
         source_condition = base.sources.clone()
         saved_states: list[Tensor] = []
         saved_tau: list[Tensor] = []
-        wanted = set(int(s) for s in snapshot_steps.tolist())
+        wanted_counts: dict[int, int] = {}
+        for snapshot_step in snapshot_steps.tolist():
+            key = int(snapshot_step)
+            wanted_counts[key] = wanted_counts.get(key, 0) + 1
         rollout_free = float(base.train_free_weight) if bool(config.on_policy_use_free) else 0.0
         rollout_noise = float(base.train_noise_weight) if bool(config.on_policy_use_noise) else 0.0
         for prefix_idx in range(max_step):
@@ -4113,15 +4306,17 @@ def _build_trajectory_on_policy_replay_cache(
                 learned_weight=1.0,
             )
             completed = prefix_idx + 1
-            if completed in wanted:
+            repeat_count = int(wanted_counts.get(int(completed), 0))
+            if repeat_count > 0:
                 tau_remaining = torch.full(
                     (traj_batch,),
                     max(horizon - float(completed) * dt, 0.0),
                     dtype=states.dtype,
                     device=device,
                 )
-                saved_states.append(states.detach().clone())
-                saved_tau.append(tau_remaining)
+                for _ in range(repeat_count):
+                    saved_states.append(states.detach().clone())
+                    saved_tau.append(tau_remaining.clone())
         if saved_states:
             repeats = len(saved_states)
             chunk = FluxTrainingBatch(
@@ -4156,6 +4351,10 @@ def _build_trajectory_on_policy_replay_cache(
         tau_mean=float(tau_frac.mean().detach().cpu()),
         tau_max=float(tau_frac.max().detach().cpu()),
         terminal_fraction=float((tau_frac <= float(config.on_policy_cache_terminal_max_tau)).float().mean().detach().cpu()),
+        terminal_requested_fraction=float(requested_terminal_fraction),
+        terminal_actual_fraction=float((tau_frac <= float(config.on_policy_cache_terminal_max_tau)).float().mean().detach().cpu()),
+        terminal_snapshot_count=int(terminal_snapshot_count),
+        regular_snapshot_count=int(regular_snapshot_count),
     )
 
 
@@ -4233,6 +4432,10 @@ def build_on_policy_replay_cache(
         tau_mean=float(tau_frac.mean().detach().cpu()),
         tau_max=float(tau_frac.max().detach().cpu()),
         terminal_fraction=float((tau_frac <= float(config.on_policy_cache_terminal_max_tau)).float().mean().detach().cpu()),
+        terminal_requested_fraction=float("nan"),
+        terminal_actual_fraction=float((tau_frac <= float(config.on_policy_cache_terminal_max_tau)).float().mean().detach().cpu()),
+        terminal_snapshot_count=0,
+        regular_snapshot_count=0,
     )
 
 def sample_on_policy_replay_batch(
@@ -4367,6 +4570,8 @@ def train_direct_flux_model(
         "terminal_extra_support_loss": [],
         "terminal_gap_loss": [],
         "terminal_strict_negative_space_loss": [],
+        "terminal_foreground_recall_loss": [],
+        "terminal_local_loss_cap_scale": [],
         "terminal_loss_active_fraction": [],
         "terminal_tau_mean": [],
         "terminal_loss_scale": [],
@@ -4402,6 +4607,10 @@ def train_direct_flux_model(
         "cache_tau_mean": [],
         "cache_tau_max": [],
         "cache_terminal_fraction": [],
+        "cache_terminal_requested_fraction": [],
+        "cache_terminal_actual_fraction": [],
+        "cache_terminal_snapshot_count": [],
+        "cache_regular_snapshot_count": [],
         "off_loss": [],
         "off_div_cos": [],
         "off_target_rms": [],
@@ -4542,6 +4751,10 @@ def train_direct_flux_model(
         metrics["cache_tau_mean"] = float("nan") if replay_cache is None else float(replay_cache.tau_mean)
         metrics["cache_tau_max"] = float("nan") if replay_cache is None else float(replay_cache.tau_max)
         metrics["cache_terminal_fraction"] = float("nan") if replay_cache is None else float(replay_cache.terminal_fraction)
+        metrics["cache_terminal_requested_fraction"] = float("nan") if replay_cache is None else float(replay_cache.terminal_requested_fraction)
+        metrics["cache_terminal_actual_fraction"] = float("nan") if replay_cache is None else float(replay_cache.terminal_actual_fraction)
+        metrics["cache_terminal_snapshot_count"] = float("nan") if replay_cache is None else float(replay_cache.terminal_snapshot_count)
+        metrics["cache_regular_snapshot_count"] = float("nan") if replay_cache is None else float(replay_cache.regular_snapshot_count)
         if use_on_policy:
             metrics["on_loss"] = metrics["loss"]
             metrics["on_div_cos"] = metrics["div_cos"]
@@ -4605,6 +4818,7 @@ def train_direct_flux_model(
                 cache_s=metrics.get("cache_refresh_sec", 0.0),
                 c_tau=metrics.get("cache_tau_mean", float("nan")),
                 c_term=metrics.get("cache_terminal_fraction", float("nan")),
+                c_req=metrics.get("cache_terminal_requested_fraction", float("nan")),
                 on_cos=metrics.get("on_div_cos", float("nan")),
                 off_cos=metrics.get("off_div_cos", float("nan")),
                 mean_p=float(anchor_prob) if model.config.target_mode in {"poisson-flow", "poisson-ot-flow"} else 0.0,
@@ -5555,6 +5769,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--terminal-rollout-max-steps", type=int, default=16)
     parser.add_argument("--terminal-loss-every", type=int, default=4)
     parser.add_argument("--terminal-rollout-batch-size", type=int, default=32)
+    parser.add_argument("--terminal-target-mode", choices=VELOCITY_TARGET_MODES, default="mixed")
+    parser.add_argument("--terminal-batch-rollout-mode", choices=("fixed", "to-zero"), default="fixed")
     parser.add_argument("--terminal-batch-prob", type=float, default=0.25)
     parser.add_argument("--terminal-batch-size", type=int, default=64)
     parser.add_argument("--terminal-tau-min-fraction", type=float, default=0.0)
@@ -5579,7 +5795,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--terminal-local-shape-loss-weight", type=float, default=0.0)
     parser.add_argument("--terminal-target-support-weight", type=float, default=1.0)
     parser.add_argument("--terminal-target-edge-weight", type=float, default=0.5)
-    parser.add_argument("--terminal-negative-space-weight", type=float, default=0.5)
+    parser.add_argument("--terminal-negative-space-weight", type=float, default=0.0)
     parser.add_argument("--terminal-negative-space-mode", choices=("mean", "strict"), default="strict")
     parser.add_argument("--terminal-negative-space-threshold", type=float, default=0.08)
     parser.add_argument("--terminal-negative-space-temperature", type=float, default=0.03)
@@ -5589,6 +5805,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--terminal-missing-support-weight", type=float, default=0.0)
     parser.add_argument("--terminal-extra-support-weight", type=float, default=0.0)
     parser.add_argument("--terminal-extra-support-margin", type=float, default=0.10)
+    parser.add_argument("--terminal-foreground-recall-weight", type=float, default=0.0)
+    parser.add_argument("--terminal-foreground-threshold", type=float, default=0.18)
+    parser.add_argument("--terminal-foreground-temperature", type=float, default=0.04)
+    parser.add_argument("--terminal-foreground-size", type=int, default=14)
+    parser.add_argument("--terminal-foreground-blur-sigma", type=float, default=0.7)
+    parser.add_argument("--terminal-gap-labels", type=str, default="5,9")
+    parser.add_argument("--terminal-extra-support-labels", type=str, default="5,9")
+    parser.add_argument("--terminal-foreground-labels", type=str, default="2,3,6,9")
+    parser.add_argument("--terminal-local-loss-max-ratio", type=float, default=0.25)
     parser.add_argument("--terminal-local-shape-size", type=int, default=14)
     parser.add_argument("--terminal-local-shape-blur-sigma", type=float, default=0.7)
     parser.add_argument("--selection-classifier-weight", type=float, default=1.0)
@@ -5601,6 +5826,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--selection-negative-space-weight", type=float, default=0.5)
     parser.add_argument("--selection-gap-weight", type=float, default=0.5)
     parser.add_argument("--selection-extra-support-weight", type=float, default=0.25)
+    parser.add_argument("--selection-foreground-weight", type=float, default=0.5)
     parser.add_argument("--use-classifier-diagnostics", action="store_true")
     parser.add_argument("--classifier-cache-path", type=Path, default=None)
     parser.add_argument("--classifier-train-epochs", type=int, default=2)
@@ -5761,6 +5987,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         terminal_rollout_max_steps=int(args.terminal_rollout_max_steps),
         terminal_loss_every=int(args.terminal_loss_every),
         terminal_rollout_batch_size=int(args.terminal_rollout_batch_size),
+        terminal_target_mode=str(args.terminal_target_mode),
+        terminal_batch_rollout_mode=str(args.terminal_batch_rollout_mode),
         terminal_batch_prob=float(args.terminal_batch_prob),
         terminal_batch_size=int(args.terminal_batch_size),
         terminal_tau_min_fraction=float(args.terminal_tau_min_fraction),
@@ -5793,6 +6021,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         terminal_missing_support_weight=float(args.terminal_missing_support_weight),
         terminal_extra_support_weight=float(args.terminal_extra_support_weight),
         terminal_extra_support_margin=float(args.terminal_extra_support_margin),
+        terminal_foreground_recall_weight=float(args.terminal_foreground_recall_weight),
+        terminal_foreground_threshold=float(args.terminal_foreground_threshold),
+        terminal_foreground_temperature=float(args.terminal_foreground_temperature),
+        terminal_foreground_size=int(args.terminal_foreground_size),
+        terminal_foreground_blur_sigma=float(args.terminal_foreground_blur_sigma),
+        terminal_gap_labels=tuple(int(x.strip()) for x in str(args.terminal_gap_labels).split(",") if x.strip()),
+        terminal_extra_support_labels=tuple(int(x.strip()) for x in str(args.terminal_extra_support_labels).split(",") if x.strip()),
+        terminal_foreground_labels=tuple(int(x.strip()) for x in str(args.terminal_foreground_labels).split(",") if x.strip()),
+        terminal_local_loss_max_ratio=float(args.terminal_local_loss_max_ratio),
         terminal_local_shape_size=int(args.terminal_local_shape_size),
         terminal_local_shape_blur_sigma=float(args.terminal_local_shape_blur_sigma),
         selection_classifier_weight=float(args.selection_classifier_weight),
@@ -5805,6 +6042,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         selection_negative_space_weight=float(args.selection_negative_space_weight),
         selection_gap_weight=float(args.selection_gap_weight),
         selection_extra_support_weight=float(args.selection_extra_support_weight),
+        selection_foreground_weight=float(args.selection_foreground_weight),
         use_classifier_diagnostics=bool(args.use_classifier_diagnostics),
         classifier_train_epochs=int(args.classifier_train_epochs),
         classifier_cache_path="" if args.classifier_cache_path is None else str(args.classifier_cache_path),

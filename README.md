@@ -794,3 +794,124 @@ Recommended first raw-quality run:
   --save-ablation-samples `
   --save-process-figure
 ```
+
+### Experiment 10r: terminal replay/target fix
+
+Experiment 10r keeps the 10q terminal-consistent loss timing, but fixes two terminal-training details:
+
+- trajectory replay snapshots now preserve duplicate terminal snapshot steps instead of de-duplicating them, so the actual cache terminal fraction should match `--on-policy-cache-terminal-fraction` much more closely;
+- dedicated terminal microbatches can use their own target mode and rollout-to-zero behavior.
+
+New/updated options:
+
+```text
+--terminal-target-mode mixed|constant|residual|safe-residual
+--terminal-batch-rollout-mode fixed|to-zero
+```
+
+Recommended first raw-quality run:
+
+```powershell
+.venv\Scripts\python.exe -m mnist.eulerian_flux_mnist `
+  --data-root mnist_data `
+  --run-name 10r-terminal-target-safe-residual `
+  --target-mode poisson-ot-flow `
+  --source-mode lowfreq `
+  --condition-on-source `
+  --ot-match-mode nearest `
+  --free-aware-target `
+  --sde-curriculum `
+  --sde-ramp-steps 3000 `
+  --target-free-weight 0.015 `
+  --target-noise-weight 0.002 `
+  --velocity-target mixed `
+  --on-policy-use-free `
+  --on-policy-use-noise `
+  --on-policy-mode replay `
+  --on-policy-cache-mode trajectory `
+  --on-policy-cache-terminal-fraction 0.50 `
+  --on-policy-cache-terminal-min-tau 0.00 `
+  --on-policy-cache-terminal-max-tau 0.08 `
+  --on-policy-target-mode safe-residual `
+  --terminal-target-mode safe-residual `
+  --terminal-batch-rollout-mode to-zero `
+  --ema-decay 0.999 `
+  --use-ema-for-sampling `
+  --use-ema-for-cache `
+  --rollout-loss-weight 0.15 `
+  --rollout-loss-steps 6 `
+  --rollout-image-grad-loss-weight 0.03 `
+  --terminal-loss-mode near-terminal `
+  --terminal-rollout-max-steps 16 `
+  --terminal-loss-every 4 `
+  --terminal-loss-tau-max-fraction 0.06 `
+  --terminal-batch-prob 0.25 `
+  --terminal-batch-size 64 `
+  --terminal-tau-min-fraction 0.00 `
+  --terminal-tau-max-fraction 0.06 `
+  --terminal-shape-loss-weight 0.03 `
+  --terminal-shape-entropy-weight 1.0 `
+  --terminal-shape-tv-weight 1.0 `
+  --terminal-shape-maxmass-weight 0.5 `
+  --terminal-local-shape-loss-weight 0 `
+  --terminal-gap-loss-weight 0.03 `
+  --terminal-missing-support-weight 0.005 `
+  --terminal-extra-support-weight 0.008 `
+  --terminal-negative-space-mode strict `
+  --terminal-negative-space-threshold 0.08 `
+  --terminal-gap-threshold 0.12 `
+  --terminal-gap-dilate-radius 1 `
+  --hard-label-sampling `
+  --hard-labels 2,6,9 `
+  --hard-label-prob 0.50 `
+  --use-classifier-diagnostics `
+  --classifier-loss-mode off `
+  --upsample-mode resize-conv `
+  --flux-parameterization projected `
+  --curl-loss-weight 0.01 `
+  --checkerboard-loss-weight 0.001 `
+  --stochastic-step-loss `
+  --adaptive-sampling `
+  --train-steps 8000 `
+  --batch-size 256 `
+  --base-channels 32 `
+  --sample-steps 256 `
+  --num-samples 64 `
+  --save-ablation-samples `
+  --save-process-figure
+```
+### Experiment 10s: foreground recall and label-gated local losses
+
+Experiment 10s keeps the stable 10q-style terminal timing and adds a conservative
+foreground-recall loss for the remaining faded-stroke failures. Local topology
+losses are now label-gated, and their combined contribution is capped so they do
+not trade one class-specific artifact for another.
+
+Useful new options:
+
+```text
+--terminal-foreground-recall-weight
+--terminal-foreground-threshold
+--terminal-foreground-temperature
+--terminal-foreground-size
+--terminal-foreground-blur-sigma
+--terminal-gap-labels
+--terminal-extra-support-labels
+--terminal-foreground-labels
+--terminal-local-loss-max-ratio
+--selection-foreground-weight
+```
+
+A cautious run should keep classifier loss off and use 10q local-loss weights:
+
+```powershell
+  --terminal-gap-loss-weight 0.02 `
+  --terminal-missing-support-weight 0.01 `
+  --terminal-extra-support-weight 0.006 `
+  --terminal-foreground-recall-weight 0.01 `
+  --terminal-gap-labels 5,9 `
+  --terminal-extra-support-labels 5,9 `
+  --terminal-foreground-labels 2,3,6,9 `
+  --terminal-local-loss-max-ratio 0.25 `
+  --classifier-loss-mode off
+```
