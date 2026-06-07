@@ -78,6 +78,10 @@ def test_experiment11_cache_loss_and_generation_smoke() -> None:
         terminal_ess_target=0.5,
         base_channels=4,
         batch_size=4,
+        proposal_mode="poisson-short",
+        proposal_strength=0.2,
+        proposal_eta_clip=2.0,
+        hybrid_loss_weight=0.0,
     )
     rng = np.random.default_rng(123)
     device = torch.device("cpu")
@@ -96,6 +100,8 @@ def test_experiment11_cache_loss_and_generation_smoke() -> None:
     assert cache.innovations.shape == (4, 2, 8, 8)
     assert cache.masks.float().mean() > 0.8
     assert cache.ess_fraction > 0.0
+    assert cache.proposal_log_corrections is not None
+    assert cache.proposal_log_corrections.shape == (4,)
 
     model = DirectFluxUNet(config, base_channels=4)
     batch = {

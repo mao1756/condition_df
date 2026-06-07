@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-r"""Experiment 11/C0: weighted free-rollout innovation matching on MNIST.
+r"""Experiment 11/C0-C1: weighted innovation matching on MNIST.
 
 This experiment implements the C0 recipe described in the accompanying
 ``experiment_c0_weighted_innovation`` note.  It reuses the Experiment 10
 finite-volume Eulerian simulator and U-Net architecture, but changes the
 training target.  Instead of a Poisson/OT flux teacher, Experiment 11 simulates
-free reference trajectories, weights whole trajectories by a soft terminal
-endpoint reward, and trains the network to predict the terminally tilted mean
-of the edge Brownian innovation.
+free or proposal-corrected reference trajectories, weights whole trajectories
+by a soft terminal endpoint reward, and trains the network to predict the terminally
+tilted mean of the edge Brownian innovation.
 
 The network output is interpreted as an edge Brownian-shift field ``eta``.  At
 sampling time it is converted to a physical conditioning flux by
@@ -88,9 +88,16 @@ class Experiment11C0Config:
     eta_l2_weight: float = 1e-4
     theta_mask_min: float = 1e-12
     loss_reweighting: str = "label-balanced"
-    hybrid_loss_weight: float = 0.10
+    hybrid_loss_weight: float = 0.0
     hybrid_target_clip: float = 5.0
     hybrid_min_tau_fraction: float = 0.03
+    proposal_mode: str = "free"
+    proposal_strength: float = 0.0
+    proposal_min_tau_fraction: float = 0.03
+    proposal_eta_clip: float = 5.0
+    proposal_girsanov_correction: bool = True
+    proposal_corrected_innovation: bool = True
+    proposal_log_correction_clip: float = 80.0
     model_output_mode: str = "innovation"
     control_strength: float = 1.0
     control_output_clip: float = 5.0
@@ -133,6 +140,10 @@ class C0TrainingCache:
     target_indices: np.ndarray | None = None
     target_labels: np.ndarray | None = None
     terminal_states: np.ndarray | None = None
+    proposal_log_corrections: np.ndarray | None = None
+    terminal_log_weights: np.ndarray | None = None
+    corrected_log_weights: np.ndarray | None = None
+    proposal_eta_rms: float = 0.0
 
     @property
     def size(self) -> int:
@@ -379,12 +390,18 @@ def _reference_free_step_with_innovation(
     *,
     free_weight: float,
     noise_weight: float,
-) -> tuple[Tensor, Tensor, Tensor, int, int]:
-    """One free reference step, returning raw Gaussian edge innovations.
+    proposal_flux: Tensor | None = None,
+    proposal_eta: Tensor | None = None,
+    proposal_girsanov_correction: bool = True,
+    proposal_corrected_innovation: bool = True,
+) -> tuple[Tensor, Tensor, Tensor, int, int, Tensor, Tensor]:
+    """One reference/proposal step, returning reference innovations.
 
-    The returned ``xi_channels`` are the standard normal edge innovations used
-    before limiter clipping.  ``unclipped_channels`` is false for edges whose
-    proposed transfer was clipped by the four-color update.
+    When ``proposal_flux`` and ``proposal_eta`` are supplied, the path is sampled
+    from a proposal process with additional drift ``proposal_flux``.  The
+    returned innovations are corrected back to free-reference Brownian
+    coordinates by adding ``sqrt(dt) * proposal_eta``.  The returned
+    ``log_correction`` is the discrete log ``dP_free / dQ_proposal`` increment.
     """
 
     if states.ndim != 2:
@@ -396,6 +413,17 @@ def _reference_free_step_with_innovation(
     inv_h2 = float(n * n)
     alpha = edge_alpha_value(config)
     xi_flat = torch.randn(batch, 2 * n * n, dtype=states.dtype, device=states.device)
+    xi_reference_flat = xi_flat.clone()
+    proposal_eta_flat = torch.zeros_like(xi_flat)
+    proposal_flux_flat = torch.zeros_like(xi_flat)
+    if proposal_eta is not None:
+        proposal_eta_flat = _channels_to_edge_flat(proposal_eta.to(device=states.device, dtype=states.dtype))
+    if proposal_flux is not None:
+        proposal_flux_flat = _channels_to_edge_flat(proposal_flux.to(device=states.device, dtype=states.dtype))
+    if proposal_corrected_innovation:
+        xi_reference_flat = xi_reference_flat + math.sqrt(float(dt)) * proposal_eta_flat
+    log_correction = torch.zeros(batch, dtype=states.dtype, device=states.device)
+    eta_square_sum = torch.zeros(batch, dtype=states.dtype, device=states.device)
     unclipped_flat = torch.ones(batch, 2 * n * n, dtype=torch.bool, device=states.device)
     clipped = 0
     proposed = 0
@@ -406,6 +434,7 @@ def _reference_free_step_with_innovation(
     for edge_class in _edge_classes_torch(n, states.device):
         tails = edge_class.tails
         heads = edge_class.heads
+        flux_indices = edge_class.flux_indices
         a = out[:, tails]
         b = out[:, heads]
         denom = a + b
@@ -413,13 +442,21 @@ def _reference_free_step_with_innovation(
         ratio = torch.where(denom > tiny, (a - b) / denom.clamp_min(tiny), torch.zeros_like(denom))
         theta = ((2.0 * alpha + 1.0) / alpha) * harmonic
         free_flux = (2.0 * alpha + 1.0) * inv_h2 * ratio
-        xi = xi_flat[:, edge_class.flux_indices]
+        xi = xi_flat[:, flux_indices]
+        eta = proposal_eta_flat[:, flux_indices]
+        prop_flux = proposal_flux_flat[:, flux_indices]
+        if bool(proposal_girsanov_correction):
+            log_correction = log_correction + (
+                -(eta * math.sqrt(float(dt)) * xi).sum(dim=1)
+                - 0.5 * eta.square().sum(dim=1) * float(dt)
+            )
+        eta_square_sum = eta_square_sum + eta.square().sum(dim=1)
         noise_std = float(noise_weight) * torch.sqrt((2.0 * theta * inv_h2 * float(dt)).clamp_min(0.0))
-        d_flux = float(free_weight) * free_flux * float(dt) + noise_std * xi
+        d_flux = float(free_weight) * free_flux * float(dt) + prop_flux * float(dt) + noise_std * xi
         pos_clip = d_flux > float(config.limiter_fraction) * a
         neg_clip = d_flux < -float(config.limiter_fraction) * b
         clipped_mask = pos_clip | neg_clip
-        unclipped_flat[:, edge_class.flux_indices] = ~clipped_mask
+        unclipped_flat[:, flux_indices] = ~clipped_mask
         clipped += int(clipped_mask.count_nonzero().detach().cpu())
         proposed += int(d_flux.numel())
         d_flux = torch.minimum(d_flux, float(config.limiter_fraction) * a)
@@ -428,7 +465,16 @@ def _reference_free_step_with_innovation(
         out[:, heads] = out[:, heads] + d_flux
         out = out.clamp_min(tiny)
         out = out / out.sum(dim=1, keepdim=True).clamp_min(tiny)
-    return out, _edge_flat_to_channels(xi_flat, n), _edge_flat_to_channels(unclipped_flat, n), clipped, proposed
+    eta_rms = torch.sqrt(eta_square_sum / float(2 * n * n)).detach()
+    return (
+        out,
+        _edge_flat_to_channels(xi_reference_flat, n),
+        _edge_flat_to_channels(unclipped_flat, n),
+        clipped,
+        proposed,
+        log_correction.detach(),
+        eta_rms,
+    )
 
 
 def _sample_cache_indices(cache: C0TrainingCache, batch_size: int, device: torch.device) -> Tensor:
@@ -467,7 +513,7 @@ def build_c0_training_cache(
     rng: np.random.Generator,
     show_progress: bool = True,
 ) -> C0TrainingCache:
-    """Build a weighted free-rollout innovation cache."""
+    """Build a weighted innovation cache, optionally with proposal correction."""
 
     n = int(dynamics_config.grid_size)
     num_pixels = n * n
@@ -500,6 +546,8 @@ def build_c0_training_cache(
     all_source_indices: list[np.ndarray] = []
     all_source_labels: list[np.ndarray] = []
     all_terminal_dist2: list[np.ndarray] = []
+    all_proposal_log_corrections: list[np.ndarray] = []
+    all_proposal_eta_rms: list[np.ndarray] = []
     total_clipped = 0
     total_proposed = 0
 
@@ -547,6 +595,8 @@ def build_c0_training_cache(
         slice_innov = torch.zeros(current, slices_per_path, 2, n, n, dtype=dtype, device=device)
         slice_masks = torch.ones(current, slices_per_path, 2, n, n, dtype=torch.bool, device=device)
         starts_t = torch.as_tensor(starts_np, dtype=torch.long, device=device)
+        path_log_correction = torch.zeros(current, dtype=dtype, device=device)
+        path_proposal_eta_rms_sum = torch.zeros(current, dtype=dtype, device=device)
 
         for step in range(steps):
             step_mask = starts_t == int(step)
@@ -556,13 +606,35 @@ def build_c0_training_cache(
                 slice_states[rows, cols] = states.index_select(0, rows)
                 tau_value = max(horizon - float(step) * dt, 0.0)
                 slice_tau[rows, cols] = tau_value
-            states, xi_channels, unclipped_channels, clipped, proposed = _reference_free_step_with_innovation(
+            tau_value = max(horizon - float(step) * dt, 0.0)
+            proposal_flux, proposal_eta = _endpoint_poisson_proposal_eta(
+                states,
+                endpoints,
+                tau_value,
+                dynamics_config,
+                c0_config,
+            )
+            (
+                states,
+                xi_channels,
+                unclipped_channels,
+                clipped,
+                proposed,
+                log_corr_step,
+                proposal_eta_rms_step,
+            ) = _reference_free_step_with_innovation(
                 states,
                 dt,
                 dynamics_config,
                 free_weight=float(c0_config.reference_free_weight),
                 noise_weight=float(c0_config.reference_noise_weight),
+                proposal_flux=proposal_flux,
+                proposal_eta=proposal_eta,
+                proposal_girsanov_correction=bool(c0_config.proposal_girsanov_correction),
+                proposal_corrected_innovation=bool(c0_config.proposal_corrected_innovation),
             )
+            path_log_correction = path_log_correction + log_corr_step
+            path_proposal_eta_rms_sum = path_proposal_eta_rms_sum + proposal_eta_rms_step
             total_clipped += int(clipped)
             total_proposed += int(proposed)
             # Accumulate the current innovation into all stride windows containing this step.
@@ -604,6 +676,8 @@ def build_c0_training_cache(
         if source_batch.labels is not None:
             all_source_labels.append(np.asarray(source_batch.labels, dtype=np.int64))
         all_terminal_dist2.append(dist2)
+        all_proposal_log_corrections.append(path_log_correction.detach().cpu().numpy().astype(np.float64))
+        all_proposal_eta_rms.append((path_proposal_eta_rms_sum / float(steps)).detach().cpu().numpy().astype(np.float64))
         global_path_offset += current
         if hasattr(bar, "set_postfix"):
             partial_dist = np.concatenate(all_terminal_dist2, axis=0)
@@ -611,16 +685,34 @@ def build_c0_training_cache(
             if eps_preview <= 0.0:
                 eps_preview = _choose_epsilon_for_ess(partial_dist, float(c0_config.terminal_ess_target))
             lw = -partial_dist / (2.0 * max(eps_preview, 1e-12) ** 2)
+            if all_proposal_log_corrections and bool(c0_config.proposal_girsanov_correction):
+                partial_corr = np.concatenate(all_proposal_log_corrections, axis=0)
+                if partial_corr.shape[0] == lw.shape[0]:
+                    clip_corr = float(c0_config.proposal_log_correction_clip)
+                    if clip_corr > 0.0:
+                        partial_corr = np.clip(partial_corr, -clip_corr, clip_corr)
+                    lw = lw + partial_corr
             stats = _log_weight_stats(lw)
             clip_frac = 0.0 if total_proposed == 0 else float(total_clipped) / float(total_proposed)
             bar.set_postfix(ess=stats["ess_fraction"], eps=eps_preview, clip=clip_frac)
 
     terminal_dist2 = np.concatenate(all_terminal_dist2, axis=0)
+    proposal_log_corrections = np.concatenate(all_proposal_log_corrections, axis=0) if all_proposal_log_corrections else np.zeros_like(terminal_dist2)
+    proposal_eta_rms = np.concatenate(all_proposal_eta_rms, axis=0) if all_proposal_eta_rms else np.zeros_like(terminal_dist2)
     epsilon = float(c0_config.terminal_epsilon)
     if epsilon <= 0.0:
         epsilon = _choose_epsilon_for_ess(terminal_dist2, float(c0_config.terminal_ess_target))
-    path_log_weights = -terminal_dist2 / (2.0 * max(epsilon, 1e-12) ** 2)
+    terminal_log_weights = -terminal_dist2 / (2.0 * max(epsilon, 1e-12) ** 2)
+    corrected_log_weights = terminal_log_weights.copy()
+    if bool(c0_config.proposal_girsanov_correction):
+        correction = proposal_log_corrections.copy()
+        clip_corr = float(c0_config.proposal_log_correction_clip)
+        if clip_corr > 0.0:
+            correction = np.clip(correction, -clip_corr, clip_corr)
+        corrected_log_weights = corrected_log_weights + correction
+    path_log_weights = corrected_log_weights
     stats = _log_weight_stats(path_log_weights)
+    terminal_only_stats = _log_weight_stats(terminal_log_weights)
     stable_w = np.exp(path_log_weights - float(np.max(path_log_weights)))
     weighted_terminal_dist2 = float(np.sum(stable_w * terminal_dist2) / max(float(np.sum(stable_w)), 1e-12))
     unweighted_terminal_dist2 = float(np.mean(terminal_dist2))
@@ -655,6 +747,10 @@ def build_c0_training_cache(
         target_indices=np.concatenate(all_target_indices),
         target_labels=np.concatenate(all_target_labels),
         terminal_states=np.concatenate(all_terminal_np, axis=0),
+        proposal_log_corrections=proposal_log_corrections,
+        terminal_log_weights=terminal_log_weights,
+        corrected_log_weights=corrected_log_weights,
+        proposal_eta_rms=float(np.mean(proposal_eta_rms)) if proposal_eta_rms.size else 0.0,
     )
 
 
@@ -697,6 +793,55 @@ def _hybrid_endpoint_poisson_target(
     if clip > 0.0:
         teacher = teacher.clamp(min=-clip, max=clip)
     return torch.where(mask, teacher, torch.zeros_like(teacher))
+
+
+def _endpoint_poisson_proposal_eta(
+    states: Tensor,
+    endpoints: Tensor,
+    tau_value: float,
+    dynamics_config: DirectFluxMNISTConfig,
+    c0_config: Experiment11C0Config,
+) -> tuple[Tensor, Tensor]:
+    """Return proposal physical flux and Brownian-shift eta.
+
+    The C1 proposal is deliberately *not* used as a supervised loss.  It only
+    generates better proposal paths.  The cache then adds a discrete Girsanov
+    correction so weighted expectations still estimate the free-reference
+    terminal tilt.  This implements the proposal-corrected version of the
+    h-transform/Girsanov change of measure used by the Eulerian theory.
+    """
+
+    n = int(dynamics_config.grid_size)
+    mode = str(c0_config.proposal_mode).lower().replace("_", "-")
+    if mode in {"free", "none", "off"} or float(c0_config.proposal_strength) == 0.0:
+        zero = torch.zeros((states.shape[0], 2, n, n), dtype=states.dtype, device=states.device)
+        return zero, zero
+    if mode not in {"poisson", "poisson-short", "short-poisson", "endpoint-poisson"}:
+        raise ValueError(f"unknown proposal_mode: {c0_config.proposal_mode!r}")
+
+    horizon = natural_horizon(dynamics_config)
+    tau_floor = max(float(c0_config.proposal_min_tau_fraction) * float(horizon), 1e-12)
+    remaining = torch.full((states.shape[0], 1), max(float(tau_value), tau_floor), dtype=states.dtype, device=states.device)
+    velocity = (endpoints - states) / remaining
+    velocity = velocity - velocity.mean(dim=1, keepdim=True)
+
+    free_flux = float(c0_config.reference_free_weight) * free_drift_flux_torch(states, dynamics_config)
+    free_velocity = flux_divergence_torch(free_flux).reshape(states.shape[0], -1)
+    learned_velocity = velocity - free_velocity
+    learned_velocity = learned_velocity - learned_velocity.mean(dim=1, keepdim=True)
+    proposal_flux = poisson_flux_from_velocity_torch(learned_velocity, grid_size=n).to(dtype=states.dtype, device=states.device)
+
+    theta = harmonic_mobility_channels(states, dynamics_config)
+    sigma_rate = float(c0_config.reference_noise_weight) * torch.sqrt((2.0 * theta * float(n * n)).clamp_min(0.0))
+    eta = torch.zeros_like(proposal_flux)
+    valid = sigma_rate > 1e-12
+    eta[valid] = proposal_flux[valid] / sigma_rate[valid].clamp_min(1e-12)
+    eta = float(c0_config.proposal_strength) * eta
+    eta_clip = float(c0_config.proposal_eta_clip)
+    if eta_clip > 0.0:
+        eta = eta.clamp(min=-eta_clip, max=eta_clip)
+    proposal_flux = sigma_rate * eta
+    return proposal_flux, eta
 
 
 def c0_weighted_innovation_loss(
@@ -1025,10 +1170,23 @@ def train_experiment11_c0(
             "weighted_terminal_dist2": float(built.weighted_terminal_dist2),
             "unweighted_terminal_dist2": float(built.unweighted_terminal_dist2),
             "seconds": float(elapsed),
+            "proposal_eta_rms": float(built.proposal_eta_rms),
         }
+        if built.proposal_log_corrections is not None and built.proposal_log_corrections.size:
+            row.update({
+                "proposal_log_correction_mean": float(np.mean(built.proposal_log_corrections)),
+                "proposal_log_correction_std": float(np.std(built.proposal_log_corrections)),
+                "proposal_log_correction_min": float(np.min(built.proposal_log_corrections)),
+                "proposal_log_correction_max": float(np.max(built.proposal_log_corrections)),
+            })
+        if built.terminal_log_weights is not None:
+            row["terminal_only_ess_fraction"] = float(_log_weight_stats(built.terminal_log_weights)["ess_fraction"])
         slices_per_path_diag = max(1, int(c0_config.time_slices_per_path))
         path_dist2_diag = built.terminal_dist2.numpy().reshape(-1)[::slices_per_path_diag]
-        path_logw_diag = built.log_weights.numpy().reshape(-1)[::slices_per_path_diag]
+        if built.corrected_log_weights is not None and built.corrected_log_weights.shape[0] == path_dist2_diag.shape[0]:
+            path_logw_diag = built.corrected_log_weights
+        else:
+            path_logw_diag = built.log_weights.numpy().reshape(-1)[::slices_per_path_diag]
         requested_diag = built.requested_labels
         target_diag = built.target_labels
         row.update(_histogram_dict(requested_diag, prefix="requested_label_count"))
@@ -1044,6 +1202,9 @@ def train_experiment11_c0(
             out_dir / f"experiment11_c0_cache_step{int(step):06d}_diagnostics.npz",
             terminal_dist2=built.terminal_dist2.numpy(),
             log_weights=built.log_weights.numpy(),
+            terminal_log_weights=np.asarray([] if built.terminal_log_weights is None else built.terminal_log_weights, dtype=np.float64),
+            corrected_log_weights=np.asarray([] if built.corrected_log_weights is None else built.corrected_log_weights, dtype=np.float64),
+            proposal_log_corrections=np.asarray([] if built.proposal_log_corrections is None else built.proposal_log_corrections, dtype=np.float64),
             starts=built.starts.numpy(),
             path_indices=built.path_indices.numpy(),
             requested_labels=np.asarray([] if built.requested_labels is None else built.requested_labels, dtype=np.int64),
@@ -1062,7 +1223,10 @@ def train_experiment11_c0(
             try:
                 slices_per_path = max(1, int(c0_config.time_slices_per_path))
                 path_dist2 = built.terminal_dist2.numpy().reshape(-1)[::slices_per_path]
-                path_lw = -path_dist2 / (2.0 * max(float(built.epsilon), 1e-12) ** 2)
+                if built.corrected_log_weights is not None and built.corrected_log_weights.shape[0] == path_dist2.shape[0]:
+                    path_lw = built.corrected_log_weights
+                else:
+                    path_lw = -path_dist2 / (2.0 * max(float(built.epsilon), 1e-12) ** 2)
                 requested_labels = built.requested_labels if built.requested_labels is not None else np.zeros((built.terminal_states.shape[0],), dtype=np.int64)
                 target_labels = built.target_labels if built.target_labels is not None else requested_labels
 
@@ -1229,13 +1393,26 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="How terminal weights are normalized in the training loss; label-balanced prevents easy digits dominating.",
     )
     parser.add_argument("--no-label-balanced-loss", dest="loss_reweighting", action="store_const", const="global")
-    parser.add_argument("--hybrid-loss-weight", type=float, default=0.10, help="Weight for the endpoint residual Poisson stabilizer; 0 disables")
+    parser.add_argument("--hybrid-loss-weight", type=float, default=0.0, help="Weight for the endpoint residual Poisson stabilizer; 0 disables")
     parser.add_argument("--hybrid-target-clip", type=float, default=5.0)
     parser.add_argument("--hybrid-min-tau-fraction", type=float, default=0.03)
     # Backward-compatible aliases used in the previous discussion.
     parser.add_argument("--hybrid-poisson-weight", dest="hybrid_loss_weight", type=float)
     parser.add_argument("--hybrid-poisson-tau-floor-fraction", dest="hybrid_min_tau_fraction", type=float)
     parser.add_argument("--hybrid-poisson-target-clip", dest="hybrid_target_clip", type=float)
+    parser.add_argument(
+        "--proposal-mode",
+        choices=("free", "poisson-short"),
+        default="free",
+        help="Cache path proposal. poisson-short is proposal-only and can be corrected by Girsanov.",
+    )
+    parser.add_argument("--proposal-strength", type=float, default=0.0, help="Strength of the proposal drift used only while building the cache")
+    parser.add_argument("--proposal-min-tau-fraction", type=float, default=0.03)
+    parser.add_argument("--proposal-eta-clip", type=float, default=5.0)
+    parser.add_argument("--proposal-log-correction-clip", type=float, default=80.0)
+    parser.add_argument("--no-proposal-girsanov-correction", dest="proposal_girsanov_correction", action="store_false")
+    parser.add_argument("--no-proposal-corrected-innovation", dest="proposal_corrected_innovation", action="store_false")
+    parser.set_defaults(proposal_girsanov_correction=True, proposal_corrected_innovation=True)
     parser.add_argument(
         "--model-output-mode",
         choices=("innovation", "eta"),
@@ -1286,6 +1463,13 @@ def _experiment_config_from_args(args: argparse.Namespace) -> Experiment11C0Conf
         hybrid_loss_weight=float(args.hybrid_loss_weight),
         hybrid_min_tau_fraction=float(args.hybrid_min_tau_fraction),
         hybrid_target_clip=float(args.hybrid_target_clip),
+        proposal_mode=str(args.proposal_mode),
+        proposal_strength=float(args.proposal_strength),
+        proposal_min_tau_fraction=float(args.proposal_min_tau_fraction),
+        proposal_eta_clip=float(args.proposal_eta_clip),
+        proposal_girsanov_correction=bool(args.proposal_girsanov_correction),
+        proposal_corrected_innovation=bool(args.proposal_corrected_innovation),
+        proposal_log_correction_clip=float(args.proposal_log_correction_clip),
         model_output_mode=str(args.model_output_mode),
         control_strength=float(args.control_strength),
         control_output_clip=float(args.control_output_clip),
