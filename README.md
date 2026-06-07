@@ -915,3 +915,45 @@ A cautious run should keep classifier loss off and use 10q local-loss weights:
   --terminal-local-loss-max-ratio 0.25 `
   --classifier-loss-mode off
 ```
+
+### Experiment 11 / C0: weighted free-rollout innovation matching
+
+Experiment 11 implements the Level-C/C0 endpoint-bridge training recipe.  It
+simulates free finite-volume reference trajectories, weights each whole
+trajectory by a soft terminal endpoint reward, and trains the network to predict
+the weighted mean of the edge Brownian innovation.  The network output is an
+edge Brownian-shift field `eta`; at generation time the sampler converts it to a
+physical learned flux using the same reference noise scale used during cache
+construction.
+
+Run folders follow the Experiment 10 convention and are created under
+`runs/experiment11/<timestamp>_<run-name>/`.  Each run stores metadata,
+checkpoints, history/metrics, generated samples, and preview images.  Cache
+construction, training, and sampling all use ETA progress bars unless
+`--no-progress` is passed.
+
+A default C0 run is:
+
+```powershell
+python -m mnist.experiment11_c0 `
+  --run-name c0-weighted-innovation `
+  --base-channels 48 `
+  --train-steps 10000 `
+  --batch-size 256 `
+  --cache-paths 4096 `
+  --cache-refresh-every 500 `
+  --cache-batch-size 128 `
+  --teacher-stride 8 `
+  --time-slices-per-path 4 `
+  --terminal-epsilon 0 `
+  --terminal-ess-target 0.25 `
+  --reference-free-weight 0.03 `
+  --reference-noise-weight 0.005 `
+  --sample-steps 256 `
+  --num-samples 64
+```
+
+Use `--terminal-epsilon 0` to calibrate the terminal reward width from the free
+rollout distances so that the effective sample size is close to
+`--terminal-ess-target`.  Add `--save-cache-previews` if you want diagnostic
+PNG grids of free endpoints and high-weight cached states at each cache refresh.
