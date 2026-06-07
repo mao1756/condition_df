@@ -54,11 +54,13 @@ from mnist.eulerian_flux_mnist import (
     _sample_source_batch_torch,
     classifier_generation_metrics,
     edge_alpha_value,
+    flux_divergence_torch,
     free_drift_flux_torch,
     harmonic_mobility_channels,
     image_total_variation,
     load_mnist_measure_dataset,
     natural_horizon,
+    poisson_flux_from_velocity_torch,
     save_flux_samples_grid,
     source_batch_diagnostics,
     train_or_load_mnist_classifier,
@@ -85,6 +87,10 @@ class Experiment11C0Config:
     terminal_ess_target: float = 0.25
     eta_l2_weight: float = 1e-4
     theta_mask_min: float = 1e-12
+    loss_reweighting: str = "label-balanced"
+    hybrid_loss_weight: float = 0.10
+    hybrid_target_clip: float = 5.0
+    hybrid_min_tau_fraction: float = 0.03
     model_output_mode: str = "innovation"
     control_strength: float = 1.0
     control_output_clip: float = 5.0
@@ -123,7 +129,9 @@ class C0TrainingCache:
     unweighted_terminal_dist2: float
     source_indices: np.ndarray | None = None
     source_labels: np.ndarray | None = None
+    requested_labels: np.ndarray | None = None
     target_indices: np.ndarray | None = None
+    target_labels: np.ndarray | None = None
     terminal_states: np.ndarray | None = None
 
     @property
@@ -241,6 +249,120 @@ def _log_weight_stats(log_weights: np.ndarray) -> dict[str, float]:
     }
 
 
+def _histogram_dict(values: np.ndarray | None, *, prefix: str, num_classes: int = 10) -> dict[str, int]:
+    """Return class-count diagnostics with stable keys."""
+
+    out = {f"{prefix}_{digit}": 0 for digit in range(num_classes)}
+    if values is None:
+        return out
+    arr = np.asarray(values, dtype=np.int64).reshape(-1)
+    if arr.size == 0:
+        return out
+    arr = arr[(0 <= arr) & (arr < num_classes)]
+    counts = np.bincount(arr, minlength=num_classes)
+    for digit in range(num_classes):
+        out[f"{prefix}_{digit}"] = int(counts[digit])
+    return out
+
+
+def _weighted_histogram_dict(
+    labels: np.ndarray | None,
+    log_weights: np.ndarray,
+    *,
+    prefix: str,
+    num_classes: int = 10,
+) -> dict[str, float]:
+    """Return normalized weighted class-mass diagnostics."""
+
+    out = {f"{prefix}_{digit}": 0.0 for digit in range(num_classes)}
+    if labels is None:
+        return out
+    lab = np.asarray(labels, dtype=np.int64).reshape(-1)
+    lw = np.asarray(log_weights, dtype=np.float64).reshape(-1)
+    if lab.size == 0 or lw.size == 0:
+        return out
+    if lab.size != lw.size:
+        raise ValueError("labels and log_weights must have the same length")
+    stable = lw - float(np.max(lw))
+    weights = np.exp(stable)
+    total = float(weights.sum())
+    if total <= 0.0:
+        return out
+    for digit in range(num_classes):
+        out[f"{prefix}_{digit}"] = float(weights[lab == digit].sum() / total)
+    return out
+
+
+def _per_label_weight_stats(
+    labels: np.ndarray | None,
+    log_weights: np.ndarray,
+    dist2: np.ndarray,
+    *,
+    prefix: str,
+    num_classes: int = 10,
+) -> dict[str, float]:
+    """Per-label ESS and terminal-distance diagnostics for path-level weights."""
+
+    out: dict[str, float] = {}
+    for digit in range(num_classes):
+        out[f"{prefix}_ess_fraction_{digit}"] = float("nan")
+        out[f"{prefix}_weighted_dist2_{digit}"] = float("nan")
+        out[f"{prefix}_unweighted_dist2_{digit}"] = float("nan")
+    if labels is None:
+        return out
+    lab = np.asarray(labels, dtype=np.int64).reshape(-1)
+    lw = np.asarray(log_weights, dtype=np.float64).reshape(-1)
+    d2 = np.asarray(dist2, dtype=np.float64).reshape(-1)
+    if lab.size == 0 or lw.size != lab.size or d2.size != lab.size:
+        return out
+    for digit in range(num_classes):
+        mask = lab == digit
+        if not np.any(mask):
+            continue
+        lw_d = lw[mask]
+        d2_d = d2[mask]
+        stable = lw_d - float(np.max(lw_d))
+        w = np.exp(stable)
+        denom = float(np.sum(w * w))
+        total = float(np.sum(w))
+        out[f"{prefix}_ess_fraction_{digit}"] = 0.0 if denom <= 0.0 else float(total * total / (w.size * denom))
+        out[f"{prefix}_weighted_dist2_{digit}"] = float(np.sum(w * d2_d) / max(total, 1e-12))
+        out[f"{prefix}_unweighted_dist2_{digit}"] = float(np.mean(d2_d))
+    return out
+
+
+def _label_balanced_preview_order(log_weights: np.ndarray, labels: np.ndarray | None, *, per_label: int = 8) -> np.ndarray:
+    """Choose high-weight preview indices, with each label represented when possible."""
+
+    lw = np.asarray(log_weights, dtype=np.float64).reshape(-1)
+    if labels is None:
+        return np.argsort(-lw)[: int(per_label) * 10]
+    lab = np.asarray(labels, dtype=np.int64).reshape(-1)
+    chosen: list[int] = []
+    for digit in range(10):
+        idx = np.flatnonzero(lab == digit)
+        if idx.size == 0:
+            continue
+        chosen.extend(int(i) for i in idx[np.argsort(-lw[idx])[: int(per_label)]])
+    if not chosen:
+        return np.argsort(-lw)[: int(per_label) * 10]
+    out = np.asarray(chosen, dtype=np.int64)
+    return out[np.argsort(-lw[out])]
+
+
+def _label_balanced_weights_torch(weights: Tensor, labels: Tensor, *, num_classes: int = 10) -> Tensor:
+    """Normalize weights so each label present in the minibatch contributes equally."""
+
+    labels = labels.long().clamp(0, int(num_classes) - 1)
+    class_sums = torch.zeros(int(num_classes), dtype=weights.dtype, device=weights.device)
+    class_sums.scatter_add_(0, labels, weights)
+    return weights / class_sums.index_select(0, labels).clamp_min(1e-12)
+
+
+def _weighted_mean_torch(values: Tensor, weights: Tensor) -> Tensor:
+    return (weights * values).sum() / weights.sum().clamp_min(1e-12)
+
+
 def _edge_flat_to_channels(flat: Tensor, grid_size: int) -> Tensor:
     n = int(grid_size)
     return torch.stack([flat[:, : n * n].reshape(-1, n, n), flat[:, n * n :].reshape(-1, n, n)], dim=1)
@@ -330,6 +452,7 @@ def _cache_batch(cache: C0TrainingCache, idx: Tensor, device: torch.device) -> d
         "innovations": cache.innovations.index_select(0, idx_cpu).to(device),
         "log_weights": cache.log_weights.index_select(0, idx_cpu).to(device),
         "masks": cache.masks.index_select(0, idx_cpu).to(device),
+        "endpoints": cache.endpoints.index_select(0, idx_cpu).to(device),
     }
 
 
@@ -372,6 +495,8 @@ def build_c0_training_cache(
     all_endpoints: list[Tensor] = []
     all_terminal_np: list[np.ndarray] = []
     all_target_indices: list[np.ndarray] = []
+    all_target_labels: list[np.ndarray] = []
+    all_requested_labels: list[np.ndarray] = []
     all_source_indices: list[np.ndarray] = []
     all_source_labels: list[np.ndarray] = []
     all_terminal_dist2: list[np.ndarray] = []
@@ -409,6 +534,10 @@ def build_c0_training_cache(
             ot_cache=ot_cache,
         )
         endpoints_np = np.asarray(dataset_images[target_indices], dtype=np.float64).reshape(current, n, n)
+        target_labels_np = np.asarray(dataset_labels[target_indices], dtype=np.int64)
+        if not np.array_equal(target_labels_np, labels_np):
+            mismatch = int(np.count_nonzero(target_labels_np != labels_np))
+            raise RuntimeError(f"target sampler returned {mismatch} labels that do not match requested labels")
         endpoints = torch.as_tensor(endpoints_np.reshape(current, num_pixels), dtype=dtype, device=device)
 
         starts_np = rng.integers(0, steps - stride + 1, size=(current, slices_per_path), dtype=np.int64)
@@ -468,6 +597,8 @@ def build_c0_training_cache(
         all_starts.append(torch.as_tensor(starts_np.reshape(-1), dtype=torch.long))
         all_terminal_np.append(terminal_np)
         all_target_indices.append(target_indices.astype(np.int64))
+        all_target_labels.append(target_labels_np.astype(np.int64))
+        all_requested_labels.append(labels_np.astype(np.int64))
         if source_batch.indices is not None:
             all_source_indices.append(np.asarray(source_batch.indices, dtype=np.int64))
         if source_batch.labels is not None:
@@ -520,9 +651,52 @@ def build_c0_training_cache(
         unweighted_terminal_dist2=unweighted_terminal_dist2,
         source_indices=np.concatenate(all_source_indices) if all_source_indices else None,
         source_labels=np.concatenate(all_source_labels) if all_source_labels else None,
+        requested_labels=np.concatenate(all_requested_labels),
         target_indices=np.concatenate(all_target_indices),
+        target_labels=np.concatenate(all_target_labels),
         terminal_states=np.concatenate(all_terminal_np, axis=0),
     )
+
+
+def _hybrid_endpoint_poisson_target(
+    batch: dict[str, Tensor],
+    dynamics_config: DirectFluxMNISTConfig,
+    c0_config: Experiment11C0Config,
+    *,
+    sqrt_dt_eff: float,
+    theta: Tensor,
+    mask: Tensor,
+) -> Tensor:
+    """Return a short-time endpoint residual teacher in innovation units.
+
+    This teacher is a stabilizer for C0.  It asks for a minimum-energy edge flux
+    whose divergence would move the current state toward the stored endpoint
+    over the remaining time, after subtracting the free drift.  It is converted
+    to the same units as the network output in ``model_output_mode=innovation``.
+    """
+
+    if "endpoints" not in batch:
+        raise KeyError("hybrid endpoint teacher requires batch['endpoints']")
+    n = int(dynamics_config.grid_size)
+    horizon = natural_horizon(dynamics_config)
+    tau_floor = max(float(c0_config.hybrid_min_tau_fraction) * horizon, 1e-12)
+    remaining = batch["tau"].reshape(-1, 1).clamp_min(tau_floor)
+
+    velocity = (batch["endpoints"] - batch["states"]) / remaining
+    velocity = velocity - velocity.mean(dim=1, keepdim=True)
+
+    free_flux = float(c0_config.reference_free_weight) * free_drift_flux_torch(batch["states"], dynamics_config)
+    free_velocity = flux_divergence_torch(free_flux).reshape(velocity.shape[0], -1)
+    learned_velocity = velocity - free_velocity
+    learned_velocity = learned_velocity - learned_velocity.mean(dim=1, keepdim=True)
+
+    teacher_flux = poisson_flux_from_velocity_torch(learned_velocity, grid_size=n).to(dtype=batch["states"].dtype)
+    sigma_rate = float(c0_config.reference_noise_weight) * torch.sqrt((2.0 * theta * float(n * n)).clamp_min(1e-20))
+    teacher = float(sqrt_dt_eff) * teacher_flux / sigma_rate.clamp_min(1e-12)
+    clip = float(c0_config.hybrid_target_clip)
+    if clip > 0.0:
+        teacher = teacher.clamp(min=-clip, max=clip)
+    return torch.where(mask, teacher, torch.zeros_like(teacher))
 
 
 def c0_weighted_innovation_loss(
@@ -538,11 +712,6 @@ def c0_weighted_innovation_loss(
     sqrt_dt_eff = math.sqrt(max(dt_eff, 1e-20))
     output_mode = str(c0_config.model_output_mode).lower()
     if output_mode == "innovation":
-        # The C0 identity is E[Xi | S_t=s] = sqrt(dt_eff) * eta(t,s).
-        # On the 28x28 default horizon sqrt(dt_eff) is about 3e-3, so
-        # training raw eta makes gradients far too small.  We therefore let
-        # the network output the conditional mean of the normalized innovation
-        # and convert back to eta only when needed.
         predicted_innovation_mean = raw
         eta = raw / sqrt_dt_eff
     elif output_mode == "eta":
@@ -550,31 +719,71 @@ def c0_weighted_innovation_loss(
         predicted_innovation_mean = sqrt_dt_eff * eta
     else:
         raise ValueError(f"unknown model_output_mode: {c0_config.model_output_mode!r}")
-    residual = predicted_innovation_mean - batch["innovations"]
+
     theta = harmonic_mobility_channels(batch["states"], dynamics_config)
     mask = batch["masks"] & (theta > float(c0_config.theta_mask_min))
-    mask_f = mask.to(dtype=residual.dtype)
+    mask_f = mask.to(dtype=predicted_innovation_mean.dtype)
+
+    residual = predicted_innovation_mean - batch["innovations"]
     per_slice = (residual.square() * mask_f).sum(dim=(1, 2, 3)) / mask_f.sum(dim=(1, 2, 3)).clamp_min(1.0)
+
     logw = batch["log_weights"].float()
-    weights = torch.exp(logw - torch.max(logw.detach()))
-    loss_main = (weights * per_slice).sum() / weights.sum().clamp_min(1e-12)
-    # The stride-integrated KL-energy is dt_eff * eta^2, which equals
-    # predicted_innovation_mean^2 in innovation-output mode.  Regularize this
-    # scaled control so the default eta_l2_weight remains meaningful.
+    raw_weights = torch.exp(logw - torch.max(logw.detach()))
+    mode = str(c0_config.loss_reweighting).lower().replace("_", "-")
+    if mode in {"label-balanced", "balanced", "label"}:
+        weights = _label_balanced_weights_torch(raw_weights, batch["labels"])
+    elif mode in {"global", "standard", "weighted"}:
+        weights = raw_weights
+    elif mode in {"none", "uniform", "unweighted"}:
+        weights = torch.ones_like(raw_weights)
+    else:
+        raise ValueError(f"unknown loss_reweighting: {c0_config.loss_reweighting!r}")
+    loss_innovation = _weighted_mean_torch(per_slice, weights)
+
+    loss_hybrid = torch.zeros((), dtype=loss_innovation.dtype, device=loss_innovation.device)
+    hybrid_target_rms = torch.zeros((), dtype=loss_innovation.dtype, device=loss_innovation.device)
+    hybrid_prediction_rms = torch.zeros((), dtype=loss_innovation.dtype, device=loss_innovation.device)
+    if float(c0_config.hybrid_loss_weight) > 0.0 and "endpoints" in batch:
+        with torch.no_grad():
+            hybrid_target = _hybrid_endpoint_poisson_target(
+                batch,
+                dynamics_config,
+                c0_config,
+                sqrt_dt_eff=sqrt_dt_eff,
+                theta=theta,
+                mask=mask,
+            )
+        hybrid_residual = predicted_innovation_mean - hybrid_target
+        hybrid_per_slice = (hybrid_residual.square() * mask_f).sum(dim=(1, 2, 3)) / mask_f.sum(dim=(1, 2, 3)).clamp_min(1.0)
+        loss_hybrid = _weighted_mean_torch(hybrid_per_slice, weights)
+        denom = mask_f.detach().float().sum().clamp_min(1.0)
+        hybrid_target_rms = (hybrid_target.detach().float().square() * mask_f.detach().float()).sum().div(denom).sqrt()
+        hybrid_prediction_rms = (predicted_innovation_mean.detach().float().square() * mask_f.detach().float()).sum().div(denom).sqrt()
+
     eta_l2 = predicted_innovation_mean.square().mean()
-    loss = loss_main + float(c0_config.eta_l2_weight) * eta_l2
+    loss = loss_innovation + float(c0_config.hybrid_loss_weight) * loss_hybrid + float(c0_config.eta_l2_weight) * eta_l2
     with torch.no_grad():
+        raw_denom = raw_weights.square().sum().clamp_min(1e-12)
+        raw_ess_frac = float((raw_weights.sum().square() / raw_denom / float(raw_weights.numel())).detach().cpu())
         denom = weights.square().sum().clamp_min(1e-12)
         ess_frac = float((weights.sum().square() / denom / float(weights.numel())).detach().cpu())
         diagnostics = {
             "loss": float(loss.detach().cpu()),
-            "loss_main": float(loss_main.detach().cpu()),
+            "loss_main": float(loss_innovation.detach().cpu()),
+            "loss_innovation": float(loss_innovation.detach().cpu()),
+            "loss_hybrid": float(loss_hybrid.detach().cpu()),
+            "loss_poisson": float(loss_hybrid.detach().cpu()),
             "eta_l2": float(eta_l2.detach().cpu()),
             "eta_rms": float(eta.detach().float().square().mean().sqrt().cpu()),
             "prediction_rms": float(predicted_innovation_mean.detach().float().square().mean().sqrt().cpu()),
             "target_rms": float(batch["innovations"].detach().float().square().mean().sqrt().cpu()),
+            "hybrid_target_rms": float(hybrid_target_rms.detach().cpu()),
+            "hybrid_prediction_rms": float(hybrid_prediction_rms.detach().cpu()),
+            "poisson_target_rms": float(hybrid_target_rms.detach().cpu()),
+            "poisson_prediction_rms": float(hybrid_prediction_rms.detach().cpu()),
             "mask_fraction": float(mask_f.mean().detach().cpu()),
             "batch_ess_fraction": ess_frac,
+            "batch_raw_ess_fraction": raw_ess_frac,
         }
     return loss, diagnostics
 
@@ -774,12 +983,20 @@ def train_experiment11_c0(
     history: dict[str, list[float]] = {
         "loss": [],
         "loss_main": [],
+        "loss_innovation": [],
+        "loss_hybrid": [],
+        "loss_poisson": [],
         "eta_l2": [],
         "eta_rms": [],
         "prediction_rms": [],
         "target_rms": [],
+        "hybrid_target_rms": [],
+        "hybrid_prediction_rms": [],
+        "poisson_target_rms": [],
+        "poisson_prediction_rms": [],
         "mask_fraction": [],
         "batch_ess_fraction": [],
+        "batch_raw_ess_fraction": [],
         "cache_ess_fraction": [],
         "cache_clip_fraction": [],
     }
@@ -809,6 +1026,19 @@ def train_experiment11_c0(
             "unweighted_terminal_dist2": float(built.unweighted_terminal_dist2),
             "seconds": float(elapsed),
         }
+        slices_per_path_diag = max(1, int(c0_config.time_slices_per_path))
+        path_dist2_diag = built.terminal_dist2.numpy().reshape(-1)[::slices_per_path_diag]
+        path_logw_diag = built.log_weights.numpy().reshape(-1)[::slices_per_path_diag]
+        requested_diag = built.requested_labels
+        target_diag = built.target_labels
+        row.update(_histogram_dict(requested_diag, prefix="requested_label_count"))
+        row.update(_histogram_dict(target_diag, prefix="target_label_count"))
+        row.update(_weighted_histogram_dict(requested_diag, path_logw_diag, prefix="requested_weighted_label_mass"))
+        row.update(_weighted_histogram_dict(target_diag, path_logw_diag, prefix="target_weighted_label_mass"))
+        row.update(_per_label_weight_stats(requested_diag, path_logw_diag, path_dist2_diag, prefix="requested"))
+        row.update(_per_label_weight_stats(target_diag, path_logw_diag, path_dist2_diag, prefix="target"))
+        if requested_diag is not None and target_diag is not None:
+            row["target_label_mismatch_fraction"] = float(np.mean(np.asarray(requested_diag) != np.asarray(target_diag)))
         cache_rows.append(row)
         np.savez_compressed(
             out_dir / f"experiment11_c0_cache_step{int(step):06d}_diagnostics.npz",
@@ -816,44 +1046,67 @@ def train_experiment11_c0(
             log_weights=built.log_weights.numpy(),
             starts=built.starts.numpy(),
             path_indices=built.path_indices.numpy(),
+            requested_labels=np.asarray([] if built.requested_labels is None else built.requested_labels, dtype=np.int64),
+            target_indices=np.asarray([] if built.target_indices is None else built.target_indices, dtype=np.int64),
+            target_labels=np.asarray([] if built.target_labels is None else built.target_labels, dtype=np.int64),
+            source_indices=np.asarray([] if built.source_indices is None else built.source_indices, dtype=np.int64),
+            source_labels=np.asarray([] if built.source_labels is None else built.source_labels, dtype=np.int64),
             epsilon=np.asarray([built.epsilon], dtype=np.float64),
             ess_fraction=np.asarray([built.ess_fraction], dtype=np.float64),
         )
         if bool(c0_config.save_cache_previews) and built.terminal_states is not None:
-            # Optional quick endpoint previews for debugging cache quality.
+            # Optional endpoint previews for debugging cache quality.  Use the
+            # true requested/target labels; low-frequency sources do not carry
+            # source labels, and earlier zero-label fallbacks made previews look
+            # like a target sampler failure.
             try:
+                slices_per_path = max(1, int(c0_config.time_slices_per_path))
+                path_dist2 = built.terminal_dist2.numpy().reshape(-1)[::slices_per_path]
+                path_lw = -path_dist2 / (2.0 * max(float(built.epsilon), 1e-12) ** 2)
+                requested_labels = built.requested_labels if built.requested_labels is not None else np.zeros((built.terminal_states.shape[0],), dtype=np.int64)
+                target_labels = built.target_labels if built.target_labels is not None else requested_labels
+
                 save_flux_samples_grid(
                     built.terminal_states,
-                    np.zeros((built.terminal_states.shape[0],), dtype=np.int64),
+                    requested_labels,
                     out_dir / f"experiment11_c0_free_endpoints_step{int(step):06d}.png",
                     grid_size=int(dynamics_config.grid_size),
                     max_images=64,
                 )
-                # Weighted top terminal endpoints are the most useful C0 diagnostic:
-                # if these still do not resemble digits, the terminal reward is too weak
-                # or the reference process cannot reach the target basin.
-                slices_per_path = max(1, int(c0_config.time_slices_per_path))
-                path_dist2 = built.terminal_dist2.numpy().reshape(-1)[::slices_per_path]
-                path_lw = -path_dist2 / (2.0 * max(float(built.epsilon), 1e-12) ** 2)
-                order = np.argsort(-path_lw)[:64]
-                if built.source_labels is not None:
-                    selected_labels = np.asarray(built.source_labels, dtype=np.int64)[order]
-                else:
-                    selected_labels = np.zeros((len(order),), dtype=np.int64)
+
+                global_order = np.argsort(-path_lw)[:64]
+                balanced_order = _label_balanced_preview_order(path_lw, target_labels, per_label=8)[:80]
+
                 save_flux_samples_grid(
-                    built.terminal_states[order],
-                    selected_labels,
-                    out_dir / f"experiment11_c0_weighted_terminals_step{int(step):06d}.png",
+                    built.terminal_states[global_order],
+                    requested_labels[global_order],
+                    out_dir / f"experiment11_c0_global_weighted_terminals_step{int(step):06d}.png",
                     grid_size=int(dynamics_config.grid_size),
                     max_images=64,
                 )
                 if built.target_indices is not None:
                     save_flux_samples_grid(
-                        dataset_images[built.target_indices[order]],
-                        selected_labels,
-                        out_dir / f"experiment11_c0_weighted_targets_step{int(step):06d}.png",
+                        dataset_images[built.target_indices[global_order]],
+                        target_labels[global_order],
+                        out_dir / f"experiment11_c0_global_weighted_targets_step{int(step):06d}.png",
                         grid_size=int(dynamics_config.grid_size),
                         max_images=64,
+                    )
+
+                save_flux_samples_grid(
+                    built.terminal_states[balanced_order],
+                    requested_labels[balanced_order],
+                    out_dir / f"experiment11_c0_weighted_terminals_step{int(step):06d}.png",
+                    grid_size=int(dynamics_config.grid_size),
+                    max_images=80,
+                )
+                if built.target_indices is not None:
+                    save_flux_samples_grid(
+                        dataset_images[built.target_indices[balanced_order]],
+                        target_labels[balanced_order],
+                        out_dir / f"experiment11_c0_weighted_targets_step{int(step):06d}.png",
+                        grid_size=int(dynamics_config.grid_size),
+                        max_images=80,
                     )
             except Exception as exc:
                 print(f"Warning: could not save cache preview: {exc}")
@@ -879,7 +1132,24 @@ def train_experiment11_c0(
         scaler.step(optimizer)
         scaler.update()
         update_ema_state(ema_state, model, decay=float(c0_config.ema_decay))
-        for key in ["loss", "loss_main", "eta_l2", "eta_rms", "prediction_rms", "target_rms", "mask_fraction", "batch_ess_fraction"]:
+        for key in [
+            "loss",
+            "loss_main",
+            "loss_innovation",
+            "loss_hybrid",
+            "loss_poisson",
+            "eta_l2",
+            "eta_rms",
+            "prediction_rms",
+            "target_rms",
+            "hybrid_target_rms",
+            "hybrid_prediction_rms",
+            "poisson_target_rms",
+            "poisson_prediction_rms",
+            "mask_fraction",
+            "batch_ess_fraction",
+            "batch_raw_ess_fraction",
+        ]:
             history[key].append(float(diagnostics[key]))
         history["cache_ess_fraction"].append(float(cache.ess_fraction))
         history["cache_clip_fraction"].append(float(cache.clip_fraction))
@@ -889,6 +1159,7 @@ def train_experiment11_c0(
                 pred=float(diagnostics["prediction_rms"]),
                 eta=float(diagnostics["eta_rms"]),
                 ess=float(diagnostics["batch_ess_fraction"]),
+                poi=float(diagnostics["loss_poisson"]),
                 cache=float(cache.ess_fraction),
             )
     if bool(c0_config.use_ema_for_sampling) and ema_state is not None:
@@ -952,6 +1223,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--eta-l2-weight", type=float, default=1e-4)
     parser.add_argument("--theta-mask-min", type=float, default=1e-12)
     parser.add_argument(
+        "--loss-reweighting",
+        choices=("label-balanced", "global", "none"),
+        default="label-balanced",
+        help="How terminal weights are normalized in the training loss; label-balanced prevents easy digits dominating.",
+    )
+    parser.add_argument("--no-label-balanced-loss", dest="loss_reweighting", action="store_const", const="global")
+    parser.add_argument("--hybrid-loss-weight", type=float, default=0.10, help="Weight for the endpoint residual Poisson stabilizer; 0 disables")
+    parser.add_argument("--hybrid-target-clip", type=float, default=5.0)
+    parser.add_argument("--hybrid-min-tau-fraction", type=float, default=0.03)
+    # Backward-compatible aliases used in the previous discussion.
+    parser.add_argument("--hybrid-poisson-weight", dest="hybrid_loss_weight", type=float)
+    parser.add_argument("--hybrid-poisson-tau-floor-fraction", dest="hybrid_min_tau_fraction", type=float)
+    parser.add_argument("--hybrid-poisson-target-clip", dest="hybrid_target_clip", type=float)
+    parser.add_argument(
         "--model-output-mode",
         choices=("innovation", "eta"),
         default="innovation",
@@ -997,6 +1282,10 @@ def _experiment_config_from_args(args: argparse.Namespace) -> Experiment11C0Conf
         terminal_ess_target=float(args.terminal_ess_target),
         eta_l2_weight=float(args.eta_l2_weight),
         theta_mask_min=float(args.theta_mask_min),
+        loss_reweighting=str(args.loss_reweighting),
+        hybrid_loss_weight=float(args.hybrid_loss_weight),
+        hybrid_min_tau_fraction=float(args.hybrid_min_tau_fraction),
+        hybrid_target_clip=float(args.hybrid_target_clip),
         model_output_mode=str(args.model_output_mode),
         control_strength=float(args.control_strength),
         control_output_clip=float(args.control_output_clip),
