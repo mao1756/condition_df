@@ -307,19 +307,26 @@ def _reference_free_step_with_innovation(
 
 
 def _sample_cache_indices(cache: C0TrainingCache, batch_size: int, device: torch.device) -> Tensor:
-    idx = torch.randint(0, cache.size, (int(batch_size),), dtype=torch.long, device=device)
-    return idx
+    del device
+    # Cache tensors live on CPU.  Keep the random indices on CPU too; otherwise
+    # torch.index_select raises a device-mismatch error when training on CUDA.
+    return torch.randint(0, cache.size, (int(batch_size),), dtype=torch.long)
 
 
 def _cache_batch(cache: C0TrainingCache, idx: Tensor, device: torch.device) -> dict[str, Tensor]:
+    # Be defensive: callers may pass CUDA indices from older code or notebooks.
+    # ``index_select`` requires the index tensor to live on the same device as
+    # the source tensor, so select from the CPU cache first, then move the
+    # minibatch to the requested training device.
+    idx_cpu = idx.to(device=cache.states.device, dtype=torch.long, non_blocking=False)
     return {
-        "states": cache.states.index_select(0, idx).to(device),
-        "tau": cache.tau.index_select(0, idx).to(device),
-        "labels": cache.labels.index_select(0, idx).to(device),
-        "sources": cache.sources.index_select(0, idx).to(device),
-        "innovations": cache.innovations.index_select(0, idx).to(device),
-        "log_weights": cache.log_weights.index_select(0, idx).to(device),
-        "masks": cache.masks.index_select(0, idx).to(device),
+        "states": cache.states.index_select(0, idx_cpu).to(device),
+        "tau": cache.tau.index_select(0, idx_cpu).to(device),
+        "labels": cache.labels.index_select(0, idx_cpu).to(device),
+        "sources": cache.sources.index_select(0, idx_cpu).to(device),
+        "innovations": cache.innovations.index_select(0, idx_cpu).to(device),
+        "log_weights": cache.log_weights.index_select(0, idx_cpu).to(device),
+        "masks": cache.masks.index_select(0, idx_cpu).to(device),
     }
 
 
