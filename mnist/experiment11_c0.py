@@ -88,6 +88,10 @@ class Experiment11C0Config:
     branch_batch_size: int = 128
     branch_confidence_weight: bool = True
     branch_min_ess_fraction: float = 0.05
+    branch_center_innovations: bool = True
+    terminal_epsilon_mode: str = "global-ess"
+    branch_terminal_ess_target: float = 0.35
+    branch_state_weight_mode: str = "uniform"
     terminal_epsilon: float = 0.0
     terminal_ess_target: float = 0.25
     eta_l2_weight: float = 1e-4
@@ -154,8 +158,15 @@ class C0TrainingCache:
     branch_unweighted_terminal_dist2: np.ndarray | None = None
     branch_weighted_terminal_dist2: np.ndarray | None = None
     branch_confidence: np.ndarray | None = None
+    branch_state_log_weights: np.ndarray | None = None
     branch_target_rms: float | None = None
     branch_zero_mse: float | None = None
+    branch_uncentered_target_rms: float | None = None
+    branch_centered_target_rms: float | None = None
+    branch_noise_floor_rms: float | None = None
+    branch_signal_to_noise_ratio: float | None = None
+    branch_weighted_minus_unweighted_dist2: float | None = None
+    branch_epsilon_mode: str | None = None
 
     @property
     def size(self) -> int:
@@ -256,6 +267,48 @@ def _choose_epsilon_for_ess(dist2: np.ndarray, target_fraction: float) -> float:
         else:
             hi = mid
     return float(hi)
+
+
+def _mean_branch_ess_for_epsilon(branch_dist2: np.ndarray, epsilon: float) -> float:
+    """Mean within-prefix ESS fraction for a fixed terminal-reward width."""
+
+    dist = np.asarray(branch_dist2, dtype=np.float64)
+    if dist.ndim != 2 or dist.size == 0:
+        return 0.0
+    eps2 = max(float(epsilon), 1e-12) ** 2
+    logw = -dist / (2.0 * eps2)
+    logw = logw - np.max(logw, axis=1, keepdims=True)
+    weights = np.exp(logw)
+    denom = np.maximum(np.sum(weights * weights, axis=1), 1e-12)
+    ess = (np.sum(weights, axis=1) ** 2) / (float(dist.shape[1]) * denom)
+    return float(np.mean(ess))
+
+
+def _choose_epsilon_for_branch_ess(branch_dist2: np.ndarray, target_fraction: float) -> float:
+    """Choose one global epsilon so mean within-prefix branch ESS hits target."""
+
+    dist = np.asarray(branch_dist2, dtype=np.float64)
+    finite = dist[np.isfinite(dist)]
+    if dist.ndim != 2 or finite.size == 0 or np.all(finite <= 0.0):
+        return 1.0
+    branch_count = max(int(dist.shape[1]), 1)
+    target = float(np.clip(target_fraction, 1.0 / float(branch_count), 0.999))
+    scale = math.sqrt(max(float(np.median(finite)), 1e-12))
+    lo = max(scale * 1e-5, 1e-8)
+    hi = max(scale * 1e5, 1.0)
+    for _ in range(80):
+        mid = math.sqrt(lo * hi)
+        if _mean_branch_ess_for_epsilon(dist, mid) < target:
+            lo = mid
+        else:
+            hi = mid
+    return float(hi)
+
+
+def _logsumexp_np(values: np.ndarray, axis: int = -1) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    vmax = np.max(values, axis=axis, keepdims=True)
+    return np.squeeze(vmax, axis=axis) + np.log(np.maximum(np.sum(np.exp(values - vmax), axis=axis), 1e-300))
 
 
 def _log_weight_stats(log_weights: np.ndarray) -> dict[str, float]:
@@ -704,8 +757,18 @@ def build_c2_branch_mean_training_cache(
     branch_terminals = np.concatenate(branch_terminal_chunks, axis=0)
 
     epsilon = float(c0_config.terminal_epsilon)
+    epsilon_mode = str(c0_config.terminal_epsilon_mode).lower().replace("_", "-")
+    if epsilon > 0.0:
+        epsilon_mode = "fixed"
     if epsilon <= 0.0:
-        epsilon = _choose_epsilon_for_ess(branch_dist2.reshape(-1), float(c0_config.terminal_ess_target))
+        if epsilon_mode in {"branch", "branch-ess", "within-branch"}:
+            epsilon = _choose_epsilon_for_branch_ess(branch_dist2, float(c0_config.branch_terminal_ess_target))
+        elif epsilon_mode in {"global", "global-ess"}:
+            epsilon = _choose_epsilon_for_ess(branch_dist2.reshape(-1), float(c0_config.terminal_ess_target))
+        elif epsilon_mode == "fixed":
+            raise ValueError("--terminal-epsilon-mode fixed requires --terminal-epsilon > 0")
+        else:
+            raise ValueError(f"unknown terminal_epsilon_mode={c0_config.terminal_epsilon_mode!r}")
     branch_logw = -branch_dist2 / (2.0 * max(epsilon, 1e-12) ** 2)
     stable = branch_logw - branch_logw.max(axis=1, keepdims=True)
     branch_weights = np.exp(stable)
@@ -715,7 +778,10 @@ def build_c2_branch_mean_training_cache(
     branch_weighted_dist2 = np.sum(branch_probs * branch_dist2, axis=1)
     branch_unweighted_dist2 = np.mean(branch_dist2, axis=1)
     probs_t = torch.as_tensor(branch_probs, dtype=torch.float32).view(entries, branch_count, 1, 1, 1)
-    innovations = (branch_innov * probs_t).sum(dim=1)
+    uncentered_innovations = (branch_innov * probs_t).sum(dim=1)
+    unweighted_innovations = branch_innov.mean(dim=1)
+    centered_innovations = uncentered_innovations - unweighted_innovations
+    innovations = centered_innovations if bool(c0_config.branch_center_innovations) else uncentered_innovations
     mask_score = (branch_masks.float() * probs_t).sum(dim=1)
     masks = mask_score >= 0.5
     best_branch = np.argmax(branch_logw, axis=1)
@@ -724,8 +790,21 @@ def build_c2_branch_mean_training_cache(
         confidence = np.minimum(1.0, branch_ess / max(float(c0_config.branch_min_ess_fraction), 1e-12))
     else:
         confidence = np.ones_like(branch_ess)
-    log_weights = np.log(np.maximum(confidence, 1e-12)).astype(np.float32)
+    state_weight_mode = str(c0_config.branch_state_weight_mode).lower().replace("_", "-")
+    if state_weight_mode in {"uniform", "none"}:
+        state_log_weights = np.zeros(entries, dtype=np.float64)
+    elif state_weight_mode in {"heat", "heat-potential", "potential"}:
+        state_log_weights = _logsumexp_np(branch_logw, axis=1) - math.log(float(branch_count))
+    elif state_weight_mode in {"confidence", "ess-confidence"}:
+        state_log_weights = np.zeros(entries, dtype=np.float64)
+    else:
+        raise ValueError(f"unknown branch_state_weight_mode={c0_config.branch_state_weight_mode!r}")
+    log_weights = (state_log_weights + np.log(np.maximum(confidence, 1e-12))).astype(np.float32)
     stats = _log_weight_stats(log_weights)
+    uncentered_rms = float(uncentered_innovations.float().square().mean().sqrt())
+    centered_rms = float(centered_innovations.float().square().mean().sqrt())
+    noise_floor_rms = float(unweighted_innovations.float().square().mean().sqrt())
+    signal_to_noise = centered_rms / max(noise_floor_rms, 1e-12)
     path_indices = torch.arange(entries, dtype=torch.long)
     requested_labels = np.concatenate(all_requested_labels)
     target_labels = np.concatenate(all_target_labels)
@@ -762,8 +841,15 @@ def build_c2_branch_mean_training_cache(
         branch_unweighted_terminal_dist2=branch_unweighted_dist2.astype(np.float64),
         branch_weighted_terminal_dist2=branch_weighted_dist2.astype(np.float64),
         branch_confidence=confidence.astype(np.float64),
+        branch_state_log_weights=state_log_weights.astype(np.float64),
         branch_target_rms=float(innovations.float().square().mean().sqrt()),
         branch_zero_mse=float(innovations.float().square().mean()),
+        branch_uncentered_target_rms=uncentered_rms,
+        branch_centered_target_rms=centered_rms,
+        branch_noise_floor_rms=noise_floor_rms,
+        branch_signal_to_noise_ratio=signal_to_noise,
+        branch_weighted_minus_unweighted_dist2=float(np.mean(branch_weighted_dist2 - branch_unweighted_dist2)),
+        branch_epsilon_mode=str(epsilon_mode),
     )
 
 def build_c0_training_cache(
@@ -1433,6 +1519,10 @@ def train_experiment11_c0(
         "branch_ess_fraction_mean": [],
         "branch_ess_fraction_min": [],
         "branch_target_rms": [],
+        "branch_uncentered_target_rms": [],
+        "branch_centered_target_rms": [],
+        "branch_noise_floor_rms": [],
+        "branch_signal_to_noise_ratio": [],
     }
     cache_rows: list[dict[str, float | int]] = []
     cache: C0TrainingCache | None = None
@@ -1486,6 +1576,19 @@ def train_experiment11_c0(
                 row["branch_weighted_terminal_dist2_mean"] = float(np.mean(np.asarray(built.branch_weighted_terminal_dist2, dtype=np.float64)))
             if built.branch_unweighted_terminal_dist2 is not None:
                 row["branch_unweighted_terminal_dist2_mean"] = float(np.mean(np.asarray(built.branch_unweighted_terminal_dist2, dtype=np.float64)))
+            if built.branch_weighted_minus_unweighted_dist2 is not None:
+                row["branch_weighted_minus_unweighted_dist2"] = float(built.branch_weighted_minus_unweighted_dist2)
+            if built.branch_uncentered_target_rms is not None:
+                row["branch_uncentered_target_rms"] = float(built.branch_uncentered_target_rms)
+            if built.branch_centered_target_rms is not None:
+                row["branch_centered_target_rms"] = float(built.branch_centered_target_rms)
+            if built.branch_noise_floor_rms is not None:
+                row["branch_noise_floor_rms"] = float(built.branch_noise_floor_rms)
+            if built.branch_signal_to_noise_ratio is not None:
+                row["branch_signal_to_noise_ratio"] = float(built.branch_signal_to_noise_ratio)
+            row["branch_center_innovations"] = int(bool(c0_config.branch_center_innovations))
+            row["terminal_epsilon_mode_branch_ess"] = int(str(c0_config.terminal_epsilon_mode).lower().replace("_", "-") == "branch-ess")
+            row["branch_state_weight_mode_heat_potential"] = int(str(c0_config.branch_state_weight_mode).lower().replace("_", "-") == "heat-potential")
         else:
             path_dist2_diag = built.terminal_dist2.numpy().reshape(-1)[::slices_per_path_diag]
             if built.corrected_log_weights is not None and built.corrected_log_weights.shape[0] == path_dist2_diag.shape[0]:
@@ -1513,6 +1616,7 @@ def train_experiment11_c0(
             proposal_log_corrections=np.asarray([] if built.proposal_log_corrections is None else built.proposal_log_corrections, dtype=np.float64),
             branch_ess_fraction=np.asarray([] if built.branch_ess_fraction is None else built.branch_ess_fraction, dtype=np.float64),
             branch_confidence=np.asarray([] if built.branch_confidence is None else built.branch_confidence, dtype=np.float64),
+            branch_state_log_weights=np.asarray([] if built.branch_state_log_weights is None else built.branch_state_log_weights, dtype=np.float64),
             branch_weighted_terminal_dist2=np.asarray([] if built.branch_weighted_terminal_dist2 is None else built.branch_weighted_terminal_dist2, dtype=np.float64),
             branch_unweighted_terminal_dist2=np.asarray([] if built.branch_unweighted_terminal_dist2 is None else built.branch_unweighted_terminal_dist2, dtype=np.float64),
             starts=built.starts.numpy(),
@@ -1640,6 +1744,10 @@ def train_experiment11_c0(
             float(np.min(cache.branch_ess_fraction)) if cache.branch_ess_fraction is not None and cache.branch_ess_fraction.size else 0.0
         )
         history["branch_target_rms"].append(float("nan") if cache.branch_target_rms is None else float(cache.branch_target_rms))
+        history["branch_uncentered_target_rms"].append(float("nan") if cache.branch_uncentered_target_rms is None else float(cache.branch_uncentered_target_rms))
+        history["branch_centered_target_rms"].append(float("nan") if cache.branch_centered_target_rms is None else float(cache.branch_centered_target_rms))
+        history["branch_noise_floor_rms"].append(float("nan") if cache.branch_noise_floor_rms is None else float(cache.branch_noise_floor_rms))
+        history["branch_signal_to_noise_ratio"].append(float("nan") if cache.branch_signal_to_noise_ratio is None else float(cache.branch_signal_to_noise_ratio))
         if hasattr(bar, "set_postfix"):
             bar.set_postfix(
                 loss=float(diagnostics["loss"]),
@@ -1721,7 +1829,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--branch-min-ess-fraction", type=float, default=0.05, help="Confidence normalization floor for branch ESS")
     parser.add_argument("--no-branch-confidence-weight", action="store_true", help="Do not downweight branch targets with low within-prefix ESS")
+    parser.add_argument("--branch-center-innovations", dest="branch_center_innovations", action="store_true", help="Use sum_b (p_b - 1/B) xi_b as the branch target")
+    parser.add_argument("--no-branch-center-innovations", dest="branch_center_innovations", action="store_false")
+    parser.set_defaults(branch_center_innovations=True)
+    parser.add_argument("--branch-terminal-ess-target", type=float, default=0.35, help="Target mean within-prefix branch ESS when --terminal-epsilon-mode branch-ess")
+    parser.add_argument(
+        "--branch-state-weight-mode",
+        choices=("uniform", "confidence", "heat-potential"),
+        default="uniform",
+        help="State-level weights in branch mode. uniform is recommended first; heat-potential weights by estimated u_t(s).",
+    )
     parser.add_argument("--terminal-epsilon", type=float, default=0.0, help="<=0 chooses epsilon by ESS calibration")
+    parser.add_argument(
+        "--terminal-epsilon-mode",
+        choices=("global-ess", "branch-ess", "fixed"),
+        default="global-ess",
+        help="How automatic terminal epsilon is calibrated. branch-ess is recommended for centered C2 branch-mean.",
+    )
     parser.add_argument("--terminal-ess-target", type=float, default=0.25)
     parser.add_argument("--eta-l2-weight", type=float, default=1e-4)
     parser.add_argument("--theta-mask-min", type=float, default=1e-12)
@@ -1799,7 +1923,11 @@ def _experiment_config_from_args(args: argparse.Namespace) -> Experiment11C0Conf
         branch_batch_size=int(args.branch_batch_size),
         branch_confidence_weight=not bool(args.no_branch_confidence_weight),
         branch_min_ess_fraction=float(args.branch_min_ess_fraction),
+        branch_center_innovations=bool(args.branch_center_innovations),
+        branch_terminal_ess_target=float(args.branch_terminal_ess_target),
+        branch_state_weight_mode=str(args.branch_state_weight_mode),
         terminal_epsilon=float(args.terminal_epsilon),
+        terminal_epsilon_mode=str(args.terminal_epsilon_mode),
         terminal_ess_target=float(args.terminal_ess_target),
         eta_l2_weight=float(args.eta_l2_weight),
         theta_mask_min=float(args.theta_mask_min),
