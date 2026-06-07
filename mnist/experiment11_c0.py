@@ -85,6 +85,9 @@ class Experiment11C0Config:
     terminal_ess_target: float = 0.25
     eta_l2_weight: float = 1e-4
     theta_mask_min: float = 1e-12
+    model_output_mode: str = "innovation"
+    control_strength: float = 1.0
+    control_output_clip: float = 5.0
     reference_free_weight: float = 0.03
     reference_noise_weight: float = 0.005
     sample_steps: int = 256
@@ -530,9 +533,24 @@ def c0_weighted_innovation_loss(
 ) -> tuple[Tensor, dict[str, float]]:
     """Return the weighted C0 innovation loss and detached diagnostics."""
 
-    eta = model.forward(batch["tau"], batch["states"], batch["labels"], batch["sources"])
+    raw = model.forward(batch["tau"], batch["states"], batch["labels"], batch["sources"])
     dt_eff = natural_horizon(dynamics_config) / float(c0_config.sample_steps) * float(c0_config.teacher_stride)
-    residual = math.sqrt(dt_eff) * eta - batch["innovations"]
+    sqrt_dt_eff = math.sqrt(max(dt_eff, 1e-20))
+    output_mode = str(c0_config.model_output_mode).lower()
+    if output_mode == "innovation":
+        # The C0 identity is E[Xi | S_t=s] = sqrt(dt_eff) * eta(t,s).
+        # On the 28x28 default horizon sqrt(dt_eff) is about 3e-3, so
+        # training raw eta makes gradients far too small.  We therefore let
+        # the network output the conditional mean of the normalized innovation
+        # and convert back to eta only when needed.
+        predicted_innovation_mean = raw
+        eta = raw / sqrt_dt_eff
+    elif output_mode == "eta":
+        eta = raw
+        predicted_innovation_mean = sqrt_dt_eff * eta
+    else:
+        raise ValueError(f"unknown model_output_mode: {c0_config.model_output_mode!r}")
+    residual = predicted_innovation_mean - batch["innovations"]
     theta = harmonic_mobility_channels(batch["states"], dynamics_config)
     mask = batch["masks"] & (theta > float(c0_config.theta_mask_min))
     mask_f = mask.to(dtype=residual.dtype)
@@ -540,7 +558,10 @@ def c0_weighted_innovation_loss(
     logw = batch["log_weights"].float()
     weights = torch.exp(logw - torch.max(logw.detach()))
     loss_main = (weights * per_slice).sum() / weights.sum().clamp_min(1e-12)
-    eta_l2 = eta.square().mean()
+    # The stride-integrated KL-energy is dt_eff * eta^2, which equals
+    # predicted_innovation_mean^2 in innovation-output mode.  Regularize this
+    # scaled control so the default eta_l2_weight remains meaningful.
+    eta_l2 = predicted_innovation_mean.square().mean()
     loss = loss_main + float(c0_config.eta_l2_weight) * eta_l2
     with torch.no_grad():
         denom = weights.square().sum().clamp_min(1e-12)
@@ -550,6 +571,7 @@ def c0_weighted_innovation_loss(
             "loss_main": float(loss_main.detach().cpu()),
             "eta_l2": float(eta_l2.detach().cpu()),
             "eta_rms": float(eta.detach().float().square().mean().sqrt().cpu()),
+            "prediction_rms": float(predicted_innovation_mean.detach().float().square().mean().sqrt().cpu()),
             "target_rms": float(batch["innovations"].detach().float().square().mean().sqrt().cpu()),
             "mask_fraction": float(mask_f.mean().detach().cpu()),
             "batch_ess_fraction": ess_frac,
@@ -615,7 +637,21 @@ def simulate_c0_generation(
         tau = torch.full((batch_size,), tau_value, dtype=states.dtype, device=device)
         context = _cuda_autocast(enabled=True) if amp_enabled else nullcontext()
         with context:
-            eta = model.forward(tau, states, labels_t, source_condition).float()
+            raw_control = model.forward(tau, states, labels_t, source_condition).float()
+        if float(c0_config.control_output_clip) > 0.0:
+            raw_control = raw_control.clamp(
+                -float(c0_config.control_output_clip),
+                float(c0_config.control_output_clip),
+            )
+        output_mode = str(c0_config.model_output_mode).lower()
+        if output_mode == "innovation":
+            dt_eff_train = natural_horizon(dynamics_config) / float(c0_config.sample_steps) * float(c0_config.teacher_stride)
+            eta = raw_control / math.sqrt(max(dt_eff_train, 1e-20))
+        elif output_mode == "eta":
+            eta = raw_control
+        else:
+            raise ValueError(f"unknown model_output_mode: {c0_config.model_output_mode!r}")
+        eta = float(c0_config.control_strength) * eta
         theta = harmonic_mobility_channels(states, dynamics_config)
         sigma_rate = float(c0_config.reference_noise_weight) * torch.sqrt(
             (2.0 * theta * float(n * n)).clamp_min(0.0)
@@ -740,6 +776,7 @@ def train_experiment11_c0(
         "loss_main": [],
         "eta_l2": [],
         "eta_rms": [],
+        "prediction_rms": [],
         "target_rms": [],
         "mask_fraction": [],
         "batch_ess_fraction": [],
@@ -792,19 +829,32 @@ def train_experiment11_c0(
                     grid_size=int(dynamics_config.grid_size),
                     max_images=64,
                 )
-                # Weighted top endpoints are often a better bridge diagnostic than random free endpoints.
-                path_lw = built.log_weights.numpy().reshape(-1)
-                # one weight per slice; select unique high-weight paths through first slice occurrence
+                # Weighted top terminal endpoints are the most useful C0 diagnostic:
+                # if these still do not resemble digits, the terminal reward is too weak
+                # or the reference process cannot reach the target basin.
+                slices_per_path = max(1, int(c0_config.time_slices_per_path))
+                path_dist2 = built.terminal_dist2.numpy().reshape(-1)[::slices_per_path]
+                path_lw = -path_dist2 / (2.0 * max(float(built.epsilon), 1e-12) ** 2)
                 order = np.argsort(-path_lw)[:64]
-                selected_states = built.states.index_select(0, torch.as_tensor(order, dtype=torch.long)).numpy()
-                selected_labels = built.labels.index_select(0, torch.as_tensor(order, dtype=torch.long)).numpy()
+                if built.source_labels is not None:
+                    selected_labels = np.asarray(built.source_labels, dtype=np.int64)[order]
+                else:
+                    selected_labels = np.zeros((len(order),), dtype=np.int64)
                 save_flux_samples_grid(
-                    selected_states,
+                    built.terminal_states[order],
                     selected_labels,
-                    out_dir / f"experiment11_c0_weighted_states_step{int(step):06d}.png",
+                    out_dir / f"experiment11_c0_weighted_terminals_step{int(step):06d}.png",
                     grid_size=int(dynamics_config.grid_size),
                     max_images=64,
                 )
+                if built.target_indices is not None:
+                    save_flux_samples_grid(
+                        dataset_images[built.target_indices[order]],
+                        selected_labels,
+                        out_dir / f"experiment11_c0_weighted_targets_step{int(step):06d}.png",
+                        grid_size=int(dynamics_config.grid_size),
+                        max_images=64,
+                    )
             except Exception as exc:
                 print(f"Warning: could not save cache preview: {exc}")
         return built
@@ -829,13 +879,14 @@ def train_experiment11_c0(
         scaler.step(optimizer)
         scaler.update()
         update_ema_state(ema_state, model, decay=float(c0_config.ema_decay))
-        for key in ["loss", "loss_main", "eta_l2", "eta_rms", "target_rms", "mask_fraction", "batch_ess_fraction"]:
+        for key in ["loss", "loss_main", "eta_l2", "eta_rms", "prediction_rms", "target_rms", "mask_fraction", "batch_ess_fraction"]:
             history[key].append(float(diagnostics[key]))
         history["cache_ess_fraction"].append(float(cache.ess_fraction))
         history["cache_clip_fraction"].append(float(cache.clip_fraction))
         if hasattr(bar, "set_postfix"):
             bar.set_postfix(
                 loss=float(diagnostics["loss"]),
+                pred=float(diagnostics["prediction_rms"]),
                 eta=float(diagnostics["eta_rms"]),
                 ess=float(diagnostics["batch_ess_fraction"]),
                 cache=float(cache.ess_fraction),
@@ -900,6 +951,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--terminal-ess-target", type=float, default=0.25)
     parser.add_argument("--eta-l2-weight", type=float, default=1e-4)
     parser.add_argument("--theta-mask-min", type=float, default=1e-12)
+    parser.add_argument(
+        "--model-output-mode",
+        choices=("innovation", "eta"),
+        default="innovation",
+        help="innovation trains the network to predict sqrt(dt_eff)*eta; eta keeps the old direct eta output",
+    )
+    parser.add_argument("--control-strength", type=float, default=1.0, help="Multiplier applied to learned control at generation")
+    parser.add_argument("--control-output-clip", type=float, default=5.0, help="Clip raw control output at generation; <=0 disables")
 
     parser.add_argument("--reference-free-weight", type=float, default=0.03)
     parser.add_argument("--reference-noise-weight", type=float, default=0.005)
@@ -938,6 +997,9 @@ def _experiment_config_from_args(args: argparse.Namespace) -> Experiment11C0Conf
         terminal_ess_target=float(args.terminal_ess_target),
         eta_l2_weight=float(args.eta_l2_weight),
         theta_mask_min=float(args.theta_mask_min),
+        model_output_mode=str(args.model_output_mode),
+        control_strength=float(args.control_strength),
+        control_output_clip=float(args.control_output_clip),
         reference_free_weight=float(args.reference_free_weight),
         reference_noise_weight=float(args.reference_noise_weight),
         sample_steps=int(args.sample_steps),
