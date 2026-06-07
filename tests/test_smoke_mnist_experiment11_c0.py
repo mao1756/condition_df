@@ -134,3 +134,65 @@ def test_experiment11_cache_loss_and_generation_smoke() -> None:
     assert samples.shape == (4, 64)
     assert np.allclose(samples.sum(axis=1), 1.0, atol=1e-5)
     assert float(result["clipping_fraction"]) >= 0.0
+
+
+
+def test_experiment11_branch_mean_cache_smoke() -> None:
+    images, labels = _toy_digit_measures(num_samples=30, grid_size=8)
+    config = _toy_config()
+    c0 = Experiment11C0Config(
+        cache_paths=3,
+        cache_batch_size=3,
+        time_slices_per_path=1,
+        teacher_mode="branch-mean",
+        branch_count=3,
+        branch_batch_size=9,
+        branch_min_ess_fraction=0.05,
+        teacher_stride=1,
+        sample_steps=3,
+        num_samples=0,
+        reference_free_weight=0.01,
+        reference_noise_weight=0.002,
+        terminal_epsilon=0.0,
+        terminal_ess_target=0.5,
+        base_channels=4,
+        batch_size=3,
+        proposal_mode="free",
+        hybrid_loss_weight=0.0,
+    )
+    rng = np.random.default_rng(456)
+    device = torch.device("cpu")
+    ot_cache = build_classwise_ot_cache(images, labels, config)
+    cache = build_c0_training_cache(
+        dataset_images=images,
+        dataset_labels=labels,
+        ot_cache=ot_cache,
+        dynamics_config=config,
+        c0_config=c0,
+        device=device,
+        rng=rng,
+        show_progress=False,
+    )
+    assert cache.states.shape == (3, 64)
+    assert cache.innovations.shape == (3, 2, 8, 8)
+    assert cache.branch_ess_fraction is not None
+    assert cache.branch_ess_fraction.shape == (3,)
+    assert np.all(cache.branch_ess_fraction > 0.0)
+    assert cache.branch_target_rms is not None and cache.branch_target_rms >= 0.0
+    assert cache.terminal_states is not None and cache.terminal_states.shape == (3, 8, 8)
+
+    model = DirectFluxUNet(config, base_channels=4)
+    batch = {
+        "states": cache.states,
+        "tau": cache.tau,
+        "labels": cache.labels,
+        "sources": cache.sources,
+        "innovations": cache.innovations,
+        "log_weights": cache.log_weights,
+        "masks": cache.masks,
+        "endpoints": cache.endpoints,
+    }
+    loss, diag = c0_weighted_innovation_loss(model, batch, config, c0)
+    assert torch.isfinite(loss)
+    assert diag["target_rms"] >= 0.0
+    assert "innovation_gain" in diag

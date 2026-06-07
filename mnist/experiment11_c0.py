@@ -83,6 +83,11 @@ class Experiment11C0Config:
     cache_refresh_every: int = 500
     teacher_stride: int = 8
     time_slices_per_path: int = 4
+    teacher_mode: str = "path-weighted"
+    branch_count: int = 16
+    branch_batch_size: int = 128
+    branch_confidence_weight: bool = True
+    branch_min_ess_fraction: float = 0.05
     terminal_epsilon: float = 0.0
     terminal_ess_target: float = 0.25
     eta_l2_weight: float = 1e-4
@@ -144,6 +149,13 @@ class C0TrainingCache:
     terminal_log_weights: np.ndarray | None = None
     corrected_log_weights: np.ndarray | None = None
     proposal_eta_rms: float = 0.0
+    teacher_mode: str = "path-weighted"
+    branch_ess_fraction: np.ndarray | None = None
+    branch_unweighted_terminal_dist2: np.ndarray | None = None
+    branch_weighted_terminal_dist2: np.ndarray | None = None
+    branch_confidence: np.ndarray | None = None
+    branch_target_rms: float | None = None
+    branch_zero_mse: float | None = None
 
     @property
     def size(self) -> int:
@@ -502,6 +514,258 @@ def _cache_batch(cache: C0TrainingCache, idx: Tensor, device: torch.device) -> d
     }
 
 
+
+def build_c2_branch_mean_training_cache(
+    *,
+    dataset_images: np.ndarray,
+    dataset_labels: np.ndarray,
+    ot_cache: ClasswiseOTCache,
+    dynamics_config: DirectFluxMNISTConfig,
+    c0_config: Experiment11C0Config,
+    device: torch.device,
+    rng: np.random.Generator,
+    show_progress: bool = True,
+) -> C0TrainingCache:
+    """Build a C2 cache using branch-mean conditional innovation targets.
+
+    For each cached prefix state, this launches several independent free
+    continuations from the same ``(t, state, endpoint)``.  The target is the
+    terminal-reward-weighted mean of the first-block innovations across those
+    branches.  This is a lower-variance Monte Carlo estimate of the conditional
+    Doob innovation mean than a single terminal-weighted path sample.
+    """
+
+    n = int(dynamics_config.grid_size)
+    num_pixels = n * n
+    entries = int(c0_config.cache_paths) * max(1, int(c0_config.time_slices_per_path))
+    chunk_size = max(1, int(c0_config.cache_batch_size))
+    branch_count = max(1, int(c0_config.branch_count))
+    branch_batch_size = max(branch_count, int(c0_config.branch_batch_size))
+    entries_per_branch_batch = max(1, branch_batch_size // branch_count)
+    steps = int(c0_config.sample_steps)
+    stride = int(c0_config.teacher_stride)
+    if entries <= 0 or steps <= 0 or stride <= 0:
+        raise ValueError("cache_paths, sample_steps, and teacher_stride must be positive")
+    if stride > steps:
+        raise ValueError("teacher_stride cannot exceed sample_steps")
+    horizon = natural_horizon(dynamics_config)
+    dt = horizon / float(steps)
+    dtype = torch.float32
+
+    all_prefix_states: list[Tensor] = []
+    all_tau: list[Tensor] = []
+    all_labels: list[Tensor] = []
+    all_sources: list[Tensor] = []
+    all_endpoints: list[Tensor] = []
+    all_starts: list[Tensor] = []
+    all_requested_labels: list[np.ndarray] = []
+    all_target_indices: list[np.ndarray] = []
+    all_target_labels: list[np.ndarray] = []
+    all_source_indices: list[np.ndarray] = []
+    all_source_labels: list[np.ndarray] = []
+    branch_innov_chunks: list[Tensor] = []
+    branch_mask_chunks: list[Tensor] = []
+    branch_dist_chunks: list[np.ndarray] = []
+    branch_terminal_chunks: list[np.ndarray] = []
+    total_clipped = 0
+    total_proposed = 0
+
+    entry_starts = list(range(0, entries, chunk_size))
+    bar = _progress(entry_starts, total=len(entry_starts), desc="build C2 branch cache", disable=not show_progress)
+    for entry_start in bar:
+        current = min(chunk_size, entries - int(entry_start))
+        labels_np = rng.integers(0, 10, size=current, dtype=np.int64)
+        labels_t = torch.as_tensor(labels_np, dtype=torch.long, device=device)
+        source_batch = _sample_source_batch_torch(
+            current,
+            dynamics_config,
+            device=device,
+            dtype=dtype,
+            label_tensor=labels_t,
+            source_images=dataset_images,
+            source_labels=dataset_labels,
+            rng=rng,
+            class_indices=ot_cache.class_indices,
+        )
+        states = source_batch.masses.to(device=device, dtype=dtype)
+        sources = states.clone()
+        source_np = states.detach().cpu().numpy().reshape(current, n, n)
+        target_indices = _ot_coupled_target_indices(
+            source_np,
+            labels_np,
+            dataset_images,
+            dataset_labels,
+            dynamics_config,
+            rng=rng,
+            ot_cache=ot_cache,
+        )
+        endpoints_np = np.asarray(dataset_images[target_indices], dtype=np.float64).reshape(current, n, n)
+        target_labels_np = np.asarray(dataset_labels[target_indices], dtype=np.int64)
+        if not np.array_equal(target_labels_np, labels_np):
+            mismatch = int(np.count_nonzero(target_labels_np != labels_np))
+            raise RuntimeError(f"target sampler returned {mismatch} labels that do not match requested labels")
+        endpoints = torch.as_tensor(endpoints_np.reshape(current, num_pixels), dtype=dtype, device=device)
+        starts_np = rng.integers(0, steps - stride + 1, size=current, dtype=np.int64)
+        starts_t = torch.as_tensor(starts_np, dtype=torch.long, device=device)
+
+        prefix_states = torch.empty(current, num_pixels, dtype=dtype, device=device)
+        max_start = int(starts_np.max(initial=0))
+        for step in range(max_start + 1):
+            active = starts_t == int(step)
+            if bool(active.any()):
+                prefix_states[active] = states[active]
+            if step < max_start:
+                states, _, _, clipped, proposed, _, _ = _reference_free_step_with_innovation(
+                    states,
+                    dt,
+                    dynamics_config,
+                    free_weight=float(c0_config.reference_free_weight),
+                    noise_weight=float(c0_config.reference_noise_weight),
+                )
+                total_clipped += int(clipped)
+                total_proposed += int(proposed)
+
+        all_prefix_states.append(prefix_states.detach().cpu())
+        all_tau.append(torch.as_tensor(horizon - starts_np.astype(np.float64) * dt, dtype=torch.float32))
+        all_labels.append(torch.as_tensor(labels_np, dtype=torch.long))
+        all_sources.append(sources.detach().cpu())
+        all_endpoints.append(endpoints.detach().cpu())
+        all_starts.append(torch.as_tensor(starts_np, dtype=torch.long))
+        all_requested_labels.append(labels_np.astype(np.int64))
+        all_target_indices.append(target_indices.astype(np.int64))
+        all_target_labels.append(target_labels_np.astype(np.int64))
+        if source_batch.indices is not None:
+            all_source_indices.append(np.asarray(source_batch.indices, dtype=np.int64))
+        if source_batch.labels is not None:
+            all_source_labels.append(np.asarray(source_batch.labels, dtype=np.int64))
+
+        chunk_branch_innov = torch.empty(current, branch_count, 2, n, n, dtype=dtype, device="cpu")
+        chunk_branch_mask = torch.empty(current, branch_count, 2, n, n, dtype=torch.bool, device="cpu")
+        chunk_branch_dist2 = np.empty((current, branch_count), dtype=np.float64)
+        chunk_branch_terminal = np.empty((current, branch_count, n, n), dtype=np.float64)
+        for local_start in range(0, current, entries_per_branch_batch):
+            local = min(entries_per_branch_batch, current - local_start)
+            entry_ids = torch.arange(local_start, local_start + local, dtype=torch.long, device=device)
+            branch_states = prefix_states.index_select(0, entry_ids).repeat_interleave(branch_count, dim=0)
+            branch_starts = starts_t.index_select(0, entry_ids).repeat_interleave(branch_count)
+            branch_xi = torch.zeros(local * branch_count, 2, n, n, dtype=dtype, device=device)
+            branch_ok = torch.ones(local * branch_count, 2, n, n, dtype=torch.bool, device=device)
+            max_remaining = int((steps - starts_np[local_start : local_start + local]).max(initial=0))
+            for local_step in range(max_remaining):
+                active = local_step < (steps - branch_starts)
+                if not bool(active.any()):
+                    continue
+                active_idx = torch.nonzero(active, as_tuple=False).flatten()
+                stepped, xi_channels, unclipped_channels, clipped, proposed, _, _ = _reference_free_step_with_innovation(
+                    branch_states.index_select(0, active_idx),
+                    dt,
+                    dynamics_config,
+                    free_weight=float(c0_config.reference_free_weight),
+                    noise_weight=float(c0_config.reference_noise_weight),
+                )
+                branch_states[active_idx] = stepped
+                total_clipped += int(clipped)
+                total_proposed += int(proposed)
+                if local_step < stride:
+                    branch_xi[active_idx] += xi_channels
+                    branch_ok[active_idx] &= unclipped_channels
+            branch_xi = branch_xi / math.sqrt(float(stride))
+            terminal_np = branch_states.detach().cpu().numpy().reshape(local * branch_count, n, n).astype(np.float64)
+            endpoint_features = ot_cache.target_features[target_indices[local_start : local_start + local]]
+            terminal_features = _lowres_features_np(terminal_np, dynamics_config).reshape(local, branch_count, -1)
+            dist2 = np.sum((terminal_features - endpoint_features[:, None, :]) ** 2, axis=2)
+            chunk_branch_innov[local_start : local_start + local] = branch_xi.detach().cpu().reshape(local, branch_count, 2, n, n)
+            chunk_branch_mask[local_start : local_start + local] = branch_ok.detach().cpu().reshape(local, branch_count, 2, n, n)
+            chunk_branch_dist2[local_start : local_start + local] = dist2
+            chunk_branch_terminal[local_start : local_start + local] = terminal_np.reshape(local, branch_count, n, n)
+
+        branch_innov_chunks.append(chunk_branch_innov)
+        branch_mask_chunks.append(chunk_branch_mask)
+        branch_dist_chunks.append(chunk_branch_dist2)
+        branch_terminal_chunks.append(chunk_branch_terminal)
+        if hasattr(bar, "set_postfix"):
+            partial_dist = np.concatenate([x.reshape(-1) for x in branch_dist_chunks], axis=0)
+            eps_preview = float(c0_config.terminal_epsilon)
+            if eps_preview <= 0.0:
+                eps_preview = _choose_epsilon_for_ess(partial_dist, float(c0_config.terminal_ess_target))
+            stats = _log_weight_stats(-partial_dist / (2.0 * max(eps_preview, 1e-12) ** 2))
+            clip_frac = 0.0 if total_proposed == 0 else float(total_clipped) / float(total_proposed)
+            bar.set_postfix(ess=stats["ess_fraction"], eps=eps_preview, clip=clip_frac)
+
+    prefix_states_all = torch.cat(all_prefix_states, dim=0).float()
+    taus_all = torch.cat(all_tau, dim=0).float()
+    labels_all = torch.cat(all_labels, dim=0).long()
+    sources_all = torch.cat(all_sources, dim=0).float()
+    endpoints_all = torch.cat(all_endpoints, dim=0).float()
+    starts_all = torch.cat(all_starts, dim=0).long()
+    branch_innov = torch.cat(branch_innov_chunks, dim=0).float()
+    branch_masks = torch.cat(branch_mask_chunks, dim=0).bool()
+    branch_dist2 = np.concatenate(branch_dist_chunks, axis=0)
+    branch_terminals = np.concatenate(branch_terminal_chunks, axis=0)
+
+    epsilon = float(c0_config.terminal_epsilon)
+    if epsilon <= 0.0:
+        epsilon = _choose_epsilon_for_ess(branch_dist2.reshape(-1), float(c0_config.terminal_ess_target))
+    branch_logw = -branch_dist2 / (2.0 * max(epsilon, 1e-12) ** 2)
+    stable = branch_logw - branch_logw.max(axis=1, keepdims=True)
+    branch_weights = np.exp(stable)
+    branch_weight_sums = np.maximum(branch_weights.sum(axis=1, keepdims=True), 1e-12)
+    branch_probs = branch_weights / branch_weight_sums
+    branch_ess = (branch_weights.sum(axis=1) ** 2) / np.maximum(branch_count * np.sum(branch_weights * branch_weights, axis=1), 1e-12)
+    branch_weighted_dist2 = np.sum(branch_probs * branch_dist2, axis=1)
+    branch_unweighted_dist2 = np.mean(branch_dist2, axis=1)
+    probs_t = torch.as_tensor(branch_probs, dtype=torch.float32).view(entries, branch_count, 1, 1, 1)
+    innovations = (branch_innov * probs_t).sum(dim=1)
+    mask_score = (branch_masks.float() * probs_t).sum(dim=1)
+    masks = mask_score >= 0.5
+    best_branch = np.argmax(branch_logw, axis=1)
+    terminal_states = branch_terminals[np.arange(entries), best_branch]
+    if bool(c0_config.branch_confidence_weight):
+        confidence = np.minimum(1.0, branch_ess / max(float(c0_config.branch_min_ess_fraction), 1e-12))
+    else:
+        confidence = np.ones_like(branch_ess)
+    log_weights = np.log(np.maximum(confidence, 1e-12)).astype(np.float32)
+    stats = _log_weight_stats(log_weights)
+    path_indices = torch.arange(entries, dtype=torch.long)
+    requested_labels = np.concatenate(all_requested_labels)
+    target_labels = np.concatenate(all_target_labels)
+    target_indices = np.concatenate(all_target_indices)
+    return C0TrainingCache(
+        states=prefix_states_all,
+        tau=taus_all,
+        labels=labels_all,
+        sources=sources_all,
+        innovations=innovations.float(),
+        log_weights=torch.as_tensor(log_weights, dtype=torch.float32),
+        masks=masks.bool(),
+        endpoints=endpoints_all,
+        terminal_dist2=torch.as_tensor(branch_weighted_dist2, dtype=torch.float32),
+        path_indices=path_indices,
+        starts=starts_all,
+        epsilon=float(epsilon),
+        ess_fraction=float(stats["ess_fraction"]),
+        clip_fraction=0.0 if total_proposed == 0 else float(total_clipped) / float(total_proposed),
+        weighted_terminal_dist2=float(np.mean(branch_weighted_dist2)),
+        unweighted_terminal_dist2=float(np.mean(branch_unweighted_dist2)),
+        source_indices=np.concatenate(all_source_indices) if all_source_indices else None,
+        source_labels=np.concatenate(all_source_labels) if all_source_labels else None,
+        requested_labels=requested_labels,
+        target_indices=target_indices,
+        target_labels=target_labels,
+        terminal_states=terminal_states,
+        proposal_log_corrections=np.zeros(entries, dtype=np.float64),
+        terminal_log_weights=-branch_weighted_dist2 / (2.0 * max(float(epsilon), 1e-12) ** 2),
+        corrected_log_weights=log_weights.astype(np.float64),
+        proposal_eta_rms=0.0,
+        teacher_mode="branch-mean",
+        branch_ess_fraction=branch_ess.astype(np.float64),
+        branch_unweighted_terminal_dist2=branch_unweighted_dist2.astype(np.float64),
+        branch_weighted_terminal_dist2=branch_weighted_dist2.astype(np.float64),
+        branch_confidence=confidence.astype(np.float64),
+        branch_target_rms=float(innovations.float().square().mean().sqrt()),
+        branch_zero_mse=float(innovations.float().square().mean()),
+    )
+
 def build_c0_training_cache(
     *,
     dataset_images: np.ndarray,
@@ -514,6 +778,21 @@ def build_c0_training_cache(
     show_progress: bool = True,
 ) -> C0TrainingCache:
     """Build a weighted innovation cache, optionally with proposal correction."""
+
+    teacher_mode = str(c0_config.teacher_mode).lower().replace("_", "-")
+    if teacher_mode in {"branch", "branch-mean", "c2"}:
+        return build_c2_branch_mean_training_cache(
+            dataset_images=dataset_images,
+            dataset_labels=dataset_labels,
+            ot_cache=ot_cache,
+            dynamics_config=dynamics_config,
+            c0_config=c0_config,
+            device=device,
+            rng=rng,
+            show_progress=show_progress,
+        )
+    if teacher_mode not in {"path", "path-weighted", "c0", "weighted"}:
+        raise ValueError(f"unknown teacher_mode: {c0_config.teacher_mode!r}")
 
     n = int(dynamics_config.grid_size)
     num_pixels = n * n
@@ -751,6 +1030,7 @@ def build_c0_training_cache(
         terminal_log_weights=terminal_log_weights,
         corrected_log_weights=corrected_log_weights,
         proposal_eta_rms=float(np.mean(proposal_eta_rms)) if proposal_eta_rms.size else 0.0,
+        teacher_mode="path-weighted",
     )
 
 
@@ -871,6 +1151,7 @@ def c0_weighted_innovation_loss(
 
     residual = predicted_innovation_mean - batch["innovations"]
     per_slice = (residual.square() * mask_f).sum(dim=(1, 2, 3)) / mask_f.sum(dim=(1, 2, 3)).clamp_min(1.0)
+    zero_per_slice = (batch["innovations"].square() * mask_f).sum(dim=(1, 2, 3)) / mask_f.sum(dim=(1, 2, 3)).clamp_min(1.0)
 
     logw = batch["log_weights"].float()
     raw_weights = torch.exp(logw - torch.max(logw.detach()))
@@ -884,6 +1165,7 @@ def c0_weighted_innovation_loss(
     else:
         raise ValueError(f"unknown loss_reweighting: {c0_config.loss_reweighting!r}")
     loss_innovation = _weighted_mean_torch(per_slice, weights)
+    loss_zero = _weighted_mean_torch(zero_per_slice, weights)
 
     loss_hybrid = torch.zeros((), dtype=loss_innovation.dtype, device=loss_innovation.device)
     hybrid_target_rms = torch.zeros((), dtype=loss_innovation.dtype, device=loss_innovation.device)
@@ -916,6 +1198,8 @@ def c0_weighted_innovation_loss(
             "loss": float(loss.detach().cpu()),
             "loss_main": float(loss_innovation.detach().cpu()),
             "loss_innovation": float(loss_innovation.detach().cpu()),
+            "loss_zero": float(loss_zero.detach().cpu()),
+            "innovation_gain": float((1.0 - loss_innovation / loss_zero.clamp_min(1e-12)).detach().cpu()),
             "loss_hybrid": float(loss_hybrid.detach().cpu()),
             "loss_poisson": float(loss_hybrid.detach().cpu()),
             "eta_l2": float(eta_l2.detach().cpu()),
@@ -1129,6 +1413,8 @@ def train_experiment11_c0(
         "loss": [],
         "loss_main": [],
         "loss_innovation": [],
+        "loss_zero": [],
+        "innovation_gain": [],
         "loss_hybrid": [],
         "loss_poisson": [],
         "eta_l2": [],
@@ -1144,6 +1430,9 @@ def train_experiment11_c0(
         "batch_raw_ess_fraction": [],
         "cache_ess_fraction": [],
         "cache_clip_fraction": [],
+        "branch_ess_fraction_mean": [],
+        "branch_ess_fraction_min": [],
+        "branch_target_rms": [],
     }
     cache_rows: list[dict[str, float | int]] = []
     cache: C0TrainingCache | None = None
@@ -1182,11 +1471,28 @@ def train_experiment11_c0(
         if built.terminal_log_weights is not None:
             row["terminal_only_ess_fraction"] = float(_log_weight_stats(built.terminal_log_weights)["ess_fraction"])
         slices_per_path_diag = max(1, int(c0_config.time_slices_per_path))
-        path_dist2_diag = built.terminal_dist2.numpy().reshape(-1)[::slices_per_path_diag]
-        if built.corrected_log_weights is not None and built.corrected_log_weights.shape[0] == path_dist2_diag.shape[0]:
-            path_logw_diag = built.corrected_log_weights
+        if built.branch_ess_fraction is not None:
+            path_dist2_diag = built.terminal_dist2.numpy().reshape(-1)
+            path_logw_diag = built.log_weights.numpy().reshape(-1)
+            row["teacher_mode_branch_mean"] = 1
+            branch_ess = np.asarray(built.branch_ess_fraction, dtype=np.float64)
+            row["branch_count"] = int(c0_config.branch_count)
+            row["branch_ess_fraction_mean"] = float(np.mean(branch_ess))
+            row["branch_ess_fraction_min"] = float(np.min(branch_ess))
+            row["branch_ess_fraction_median"] = float(np.median(branch_ess))
+            if built.branch_confidence is not None:
+                row["branch_confidence_mean"] = float(np.mean(np.asarray(built.branch_confidence, dtype=np.float64)))
+            if built.branch_weighted_terminal_dist2 is not None:
+                row["branch_weighted_terminal_dist2_mean"] = float(np.mean(np.asarray(built.branch_weighted_terminal_dist2, dtype=np.float64)))
+            if built.branch_unweighted_terminal_dist2 is not None:
+                row["branch_unweighted_terminal_dist2_mean"] = float(np.mean(np.asarray(built.branch_unweighted_terminal_dist2, dtype=np.float64)))
         else:
-            path_logw_diag = built.log_weights.numpy().reshape(-1)[::slices_per_path_diag]
+            path_dist2_diag = built.terminal_dist2.numpy().reshape(-1)[::slices_per_path_diag]
+            if built.corrected_log_weights is not None and built.corrected_log_weights.shape[0] == path_dist2_diag.shape[0]:
+                path_logw_diag = built.corrected_log_weights
+            else:
+                path_logw_diag = built.log_weights.numpy().reshape(-1)[::slices_per_path_diag]
+            row["teacher_mode_branch_mean"] = 0
         requested_diag = built.requested_labels
         target_diag = built.target_labels
         row.update(_histogram_dict(requested_diag, prefix="requested_label_count"))
@@ -1205,6 +1511,10 @@ def train_experiment11_c0(
             terminal_log_weights=np.asarray([] if built.terminal_log_weights is None else built.terminal_log_weights, dtype=np.float64),
             corrected_log_weights=np.asarray([] if built.corrected_log_weights is None else built.corrected_log_weights, dtype=np.float64),
             proposal_log_corrections=np.asarray([] if built.proposal_log_corrections is None else built.proposal_log_corrections, dtype=np.float64),
+            branch_ess_fraction=np.asarray([] if built.branch_ess_fraction is None else built.branch_ess_fraction, dtype=np.float64),
+            branch_confidence=np.asarray([] if built.branch_confidence is None else built.branch_confidence, dtype=np.float64),
+            branch_weighted_terminal_dist2=np.asarray([] if built.branch_weighted_terminal_dist2 is None else built.branch_weighted_terminal_dist2, dtype=np.float64),
+            branch_unweighted_terminal_dist2=np.asarray([] if built.branch_unweighted_terminal_dist2 is None else built.branch_unweighted_terminal_dist2, dtype=np.float64),
             starts=built.starts.numpy(),
             path_indices=built.path_indices.numpy(),
             requested_labels=np.asarray([] if built.requested_labels is None else built.requested_labels, dtype=np.int64),
@@ -1222,11 +1532,15 @@ def train_experiment11_c0(
             # like a target sampler failure.
             try:
                 slices_per_path = max(1, int(c0_config.time_slices_per_path))
-                path_dist2 = built.terminal_dist2.numpy().reshape(-1)[::slices_per_path]
-                if built.corrected_log_weights is not None and built.corrected_log_weights.shape[0] == path_dist2.shape[0]:
-                    path_lw = built.corrected_log_weights
+                if built.branch_ess_fraction is not None:
+                    path_dist2 = built.terminal_dist2.numpy().reshape(-1)
+                    path_lw = built.log_weights.numpy().reshape(-1)
                 else:
-                    path_lw = -path_dist2 / (2.0 * max(float(built.epsilon), 1e-12) ** 2)
+                    path_dist2 = built.terminal_dist2.numpy().reshape(-1)[::slices_per_path]
+                    if built.corrected_log_weights is not None and built.corrected_log_weights.shape[0] == path_dist2.shape[0]:
+                        path_lw = built.corrected_log_weights
+                    else:
+                        path_lw = -path_dist2 / (2.0 * max(float(built.epsilon), 1e-12) ** 2)
                 requested_labels = built.requested_labels if built.requested_labels is not None else np.zeros((built.terminal_states.shape[0],), dtype=np.int64)
                 target_labels = built.target_labels if built.target_labels is not None else requested_labels
 
@@ -1300,6 +1614,8 @@ def train_experiment11_c0(
             "loss",
             "loss_main",
             "loss_innovation",
+            "loss_zero",
+            "innovation_gain",
             "loss_hybrid",
             "loss_poisson",
             "eta_l2",
@@ -1317,12 +1633,20 @@ def train_experiment11_c0(
             history[key].append(float(diagnostics[key]))
         history["cache_ess_fraction"].append(float(cache.ess_fraction))
         history["cache_clip_fraction"].append(float(cache.clip_fraction))
+        history["branch_ess_fraction_mean"].append(
+            float(np.mean(cache.branch_ess_fraction)) if cache.branch_ess_fraction is not None and cache.branch_ess_fraction.size else 0.0
+        )
+        history["branch_ess_fraction_min"].append(
+            float(np.min(cache.branch_ess_fraction)) if cache.branch_ess_fraction is not None and cache.branch_ess_fraction.size else 0.0
+        )
+        history["branch_target_rms"].append(float("nan") if cache.branch_target_rms is None else float(cache.branch_target_rms))
         if hasattr(bar, "set_postfix"):
             bar.set_postfix(
                 loss=float(diagnostics["loss"]),
                 pred=float(diagnostics["prediction_rms"]),
                 eta=float(diagnostics["eta_rms"]),
                 ess=float(diagnostics["batch_ess_fraction"]),
+                gain=float(diagnostics.get("innovation_gain", 0.0)),
                 poi=float(diagnostics["loss_poisson"]),
                 cache=float(cache.ess_fraction),
             )
@@ -1382,6 +1706,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cache-refresh-every", type=int, default=500)
     parser.add_argument("--teacher-stride", type=int, default=8)
     parser.add_argument("--time-slices-per-path", type=int, default=4)
+    parser.add_argument(
+        "--teacher-mode",
+        choices=("path-weighted", "branch-mean"),
+        default="path-weighted",
+        help="path-weighted is C0/C1; branch-mean builds C2 conditional-mean targets.",
+    )
+    parser.add_argument("--branch-count", type=int, default=16, help="Number of continuations per prefix state for --teacher-mode branch-mean")
+    parser.add_argument(
+        "--branch-batch-size",
+        type=int,
+        default=128,
+        help="Maximum expanded branch states per simulation minibatch; entries per batch are floor(value/branch_count)",
+    )
+    parser.add_argument("--branch-min-ess-fraction", type=float, default=0.05, help="Confidence normalization floor for branch ESS")
+    parser.add_argument("--no-branch-confidence-weight", action="store_true", help="Do not downweight branch targets with low within-prefix ESS")
     parser.add_argument("--terminal-epsilon", type=float, default=0.0, help="<=0 chooses epsilon by ESS calibration")
     parser.add_argument("--terminal-ess-target", type=float, default=0.25)
     parser.add_argument("--eta-l2-weight", type=float, default=1e-4)
@@ -1455,6 +1794,11 @@ def _experiment_config_from_args(args: argparse.Namespace) -> Experiment11C0Conf
         cache_refresh_every=int(args.cache_refresh_every),
         teacher_stride=int(args.teacher_stride),
         time_slices_per_path=int(args.time_slices_per_path),
+        teacher_mode=str(args.teacher_mode),
+        branch_count=int(args.branch_count),
+        branch_batch_size=int(args.branch_batch_size),
+        branch_confidence_weight=not bool(args.no_branch_confidence_weight),
+        branch_min_ess_fraction=float(args.branch_min_ess_fraction),
         terminal_epsilon=float(args.terminal_epsilon),
         terminal_ess_target=float(args.terminal_ess_target),
         eta_l2_weight=float(args.eta_l2_weight),
