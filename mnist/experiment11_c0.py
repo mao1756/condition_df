@@ -29,7 +29,7 @@ import json
 import math
 import time
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Sequence
@@ -110,12 +110,20 @@ class Experiment11C0Config:
     model_output_mode: str = "innovation"
     control_strength: float = 1.0
     control_output_clip: float = 5.0
+    sampling_weights: str = "ema"
+    sample_control_strengths: str = ""
+    save_sampling_ablations: bool = False
+    sample_ablation_modes: str = "learned_only_no_noise,free_plus_learned_no_noise,full_stochastic,free_only,noise_only"
     reference_free_weight: float = 0.03
     reference_noise_weight: float = 0.005
     sample_steps: int = 256
     num_samples: int = 64
     sample_save_every: int = 0
     save_cache_previews: bool = False
+    value_fd_diagnostic_states: int = 0
+    value_fd_diagnostic_edges: int = 4
+    value_fd_diagnostic_branches: int = 4
+    value_fd_epsilon: float = 1e-4
     seed: int = 0
     sample_seed: int = 1
     use_amp: bool = True
@@ -565,6 +573,196 @@ def _cache_batch(cache: C0TrainingCache, idx: Tensor, device: torch.device) -> d
         "masks": cache.masks.index_select(0, idx_cpu).to(device),
         "endpoints": cache.endpoints.index_select(0, idx_cpu).to(device),
     }
+
+
+@torch.no_grad()
+def _finite_difference_value_diagnostic(
+    cache: C0TrainingCache,
+    dynamics_config: DirectFluxMNISTConfig,
+    c0_config: Experiment11C0Config,
+    *,
+    device: torch.device,
+    seed: int,
+) -> tuple[dict[str, float | int], dict[str, np.ndarray]]:
+    """Estimate local heat-potential edge gradients by paired rollouts.
+
+    This is a diagnostic for the honest Doob heat potential: perturb a small
+    amount of mass across selected edges, estimate log u_t(s) from terminal
+    reward branches, and compare the induced Brownian innovation readout with
+    the cache innovation target. It does not alter the training loss.
+    """
+
+    max_states = int(c0_config.value_fd_diagnostic_states)
+    max_edges = int(c0_config.value_fd_diagnostic_edges)
+    branches = int(c0_config.value_fd_diagnostic_branches)
+    if max_states <= 0 or max_edges <= 0 or branches <= 0 or cache.size <= 0:
+        return {}, {}
+
+    n = int(dynamics_config.grid_size)
+    steps = int(c0_config.sample_steps)
+    horizon = natural_horizon(dynamics_config)
+    dt = horizon / float(steps)
+    sqrt_dt_eff = math.sqrt(max(dt * float(c0_config.teacher_stride), 1e-20))
+    rng = np.random.default_rng(int(seed))
+    selected = rng.choice(cache.size, size=min(max_states, cache.size), replace=False)
+    selected_t = torch.as_tensor(selected, dtype=torch.long)
+    base_states = cache.states.index_select(0, selected_t).float()
+    base_starts = cache.starts.index_select(0, selected_t).long()
+    base_endpoints = cache.endpoints.index_select(0, selected_t).float()
+    base_innov = cache.innovations.index_select(0, selected_t).float()
+    theta = harmonic_mobility_channels(base_states.to(device), dynamics_config).detach().cpu().float()
+
+    plus_states: list[Tensor] = []
+    minus_states: list[Tensor] = []
+    starts: list[int] = []
+    endpoints: list[Tensor] = []
+    state_ids: list[int] = []
+    channels: list[int] = []
+    ys: list[int] = []
+    xs: list[int] = []
+    amounts: list[float] = []
+    targets: list[float] = []
+    sigma_edges: list[float] = []
+    requested_eps = abs(float(c0_config.value_fd_epsilon))
+    min_amount = max(float(dynamics_config.mass_floor) * 10.0, 1e-12)
+    for local_idx, global_idx in enumerate(selected):
+        order = rng.permutation(2 * n * n)
+        kept = 0
+        base = base_states[local_idx]
+        for flat in order:
+            ch = int(flat // (n * n))
+            rem = int(flat % (n * n))
+            y = int(rem // n)
+            x = int(rem % n)
+            origin = y * n + x
+            if ch == 0:
+                dest = y * n + ((x + 1) % n)
+            else:
+                dest = ((y + 1) % n) * n + x
+            amount = min(requested_eps, 0.25 * float(min(base[origin], base[dest])))
+            if amount <= min_amount:
+                continue
+            plus = base.clone()
+            minus = base.clone()
+            plus[origin] -= amount
+            plus[dest] += amount
+            minus[origin] += amount
+            minus[dest] -= amount
+            plus_states.append(plus)
+            minus_states.append(minus)
+            start_value = int(base_starts[local_idx])
+            starts.append(start_value)
+            endpoints.append(base_endpoints[local_idx])
+            state_ids.append(int(global_idx))
+            channels.append(ch)
+            ys.append(y)
+            xs.append(x)
+            amounts.append(float(amount))
+            targets.append(float(base_innov[local_idx, ch, y, x]))
+            sigma_edge = float(c0_config.reference_noise_weight) * math.sqrt(
+                max(0.0, 2.0 * float(theta[local_idx, ch, y, x]) * float(n * n))
+            )
+            sigma_edges.append(float(sigma_edge))
+            kept += 1
+            if kept >= max_edges:
+                break
+
+    pair_count = len(amounts)
+    if pair_count == 0:
+        return {"value_fd_pair_count": 0}, {}
+
+    rollout_starts = torch.as_tensor(starts, dtype=torch.long, device=device).repeat_interleave(branches)
+
+    def rollout_with_common_noise(start_states: Tensor) -> Tensor:
+        states = start_states.repeat_interleave(branches, dim=0).to(device=device, dtype=torch.float32)
+        max_remaining = int((steps - rollout_starts).max().detach().cpu())
+        for local_step in range(max_remaining):
+            active = local_step < (steps - rollout_starts)
+            if not bool(active.any()):
+                continue
+            active_idx = torch.nonzero(active, as_tuple=False).flatten()
+            stepped, _, _, _, _, _, _ = _reference_free_step_with_innovation(
+                states.index_select(0, active_idx),
+                dt,
+                dynamics_config,
+                free_weight=float(c0_config.reference_free_weight),
+                noise_weight=float(c0_config.reference_noise_weight),
+            )
+            states[active_idx] = stepped
+        return states
+
+    cpu_rng_state = torch.random.get_rng_state()
+    cuda_rng_state = None
+    if device.type == "cuda":
+        cuda_rng_state = torch.cuda.get_rng_state(device)
+    torch.random.set_rng_state(cpu_rng_state)
+    if cuda_rng_state is not None:
+        torch.cuda.set_rng_state(cuda_rng_state, device)
+    plus_terminals_t = rollout_with_common_noise(torch.stack(plus_states, dim=0))
+    torch.random.set_rng_state(cpu_rng_state)
+    if cuda_rng_state is not None:
+        torch.cuda.set_rng_state(cuda_rng_state, device)
+    minus_terminals_t = rollout_with_common_noise(torch.stack(minus_states, dim=0))
+    torch.random.set_rng_state(cpu_rng_state)
+    if cuda_rng_state is not None:
+        torch.cuda.set_rng_state(cuda_rng_state, device)
+
+    plus_terminals = plus_terminals_t.detach().cpu().numpy().reshape(pair_count, branches, n, n)
+    minus_terminals = minus_terminals_t.detach().cpu().numpy().reshape(pair_count, branches, n, n)
+    terminals = np.stack([plus_terminals, minus_terminals], axis=1).astype(np.float64)
+    endpoint_np = torch.stack(endpoints, dim=0).numpy().reshape(pair_count, n, n)
+    endpoint_features = _lowres_features_np(endpoint_np, dynamics_config).reshape(pair_count, -1)
+    terminal_features = _lowres_features_np(terminals.reshape(pair_count * 2 * branches, n, n), dynamics_config)
+    terminal_features = terminal_features.reshape(pair_count, 2, branches, -1)
+    dist2 = np.sum((terminal_features - endpoint_features[:, None, None, :]) ** 2, axis=3)
+    reward_eps = max(float(cache.epsilon), 1e-12)
+    logw = -dist2 / (2.0 * reward_eps * reward_eps)
+    logu = _logsumexp_np(logw, axis=2) - math.log(float(branches))
+    fd_grad = (logu[:, 0] - logu[:, 1]) / (2.0 * np.asarray(amounts, dtype=np.float64))
+    sigma_arr = np.asarray(sigma_edges, dtype=np.float64)
+    fd_innovation = sqrt_dt_eff * sigma_arr * fd_grad
+    target_arr = np.asarray(targets, dtype=np.float64)
+    finite = np.isfinite(fd_innovation) & np.isfinite(target_arr)
+    if not np.any(finite):
+        return {"value_fd_pair_count": int(pair_count), "value_fd_finite_count": 0}, {}
+
+    fd_valid = fd_innovation[finite]
+    target_valid = target_arr[finite]
+    dot = float(np.sum(fd_valid * target_valid))
+    fd_norm = float(np.sqrt(np.sum(fd_valid * fd_valid)))
+    target_norm = float(np.sqrt(np.sum(target_valid * target_valid)))
+    fd_centered = fd_valid - float(np.mean(fd_valid))
+    target_centered = target_valid - float(np.mean(target_valid))
+    corr_denom = float(np.sqrt(np.sum(fd_centered * fd_centered) * np.sum(target_centered * target_centered)))
+    fd_rms = float(np.sqrt(np.mean(np.square(fd_valid))))
+    target_rms = float(np.sqrt(np.mean(np.square(target_valid))))
+    summary: dict[str, float | int] = {
+        "value_fd_pair_count": int(pair_count),
+        "value_fd_finite_count": int(np.count_nonzero(finite)),
+        "value_fd_logu_delta_rms": float(np.sqrt(np.mean(np.square(logu[:, 0] - logu[:, 1])))),
+        "value_fd_grad_rms": float(np.sqrt(np.mean(np.square(fd_grad[finite])))),
+        "value_fd_innovation_rms": fd_rms,
+        "value_fd_target_rms": target_rms,
+        "value_fd_innovation_to_target_rms": fd_rms / max(target_rms, 1e-12),
+        "value_fd_cosine": dot / max(fd_norm * target_norm, 1e-12),
+        "value_fd_corr": 0.0 if corr_denom <= 1e-12 else float(np.sum(fd_centered * target_centered) / corr_denom),
+        "value_fd_sign_agreement": float(np.mean(np.sign(fd_valid) == np.sign(target_valid))),
+    }
+    details = {
+        "state_indices": np.asarray(state_ids, dtype=np.int64),
+        "channels": np.asarray(channels, dtype=np.int64),
+        "ys": np.asarray(ys, dtype=np.int64),
+        "xs": np.asarray(xs, dtype=np.int64),
+        "amounts": np.asarray(amounts, dtype=np.float64),
+        "sigma_edges": sigma_arr,
+        "target_innovation": target_arr,
+        "fd_grad": fd_grad,
+        "fd_innovation": fd_innovation,
+        "logu_plus": logu[:, 0],
+        "logu_minus": logu[:, 1],
+        "dist2": dist2,
+    }
+    return summary, details
 
 
 
@@ -1316,6 +1514,7 @@ def simulate_c0_generation(
     source_labels: np.ndarray,
     deterministic: bool = False,
     show_progress: bool = True,
+    ablation_mode: str = "full_stochastic",
 ) -> dict[str, object]:
     """Generate samples using the learned C0 Brownian-shift field."""
 
@@ -1351,9 +1550,24 @@ def simulate_c0_generation(
     learned_step_rms_sum = 0.0
     free_step_rms_sum = 0.0
     noise_step_rms_sum = 0.0
+    raw_control_rms_sum = 0.0
+    eta_rms_sum = 0.0
+    time_bins = 4
+    raw_control_bin_sums = np.zeros((time_bins,), dtype=np.float64)
+    eta_bin_sums = np.zeros((time_bins,), dtype=np.float64)
+    learned_step_bin_sums = np.zeros((time_bins,), dtype=np.float64)
+    bin_counts = np.zeros((time_bins,), dtype=np.int64)
     count = 0
     amp_enabled = bool(c0_config.use_amp and device.type == "cuda")
-    bar = _progress(range(steps), total=steps, desc="sample Experiment 11", disable=not show_progress)
+    mode = str(ablation_mode).strip().lower().replace("-", "_")
+    valid_modes = {"full_stochastic", "learned_only_no_noise", "free_plus_learned_no_noise", "free_only", "noise_only", "free_plus_noise"}
+    if mode not in valid_modes:
+        raise ValueError(f"unknown Experiment 11 sampling ablation mode: {ablation_mode!r}")
+    learned_active = mode in {"full_stochastic", "learned_only_no_noise", "free_plus_learned_no_noise"}
+    free_weight_step = float(c0_config.reference_free_weight) if mode in {"full_stochastic", "free_plus_learned_no_noise", "free_only", "free_plus_noise"} else 0.0
+    noise_weight_step = float(c0_config.reference_noise_weight) if mode in {"full_stochastic", "noise_only", "free_plus_noise"} else 0.0
+    deterministic_step = bool(deterministic) or noise_weight_step == 0.0
+    bar = _progress(range(steps), total=steps, desc=f"sample Experiment 11/{mode}", disable=not show_progress)
     from mnist.eulerian_flux_mnist import eulerian_flux_step_torch
 
     for step in bar:
@@ -1375,15 +1589,25 @@ def simulate_c0_generation(
             eta = raw_control
         else:
             raise ValueError(f"unknown model_output_mode: {c0_config.model_output_mode!r}")
+        raw_control_rms = float(raw_control.detach().float().square().mean().sqrt().cpu())
         eta = float(c0_config.control_strength) * eta
+        eta_after_strength_rms = float(eta.detach().float().square().mean().sqrt().cpu())
+        raw_control_rms_sum += raw_control_rms
+        eta_rms_sum += eta_after_strength_rms
+        bin_index = min(time_bins - 1, int(float(step) / max(float(steps), 1.0) * float(time_bins)))
+        raw_control_bin_sums[bin_index] += raw_control_rms
+        eta_bin_sums[bin_index] += eta_after_strength_rms
+        bin_counts[bin_index] += 1
         theta = harmonic_mobility_channels(states, dynamics_config)
         sigma_rate = float(c0_config.reference_noise_weight) * torch.sqrt(
             (2.0 * theta * float(n * n)).clamp_min(0.0)
         )
-        learned_flux = sigma_rate * eta
-        learned_step_rms_sum += float((learned_flux * dt).detach().float().square().mean().sqrt().cpu())
+        learned_flux = sigma_rate * eta if learned_active else torch.zeros_like(sigma_rate)
+        learned_step_rms_value = float((learned_flux * dt).detach().float().square().mean().sqrt().cpu())
+        learned_step_rms_sum += learned_step_rms_value
+        learned_step_bin_sums[bin_index] += learned_step_rms_value
         free_step_rms_sum += float(
-            (float(c0_config.reference_free_weight) * free_drift_flux_torch(states, dynamics_config) * dt)
+            (float(free_weight_step) * free_drift_flux_torch(states, dynamics_config) * dt)
             .detach()
             .float()
             .square()
@@ -1392,7 +1616,7 @@ def simulate_c0_generation(
             .cpu()
         )
         noise_step_rms_sum += float(
-            (float(c0_config.reference_noise_weight) * torch.sqrt((2.0 * theta * float(n * n) * dt).clamp_min(0.0)))
+            (float(noise_weight_step) * torch.sqrt((2.0 * theta * float(n * n) * dt).clamp_min(0.0)))
             .detach()
             .float()
             .square()
@@ -1406,9 +1630,9 @@ def simulate_c0_generation(
             learned_flux,
             dt,
             dynamics_config,
-            deterministic=deterministic,
-            free_weight=float(c0_config.reference_free_weight),
-            noise_weight=float(c0_config.reference_noise_weight),
+            deterministic=deterministic_step,
+            free_weight=float(free_weight_step),
+            noise_weight=float(noise_weight_step),
             learned_weight=1.0,
         )
         clipped += int(c_step)
@@ -1435,9 +1659,19 @@ def simulate_c0_generation(
         "sources": initial_states,
         "trajectory": None if int(c0_config.sample_save_every) <= 0 else np.stack(trajectory, axis=0),
         "clipping_fraction": 0.0 if proposed == 0 else float(clipped) / float(proposed),
+        "ablation_mode": mode,
+        "ablation_learned_active": bool(learned_active),
+        "ablation_free_weight": float(free_weight_step),
+        "ablation_noise_weight": float(noise_weight_step),
         "learned_step_rms": learned_rms,
         "free_step_rms": free_rms,
         "noise_step_rms": noise_rms,
+        "learned_to_noise_ratio": learned_rms / max(noise_rms, 1e-12),
+        "raw_control_rms_mean": raw_control_rms_sum / max(count, 1),
+        "eta_rms_mean": eta_rms_sum / max(count, 1),
+        "raw_control_rms_by_time_bin": (raw_control_bin_sums / np.maximum(bin_counts, 1)).tolist(),
+        "eta_rms_by_time_bin": (eta_bin_sums / np.maximum(bin_counts, 1)).tolist(),
+        "learned_step_rms_by_time_bin": (learned_step_bin_sums / np.maximum(bin_counts, 1)).tolist(),
         "free_to_learned_ratio": free_rms / max(learned_rms, 1e-12),
         "noise_to_learned_ratio": noise_rms / max(learned_rms, 1e-12),
         "sample_entropy": float(_mass_entropy_torch(states).mean().detach().cpu()),
@@ -1445,6 +1679,92 @@ def simulate_c0_generation(
         **diagnostics,
     }
 
+
+
+def _parse_float_csv(text: str | None, *, fallback: Sequence[float]) -> list[float]:
+    if text is None or str(text).strip() == "":
+        return [float(x) for x in fallback]
+    values: list[float] = []
+    for part in str(text).replace(";", ",").split(","):
+        item = part.strip()
+        if item:
+            values.append(float(item))
+    if not values:
+        return [float(x) for x in fallback]
+    deduped: list[float] = []
+    for value in values:
+        if not any(abs(value - old) <= 1e-12 for old in deduped):
+            deduped.append(float(value))
+    return deduped
+
+
+def _sampling_weight_kinds(mode: str, ema_state: dict[str, Tensor] | None) -> list[str]:
+    normalized = str(mode).strip().lower()
+    if normalized not in {"raw", "ema", "both"}:
+        raise ValueError(f"unknown sampling weight mode: {mode!r}")
+    if normalized == "both":
+        kinds = ["raw"]
+        if ema_state is not None:
+            kinds.append("ema")
+        return kinds
+    if normalized == "ema" and ema_state is None:
+        return ["raw"]
+    return [normalized]
+
+
+def _state_dict_cpu_copy(model: torch.nn.Module) -> dict[str, Tensor]:
+    return {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+
+
+def _state_dict_to_device(state: dict[str, Tensor], device: torch.device) -> dict[str, Tensor]:
+    return {name: value.detach().to(device=device).clone() for name, value in state.items()}
+
+
+def _safe_strength_tag(value: float) -> str:
+    text = f"{float(value):g}".replace("-", "m").replace("+", "").replace(".", "p")
+    return text or "0"
+
+
+def _generation_numeric_metrics(generation: dict[str, object]) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for key, value in generation.items():
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            out[key] = float(value)
+        elif isinstance(value, (list, tuple)) and all(isinstance(x, (int, float, np.integer, np.floating)) for x in value):
+            out[key] = [float(x) for x in value]
+    return out
+
+
+def _save_generation_artifacts(
+    *,
+    run_dir: Path,
+    prefix: str,
+    generation: dict[str, object],
+    metrics: dict[str, object],
+    dynamics_config: DirectFluxMNISTConfig,
+    max_images: int,
+) -> tuple[Path, Path, Path]:
+    samples_path = run_dir / f"{prefix}.npz"
+    png_path = run_dir / f"{prefix}.png"
+    metrics_path = run_dir / f"{prefix}_metrics.json"
+    np.savez_compressed(
+        samples_path,
+        samples=np.asarray(generation["samples"], dtype=np.float64),
+        labels=np.asarray(generation["labels"], dtype=np.int64),
+        sources=np.asarray(generation["sources"], dtype=np.float64),
+        trajectory=np.asarray(generation["trajectory"], dtype=np.float64) if generation["trajectory"] is not None else np.empty((0,)),
+        metrics=np.asarray(json.dumps({key: _serializable(value) for key, value in metrics.items()})),
+    )
+    save_flux_samples_grid(
+        np.asarray(generation["samples"], dtype=np.float64),
+        np.asarray(generation["labels"], dtype=np.int64),
+        png_path,
+        grid_size=int(dynamics_config.grid_size),
+        max_images=int(max_images),
+    )
+    with metrics_path.open("w") as handle:
+        json.dump({key: _serializable(value) for key, value in metrics.items()}, handle, indent=2)
+    return samples_path, png_path, metrics_path
 
 def _write_cache_diagnostics(path: Path, rows: list[dict[str, float | int]]) -> None:
     if not rows:
@@ -1468,7 +1788,7 @@ def train_experiment11_c0(
     device: torch.device,
     seed: int,
     show_progress: bool = True,
-) -> tuple[DirectFluxUNet, dict[str, list[float]], list[dict[str, float | int]]]:
+) -> tuple[DirectFluxUNet, dict[str, Tensor] | None, dict[str, list[float]], list[dict[str, float | int]]]:
     """Train the Experiment 11 C0 model."""
 
     torch.manual_seed(int(seed))
@@ -1606,6 +1926,14 @@ def train_experiment11_c0(
         row.update(_per_label_weight_stats(target_diag, path_logw_diag, path_dist2_diag, prefix="target"))
         if requested_diag is not None and target_diag is not None:
             row["target_label_mismatch_fraction"] = float(np.mean(np.asarray(requested_diag) != np.asarray(target_diag)))
+        value_fd_summary, value_fd_details = _finite_difference_value_diagnostic(
+            built,
+            dynamics_config,
+            c0_config,
+            device=device,
+            seed=int(seed) + int(step) + 9173,
+        )
+        row.update(value_fd_summary)
         cache_rows.append(row)
         np.savez_compressed(
             out_dir / f"experiment11_c0_cache_step{int(step):06d}_diagnostics.npz",
@@ -1628,6 +1956,18 @@ def train_experiment11_c0(
             source_labels=np.asarray([] if built.source_labels is None else built.source_labels, dtype=np.int64),
             epsilon=np.asarray([built.epsilon], dtype=np.float64),
             ess_fraction=np.asarray([built.ess_fraction], dtype=np.float64),
+            value_fd_state_indices=np.asarray([] if not value_fd_details else value_fd_details["state_indices"], dtype=np.int64),
+            value_fd_channels=np.asarray([] if not value_fd_details else value_fd_details["channels"], dtype=np.int64),
+            value_fd_ys=np.asarray([] if not value_fd_details else value_fd_details["ys"], dtype=np.int64),
+            value_fd_xs=np.asarray([] if not value_fd_details else value_fd_details["xs"], dtype=np.int64),
+            value_fd_amounts=np.asarray([] if not value_fd_details else value_fd_details["amounts"], dtype=np.float64),
+            value_fd_sigma_edges=np.asarray([] if not value_fd_details else value_fd_details["sigma_edges"], dtype=np.float64),
+            value_fd_target_innovation=np.asarray([] if not value_fd_details else value_fd_details["target_innovation"], dtype=np.float64),
+            value_fd_grad=np.asarray([] if not value_fd_details else value_fd_details["fd_grad"], dtype=np.float64),
+            value_fd_innovation=np.asarray([] if not value_fd_details else value_fd_details["fd_innovation"], dtype=np.float64),
+            value_fd_logu_plus=np.asarray([] if not value_fd_details else value_fd_details["logu_plus"], dtype=np.float64),
+            value_fd_logu_minus=np.asarray([] if not value_fd_details else value_fd_details["logu_minus"], dtype=np.float64),
+            value_fd_dist2=np.asarray([] if not value_fd_details else value_fd_details["dist2"], dtype=np.float64),
         )
         if bool(c0_config.save_cache_previews) and built.terminal_states is not None:
             # Optional endpoint previews for debugging cache quality.  Use the
@@ -1758,10 +2098,8 @@ def train_experiment11_c0(
                 poi=float(diagnostics["loss_poisson"]),
                 cache=float(cache.ess_fraction),
             )
-    if bool(c0_config.use_ema_for_sampling) and ema_state is not None:
-        model.load_state_dict(ema_state, strict=False)
     model.eval()
-    return model, history, cache_rows
+    return model, ema_state, history, cache_rows
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -1884,6 +2222,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--control-strength", type=float, default=1.0, help="Multiplier applied to learned control at generation")
     parser.add_argument("--control-output-clip", type=float, default=5.0, help="Clip raw control output at generation; <=0 disables")
+    parser.add_argument(
+        "--sampling-weights",
+        choices=("raw", "ema", "both"),
+        default="ema",
+        help="Which weights to use for post-training sampling diagnostics. 'both' saves raw and EMA grids.",
+    )
+    parser.add_argument(
+        "--no-ema-for-sampling",
+        dest="sampling_weights",
+        action="store_const",
+        const="raw",
+        help="Backward-compatible alias for --sampling-weights raw.",
+    )
+    parser.add_argument(
+        "--sample-control-strengths",
+        type=str,
+        default="",
+        help="Comma-separated control strengths to sweep after training, e.g. 1,2,5,10,20. Empty uses --control-strength.",
+    )
+    parser.add_argument("--save-sampling-ablations", action="store_true", help="Save free/noise/learned ablation grids for each sampled weight/strength variant.")
+    parser.add_argument(
+        "--sample-ablation-modes",
+        type=str,
+        default="learned_only_no_noise,free_plus_learned_no_noise,full_stochastic,free_only,noise_only",
+        help="Comma-separated sampling ablation modes used when --save-sampling-ablations is set.",
+    )
 
     parser.add_argument("--reference-free-weight", type=float, default=0.03)
     parser.add_argument("--reference-noise-weight", type=float, default=0.005)
@@ -1891,6 +2255,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-samples", type=int, default=64)
     parser.add_argument("--sample-save-every", type=int, default=0)
     parser.add_argument("--save-cache-previews", action="store_true")
+    parser.add_argument("--value-fd-diagnostic-states", type=int, default=0, help="Number of cache states for finite-difference heat-potential diagnostics; 0 disables")
+    parser.add_argument("--value-fd-diagnostic-edges", type=int, default=4, help="Random valid edges per selected cache state for value diagnostics")
+    parser.add_argument("--value-fd-diagnostic-branches", type=int, default=4, help="Free continuations per +/- perturbation for value diagnostics")
+    parser.add_argument("--value-fd-epsilon", type=float, default=1e-4, help="Mass moved across an edge for finite-difference value diagnostics")
     parser.add_argument("--deterministic-sampling", action="store_true")
     parser.add_argument("--adaptive-sampling", action="store_true", default=True)
     parser.add_argument("--no-adaptive-sampling", dest="adaptive_sampling", action="store_false")
@@ -1945,12 +2313,20 @@ def _experiment_config_from_args(args: argparse.Namespace) -> Experiment11C0Conf
         model_output_mode=str(args.model_output_mode),
         control_strength=float(args.control_strength),
         control_output_clip=float(args.control_output_clip),
+        sampling_weights=str(args.sampling_weights),
+        sample_control_strengths=str(args.sample_control_strengths),
+        save_sampling_ablations=bool(args.save_sampling_ablations),
+        sample_ablation_modes=str(args.sample_ablation_modes),
         reference_free_weight=float(args.reference_free_weight),
         reference_noise_weight=float(args.reference_noise_weight),
         sample_steps=int(args.sample_steps),
         num_samples=int(args.num_samples),
         sample_save_every=int(args.sample_save_every),
         save_cache_previews=bool(args.save_cache_previews),
+        value_fd_diagnostic_states=int(args.value_fd_diagnostic_states),
+        value_fd_diagnostic_edges=int(args.value_fd_diagnostic_edges),
+        value_fd_diagnostic_branches=int(args.value_fd_diagnostic_branches),
+        value_fd_epsilon=float(args.value_fd_epsilon),
         seed=int(args.seed),
         sample_seed=int(args.sample_seed),
         use_amp=not bool(args.no_amp),
@@ -2010,7 +2386,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             show_progress=show_progress,
         )
 
-    model, history, cache_rows = train_experiment11_c0(
+    model, ema_state, history, cache_rows = train_experiment11_c0(
         dataset_images=train_images,
         dataset_labels=train_labels,
         dynamics_config=dynamics_config,
@@ -2022,35 +2398,112 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     _write_cache_diagnostics(run_dir / "experiment11_c0_cache_diagnostics.csv", cache_rows)
 
+    raw_state = _state_dict_cpu_copy(model)
+    ema_state_cpu = None if ema_state is None else {name: value.detach().cpu().clone() for name, value in ema_state.items()}
     generation: dict[str, object] | None = None
     metrics: dict[str, object] = {}
+    sampling_results: dict[str, dict[str, object]] = {}
+    sampling_metrics: dict[str, dict[str, object]] = {}
     if int(c0_config.num_samples) > 0:
         labels = np.arange(int(c0_config.num_samples), dtype=np.int64) % 10
-        generation = simulate_c0_generation(
-            model,
-            labels,
-            dynamics_config=dynamics_config,
-            c0_config=c0_config,
-            device=device,
-            seed=int(args.sample_seed),
-            source_images=train_images,
-            source_labels=train_labels,
-            deterministic=bool(args.deterministic_sampling),
-            show_progress=show_progress,
-        )
-        metrics = {
-            key: value for key, value in generation.items() if isinstance(value, (int, float, np.integer, np.floating))
-        }
-        if classifier is not None:
-            metrics.update(
-                classifier_generation_metrics(
-                    generation["samples"],
-                    generation["labels"],
-                    classifier,
-                    grid_size=int(dynamics_config.grid_size),
+        strengths = _parse_float_csv(c0_config.sample_control_strengths, fallback=[float(c0_config.control_strength)])
+        weight_kinds = _sampling_weight_kinds(c0_config.sampling_weights, ema_state_cpu)
+        primary_key: str | None = None
+        for weight_kind in weight_kinds:
+            state = raw_state if weight_kind == "raw" else ema_state_cpu
+            if state is None:
+                continue
+            model.load_state_dict(_state_dict_to_device(state, device), strict=False)
+            for strength in strengths:
+                sample_config = replace(c0_config, control_strength=float(strength))
+                sample_key = f"{weight_kind}_strength{_safe_strength_tag(float(strength))}"
+                print(f"Sampling Experiment 11 variant: {sample_key}")
+                gen = simulate_c0_generation(
+                    model,
+                    labels,
+                    dynamics_config=dynamics_config,
+                    c0_config=sample_config,
                     device=device,
+                    seed=int(args.sample_seed),
+                    source_images=train_images,
+                    source_labels=train_labels,
+                    deterministic=bool(args.deterministic_sampling),
+                    show_progress=show_progress,
+                    ablation_mode="full_stochastic",
                 )
-            )
+                variant_metrics: dict[str, object] = _generation_numeric_metrics(gen)
+                variant_metrics["sampling_weight_kind"] = weight_kind
+                variant_metrics["sampling_control_strength"] = float(strength)
+                if classifier is not None:
+                    variant_metrics.update(
+                        classifier_generation_metrics(
+                            gen["samples"],
+                            gen["labels"],
+                            classifier,
+                            grid_size=int(dynamics_config.grid_size),
+                            device=device,
+                        )
+                    )
+                prefix = f"experiment11_c0_samples_{sample_key}"
+                _save_generation_artifacts(
+                    run_dir=run_dir,
+                    prefix=prefix,
+                    generation=gen,
+                    metrics=variant_metrics,
+                    dynamics_config=dynamics_config,
+                    max_images=int(c0_config.num_samples),
+                )
+                sampling_results[sample_key] = gen
+                sampling_metrics[sample_key] = variant_metrics
+                if primary_key is None:
+                    primary_key = sample_key
+                    generation = gen
+                    metrics = dict(variant_metrics)
+                    _save_generation_artifacts(
+                        run_dir=run_dir,
+                        prefix="experiment11_c0_samples",
+                        generation=gen,
+                        metrics=variant_metrics,
+                        dynamics_config=dynamics_config,
+                        max_images=int(c0_config.num_samples),
+                    )
+                if bool(c0_config.save_sampling_ablations):
+                    for ablation_mode in [m.strip() for m in str(c0_config.sample_ablation_modes).replace(";", ",").split(",") if m.strip()]:
+                        normalized_ablation = ablation_mode.strip().lower().replace("-", "_")
+                        if normalized_ablation == "full_stochastic":
+                            continue
+                        ablation_gen = simulate_c0_generation(
+                            model,
+                            labels,
+                            dynamics_config=dynamics_config,
+                            c0_config=sample_config,
+                            device=device,
+                            seed=int(args.sample_seed),
+                            source_images=train_images,
+                            source_labels=train_labels,
+                            deterministic=bool(args.deterministic_sampling),
+                            show_progress=show_progress,
+                            ablation_mode=normalized_ablation,
+                        )
+                        ablation_metrics = _generation_numeric_metrics(ablation_gen)
+                        ablation_metrics["sampling_weight_kind"] = weight_kind
+                        ablation_metrics["sampling_control_strength"] = float(strength)
+                        ablation_metrics["sampling_ablation_mode"] = normalized_ablation
+                        ablation_prefix = f"experiment11_c0_ablation_{sample_key}_{normalized_ablation}"
+                        _save_generation_artifacts(
+                            run_dir=run_dir,
+                            prefix=ablation_prefix,
+                            generation=ablation_gen,
+                            metrics=ablation_metrics,
+                            dynamics_config=dynamics_config,
+                            max_images=int(c0_config.num_samples),
+                        )
+        if primary_key is not None:
+            metrics["primary_sampling_variant"] = primary_key
+            metrics["sampling_sweep"] = {key: _generation_numeric_metrics(value) for key, value in sampling_results.items()}
+            metrics["sampling_sweep_metrics"] = sampling_metrics
+        model.load_state_dict(_state_dict_to_device(raw_state, device), strict=False)
+
     history_path = run_dir / "experiment11_c0_history.json"
     with history_path.open("w") as handle:
         json.dump(history, handle, indent=2)
@@ -2061,7 +2514,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     ckpt_path = run_dir / "experiment11_c0_model.pt"
     torch.save(
         {
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": raw_state,
+            "raw_model_state_dict": raw_state,
+            "ema_model_state_dict": ema_state_cpu,
             "dynamics_config": asdict(dynamics_config),
             "c0_config": asdict(c0_config),
             "history": history,
@@ -2071,24 +2526,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     samples_path = run_dir / "experiment11_c0_samples.npz"
     png_path = run_dir / "experiment11_c0_samples.png"
-    if generation is not None:
-        np.savez_compressed(
-            samples_path,
-            samples=np.asarray(generation["samples"], dtype=np.float64),
-            labels=np.asarray(generation["labels"], dtype=np.int64),
-            sources=np.asarray(generation["sources"], dtype=np.float64),
-            trajectory=np.asarray(generation["trajectory"], dtype=np.float64) if generation["trajectory"] is not None else np.empty((0,)),
-            metrics=np.asarray(json.dumps({key: _serializable(value) for key, value in metrics.items()})),
-        )
-        save_flux_samples_grid(
-            np.asarray(generation["samples"], dtype=np.float64),
-            np.asarray(generation["labels"], dtype=np.int64),
-            png_path,
-            grid_size=int(dynamics_config.grid_size),
-            max_images=int(c0_config.num_samples),
-        )
-        if generation["trajectory"] is not None:
-            np.savez_compressed(run_dir / "experiment11_c0_trajectory.npz", trajectory=generation["trajectory"])
+    if generation is not None and generation["trajectory"] is not None:
+        np.savez_compressed(run_dir / "experiment11_c0_trajectory.npz", trajectory=generation["trajectory"])
 
     print("Experiment 11/C0 complete")
     print(f"  checkpoint: {ckpt_path}")
