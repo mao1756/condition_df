@@ -9,7 +9,10 @@ import torch
 
 from mnist.diag_forward_noising import (
     _gate_summary,
+    _reference_schedules,
     _synthetic_digit_measures,
+    expected_symmetric_dirichlet_entropy,
+    parse_args,
     run_forward_noising_single,
     save_phase0_result,
 )
@@ -60,6 +63,9 @@ def test_d0_phase0_forward_noising_smoke(tmp_path) -> None:
     assert {0, 2, 4}.issubset(set(result.checkpoint_states))
     assert len(result.metrics) >= 3
     assert result.summary["cumulative_clip_fraction"] >= 0.0
+    assert "mean_substeps" in result.summary
+    assert "fraction_steps_at_max_substeps" in result.summary
+    assert "final_entropy_fraction_of_stationary" in result.summary
 
     gated = _gate_summary(
         result,
@@ -78,3 +84,20 @@ def test_d0_phase0_forward_noising_smoke(tmp_path) -> None:
     assert "prior_bank_path" in paths
     summary = json.loads((tmp_path / result.run_id / "summary.json").read_text())
     assert summary["gate_pass"] == 1
+
+
+def test_d0_phase0_faithful_reference_defaults() -> None:
+    args = parse_args(["--sweep-reference-rates", "1e-6,4e-6"])
+    assert args.reference_scale_mode == "faithful"
+    assert args.edge_alpha_mode == "grid"
+    schedules = _reference_schedules(args)
+    assert len(schedules) == 2
+    for sched in schedules:
+        rate = float(sched["reference_rate"])
+        assert np.isclose(float(sched["free_weight"]), rate)
+        assert np.isclose(float(sched["noise_weight"]), np.sqrt(rate))
+
+    cfg = DirectFluxMNISTConfig(grid_size=8, edge_alpha_mode="grid", beta=1.0)
+    expected_entropy = expected_symmetric_dirichlet_entropy(cfg)
+    assert np.isfinite(expected_entropy)
+    assert expected_entropy > 0.0
