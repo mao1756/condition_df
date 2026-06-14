@@ -62,7 +62,10 @@ class Experiment12D0Config:
     base_channels: int = 48
     cache_paths: int = 4096
     cache_batch_size: int = 64
-    cache_refresh_every: int = 500
+    # D0 rollouts are model-independent; rebuilding them during training is
+    # expensive and disabled by default.  Set positive to resample periodically.
+    cache_refresh_every: int = 0
+    cache_build_mode: str = "outer"
     time_slices_per_path: int = 4
     teacher_stride_substeps: int = 8
     eta_l2_weight: float = 1e-4
@@ -133,6 +136,7 @@ class D0TrainingCache:
     floor_correction_l1: float = 0.0
     renorm_correction_l1: float = 0.0
     teacher_mode: str = "d0-forward"
+    cache_build_mode: str = "outer"
 
     @property
     def size(self) -> int:
@@ -388,7 +392,7 @@ def _d0_dynamics_config_from_base(base: DirectFluxMNISTConfig, *, sample_steps: 
     return DirectFluxMNISTConfig(**data)
 
 
-def build_d0_training_cache(
+def _build_d0_training_cache_substep_exact(
     *,
     dataset_images: np.ndarray,
     dataset_labels: np.ndarray,
@@ -398,7 +402,12 @@ def build_d0_training_cache(
     rng: np.random.Generator,
     show_progress: bool = True,
 ) -> D0TrainingCache:
-    """Build an unweighted forward-from-data D0 innovation cache."""
+    """Build the original exact substep-keyed D0 cache.
+
+    This path is semantically precise but expensive because it stores and scans
+    all substep states.  The public wrapper defaults to the faster outer-step
+    cache below.
+    """
 
     n = int(dynamics_config.grid_size)
     sample_steps = int(d0_config.sample_steps)
@@ -489,6 +498,7 @@ def build_d0_training_cache(
                 stiffness_fraction=float(dynamics_config.limiter_fraction),
                 return_innovations=True,
                 return_substep_states=True,
+                collect_diagnostics=False,
             )
             if result.raw_innovations is None or result.valid_edge_mask is None or result.substep_states is None:
                 raise RuntimeError("reference integrator did not return innovations/substep states")
@@ -577,7 +587,245 @@ def build_d0_training_cache(
         valid_innovation_noise_energy_fraction=float(1.0 - noise_limited),
         floor_correction_l1=float(total_floor_correction_l1),
         renorm_correction_l1=float(total_renorm_correction_l1),
+        cache_build_mode="substep",
     )
+
+
+def _build_d0_training_cache_outer_fast(
+    *,
+    dataset_images: np.ndarray,
+    dataset_labels: np.ndarray,
+    dynamics_config: DirectFluxMNISTConfig,
+    d0_config: Experiment12D0Config,
+    device: torch.device,
+    rng: np.random.Generator,
+    show_progress: bool = True,
+) -> D0TrainingCache:
+    """Build a fast outer-step D0 cache.
+
+    Instead of sampling arbitrary elementary substep blocks, this cache samples
+    blocks aligned to outer noising steps.  The target is the normalized sum of
+    all raw Gaussian innovations over those outer steps and is keyed at the
+    later outer state.  This preserves the D0 essentials—data-start rollouts,
+    raw innovations before limiting, later-state keying, no weights/source—while
+    avoiding the expensive substep-state tensor and Python loop over every
+    elementary substep.
+    """
+
+    n = int(dynamics_config.grid_size)
+    sample_steps = int(d0_config.sample_steps)
+    reference_substeps = int(d0_config.reference_substeps)
+    requested_stride = int(d0_config.teacher_stride_substeps)
+    if sample_steps <= 0 or reference_substeps <= 0:
+        raise ValueError("sample_steps and reference_substeps must be positive")
+    if requested_stride <= 0:
+        raise ValueError("teacher_stride_substeps must be positive")
+    outer_stride = max(1, int(math.ceil(float(requested_stride) / float(reference_substeps))))
+    if outer_stride > sample_steps:
+        raise ValueError("teacher_stride_substeps is longer than the full forward noising run")
+    block_substeps = int(outer_stride * reference_substeps)
+    horizon = natural_horizon(dynamics_config)
+    dt_outer = horizon / float(sample_steps)
+    dt_sub = horizon / float(sample_steps * reference_substeps)
+    rate_schedule = make_rate_schedule(
+        sample_steps,
+        tau_eff=float(d0_config.tau_eff),
+        horizon=horizon,
+        time_change_mode=str(d0_config.time_change_mode),
+        ramp=str(d0_config.rate_ramp),
+        ramp_ratio=float(d0_config.rate_ramp_ratio),
+        rate_min=d0_config.reference_rate_min,
+        rate_max=d0_config.reference_rate_max,
+    )
+    slices_per_path = int(d0_config.time_slices_per_path)
+    if slices_per_path <= 0:
+        raise ValueError("time_slices_per_path must be positive")
+
+    all_states: list[Tensor] = []
+    all_tau: list[Tensor] = []
+    all_labels: list[Tensor] = []
+    all_innov: list[Tensor] = []
+    all_masks: list[Tensor] = []
+    all_starts: list[Tensor] = []
+    all_path_indices: list[Tensor] = []
+    all_start_images: list[Tensor] = []
+    terminal_states: list[np.ndarray] = []
+    source_indices_chunks: list[np.ndarray] = []
+    requested_label_chunks: list[np.ndarray] = []
+
+    total_masked_edges = 0
+    total_proposed_edges = 0
+    total_floor_correction_l1 = 0.0
+    total_renorm_correction_l1 = 0.0
+    valid_sum = 0.0
+    valid_count = 0.0
+
+    cache_paths = int(d0_config.cache_paths)
+    batch_size = int(d0_config.cache_batch_size)
+    batches = list(range(0, cache_paths, batch_size))
+    bar = _progress(batches, total=len(batches), desc="D0 cache", disable=not show_progress)
+    path_offset = 0
+    for start in bar:
+        stop = min(cache_paths, int(start) + batch_size)
+        bsz = stop - int(start)
+        initial_np, labels_np, source_idx_np = _lambda_mixed_data_for_paths(
+            dataset_images,
+            dataset_labels,
+            count=bsz,
+            lambda_mix=float(d0_config.lambda_mix),
+            grid_size=n,
+            rng=rng,
+            single_image_overfit=bool(d0_config.single_image_overfit),
+            single_image_index=int(d0_config.single_image_index),
+            single_image_label=d0_config.single_image_label,
+        )
+        states = torch.as_tensor(initial_np, dtype=torch.float32, device=device)
+        labels_t = torch.as_tensor(labels_np, dtype=torch.long)
+        outer_starts_np = rng.integers(0, sample_steps - outer_stride + 1, size=(bsz, slices_per_path), dtype=np.int64)
+        outer_starts = torch.as_tensor(outer_starts_np, dtype=torch.long, device=device)
+        outer_ends = outer_starts + int(outer_stride) - 1
+        starts_t = outer_starts * int(reference_substeps)
+        accum = torch.zeros((bsz, slices_per_path, 2, n, n), dtype=torch.float32, device=device)
+        masks = torch.ones((bsz, slices_per_path, 2, n, n), dtype=torch.bool, device=device)
+        later_states = torch.empty((bsz, slices_per_path, n * n), dtype=torch.float32, device=device)
+        later_tau = torch.empty((bsz, slices_per_path), dtype=torch.float32, device=device)
+        filled = torch.zeros((bsz, slices_per_path), dtype=torch.bool, device=device)
+
+        for outer_k in range(sample_steps):
+            rate = float(rate_schedule[outer_k])
+            result = masked_reference_free_step_torch(
+                states,
+                dt_outer,
+                dynamics_config,
+                free_weight=rate,
+                noise_weight=math.sqrt(max(rate, 0.0)),
+                substeps=reference_substeps,
+                stiffness_fraction=float(dynamics_config.limiter_fraction),
+                return_innovations=True,
+                return_substep_states=False,
+                collect_diagnostics=False,
+            )
+            if result.raw_innovations is None or result.valid_edge_mask is None:
+                raise RuntimeError("reference integrator did not return innovations/masks")
+            raw_sum = result.raw_innovations.sum(dim=0)
+            valid_all = result.valid_edge_mask.all(dim=0)
+            active = (outer_starts <= outer_k) & (outer_k < outer_starts + int(outer_stride))
+            if bool(active.any()):
+                rows, cols = torch.nonzero(active, as_tuple=True)
+                accum[rows, cols] = accum[rows, cols] + raw_sum.index_select(0, rows)
+                masks[rows, cols] = masks[rows, cols] & valid_all.index_select(0, rows)
+            ending = outer_ends == outer_k
+            if bool(ending.any()):
+                rows, cols = torch.nonzero(ending, as_tuple=True)
+                later_states[rows, cols] = result.states.index_select(0, rows)
+                later_tau[rows, cols] = max(float(horizon) - float(outer_k + 1) * float(dt_outer), 0.0)
+                filled[rows, cols] = True
+            states = result.states
+            total_masked_edges += int(result.masked_edges)
+            total_proposed_edges += int(result.proposed_edges)
+            total_floor_correction_l1 += float(result.floor_correction_l1)
+            total_renorm_correction_l1 += float(result.renorm_correction_l1)
+        if not bool(filled.all()):
+            raise RuntimeError("internal D0 cache bug: some later-state slices were not filled")
+        accum = accum / math.sqrt(float(block_substeps))
+        flat_later = later_states.reshape(bsz * slices_per_path, n * n)
+        mobility_valid = harmonic_mobility_channels(flat_later, dynamics_config) > float(d0_config.theta_mask_min)
+        masks_flat = masks.reshape(bsz * slices_per_path, 2, n, n) & mobility_valid
+
+        all_states.append(flat_later.detach().cpu())
+        all_tau.append(later_tau.reshape(-1).detach().cpu())
+        all_labels.append(labels_t.repeat_interleave(slices_per_path).cpu())
+        all_innov.append(accum.reshape(bsz * slices_per_path, 2, n, n).detach().cpu())
+        masks_cpu = masks_flat.detach().cpu()
+        all_masks.append(masks_cpu)
+        valid_sum += float(masks_cpu.count_nonzero().item())
+        valid_count += float(masks_cpu.numel())
+        all_starts.append(starts_t.reshape(-1).detach().cpu())
+        local_paths = torch.arange(path_offset, path_offset + bsz, dtype=torch.long).repeat_interleave(slices_per_path)
+        all_path_indices.append(local_paths)
+        start_images_t = torch.as_tensor(initial_np, dtype=torch.float32).repeat_interleave(slices_per_path, dim=0)
+        all_start_images.append(start_images_t)
+        terminal_states.append(states.detach().cpu().numpy().reshape(bsz, n, n))
+        source_indices_chunks.append(source_idx_np)
+        requested_label_chunks.append(labels_np)
+        path_offset += bsz
+        if hasattr(bar, "set_postfix"):
+            valid_frac = valid_sum / max(valid_count, 1.0)
+            bar.set_postfix(valid=f"{valid_frac:.3f}", stride=f"{block_substeps}")
+
+    states_out = torch.cat(all_states, dim=0).float()
+    tau_out = torch.cat(all_tau, dim=0).float()
+    labels_out = torch.cat(all_labels, dim=0).long()
+    innov_out = torch.cat(all_innov, dim=0).float()
+    masks_out = torch.cat(all_masks, dim=0).bool()
+    raw_limited = 0.0 if total_proposed_edges == 0 else float(total_masked_edges) / float(total_proposed_edges)
+    # Fast mode intentionally avoids per-edge mobility/noise-energy host syncs.
+    # Use the raw limiter fraction as a conservative stand-in in cache summaries.
+    mobility_limited = float(raw_limited)
+    noise_limited = float(raw_limited)
+    return D0TrainingCache(
+        states=states_out,
+        tau=tau_out,
+        labels=labels_out,
+        innovations=innov_out,
+        masks=masks_out,
+        starts=torch.cat(all_starts, dim=0).long(),
+        path_indices=torch.cat(all_path_indices, dim=0).long(),
+        start_images=torch.cat(all_start_images, dim=0).float(),
+        terminal_states=np.concatenate(terminal_states, axis=0).astype(np.float32),
+        source_indices=np.concatenate(source_indices_chunks, axis=0).astype(np.int64),
+        requested_labels=np.concatenate(requested_label_chunks, axis=0).astype(np.int64),
+        rate_schedule=rate_schedule.astype(np.float64),
+        horizon=float(horizon),
+        dt_sub=float(dt_sub),
+        stride_substeps=int(block_substeps),
+        sample_steps=int(sample_steps),
+        reference_substeps=int(reference_substeps),
+        lambda_mix=float(d0_config.lambda_mix),
+        raw_limited_fraction=float(raw_limited),
+        mobility_weighted_limited_fraction=float(mobility_limited),
+        noise_energy_weighted_limited_fraction=float(noise_limited),
+        valid_innovation_fraction=float(masks_out.float().mean().item()),
+        valid_innovation_mobility_fraction=float(1.0 - mobility_limited),
+        valid_innovation_noise_energy_fraction=float(1.0 - noise_limited),
+        floor_correction_l1=float(total_floor_correction_l1),
+        renorm_correction_l1=float(total_renorm_correction_l1),
+        cache_build_mode="outer",
+    )
+
+
+def build_d0_training_cache(
+    *,
+    dataset_images: np.ndarray,
+    dataset_labels: np.ndarray,
+    dynamics_config: DirectFluxMNISTConfig,
+    d0_config: Experiment12D0Config,
+    device: torch.device,
+    rng: np.random.Generator,
+    show_progress: bool = True,
+) -> D0TrainingCache:
+    mode = str(getattr(d0_config, "cache_build_mode", "outer")).strip().lower().replace("_", "-")
+    if mode in {"substep", "exact-substep", "exact"}:
+        return _build_d0_training_cache_substep_exact(
+            dataset_images=dataset_images,
+            dataset_labels=dataset_labels,
+            dynamics_config=dynamics_config,
+            d0_config=d0_config,
+            device=device,
+            rng=rng,
+            show_progress=show_progress,
+        )
+    if mode in {"outer", "fast", "outer-fast"}:
+        return _build_d0_training_cache_outer_fast(
+            dataset_images=dataset_images,
+            dataset_labels=dataset_labels,
+            dynamics_config=dynamics_config,
+            d0_config=d0_config,
+            device=device,
+            rng=rng,
+            show_progress=show_progress,
+        )
+    raise ValueError("cache_build_mode must be one of: outer, substep")
 
 
 def sample_d0_cache_batch(cache: D0TrainingCache, batch_size: int, *, device: torch.device, rng: np.random.Generator) -> dict[str, Tensor]:
@@ -863,6 +1111,7 @@ def cache_summary(cache: D0TrainingCache) -> dict[str, float | int]:
         "cache_sample_steps": int(cache.sample_steps),
         "cache_reference_substeps": int(cache.reference_substeps),
         "cache_stride_substeps": int(cache.stride_substeps),
+        "cache_build_mode": str(cache.cache_build_mode),
         "cache_horizon": float(cache.horizon),
         "cache_dt_sub": float(cache.dt_sub),
         "cache_tau_min": float(cache.tau.min().item()) if cache.size else float("nan"),
@@ -904,6 +1153,7 @@ def save_d0_cache_npz(cache: D0TrainingCache, path: Path) -> None:
         sample_steps=np.asarray([cache.sample_steps], dtype=np.int64),
         reference_substeps=np.asarray([cache.reference_substeps], dtype=np.int64),
         lambda_mix=np.asarray([cache.lambda_mix], dtype=np.float64),
+        cache_build_mode=np.asarray([cache.cache_build_mode]),
     )
 
 
@@ -1036,6 +1286,7 @@ def _make_d0_config(args: argparse.Namespace) -> Experiment12D0Config:
         cache_paths=int(args.cache_paths),
         cache_batch_size=int(args.cache_batch_size),
         cache_refresh_every=int(args.cache_refresh_every),
+        cache_build_mode=str(args.cache_build_mode),
         time_slices_per_path=int(args.time_slices_per_path),
         teacher_stride_substeps=int(args.teacher_stride_substeps),
         eta_l2_weight=float(args.eta_l2_weight),
@@ -1130,7 +1381,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rate-ramp-ratio", type=float, default=1.0)
     parser.add_argument("--reference-rate-min", type=float, default=None)
     parser.add_argument("--reference-rate-max", type=float, default=None)
-    parser.add_argument("--teacher-stride-substeps", type=int, default=8)
+    parser.add_argument("--teacher-stride-substeps", type=int, default=8, help="Requested elementary stride. In fast outer cache mode this is rounded up to a whole outer noising step.")
     parser.add_argument("--time-slices-per-path", type=int, default=4)
     parser.add_argument("--theta-mask-min", type=float, default=1e-12)
 
@@ -1142,7 +1393,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base-channels", type=int, default=48)
     parser.add_argument("--cache-paths", type=int, default=4096)
     parser.add_argument("--cache-batch-size", type=int, default=64)
-    parser.add_argument("--cache-refresh-every", type=int, default=500)
+    parser.add_argument("--cache-refresh-every", type=int, default=0, help="Model-independent cache refresh interval. Default 0 disables refresh.")
+    parser.add_argument("--cache-build-mode", choices=("outer", "substep"), default="outer", help="Fast outer-step cache by default; use 'substep' for the exact but slow elementary-substep cache.")
     parser.add_argument("--eta-l2-weight", type=float, default=1e-4)
     parser.add_argument("--control-output-clip", type=float, default=0.0)
     parser.add_argument("--train-cache-only", action="store_true")
@@ -1212,6 +1464,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         substeps=np.asarray([cache.reference_substeps], dtype=np.int64),
         horizon=np.asarray([cache.horizon], dtype=np.float64),
         lambda_mix=np.asarray([cache.lambda_mix], dtype=np.float64),
+        cache_build_mode=np.asarray([cache.cache_build_mode]),
     )
     prior_path = Path(d0_config.prior_bank_path) if str(d0_config.prior_bank_path) else generated_bank
     if int(d0_config.num_samples) > 0 and not bool(d0_config.train_cache_only):

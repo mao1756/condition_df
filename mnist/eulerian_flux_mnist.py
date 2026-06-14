@@ -2630,6 +2630,7 @@ def masked_reference_free_step_torch(
     deterministic: bool = False,
     return_innovations: bool = False,
     return_substep_states: bool = False,
+    collect_diagnostics: bool = True,
 ) -> MaskedReferenceStepResult:
     """Boundary-correct free reference step with direction-aware limiting.
 
@@ -2647,7 +2648,9 @@ def masked_reference_free_step_torch(
     artifacts at zero pixels.
 
     Raw Gaussian innovations are stored before any limiter modification, and
-    limiter-touched edges are masked for D0 innovation regression.
+    limiter-touched edges are masked for D0 innovation regression.  Set
+    ``collect_diagnostics=False`` for cache construction when the caller only
+    needs raw innovations/masks; this avoids thousands of host-device syncs.
     """
 
     if states.ndim != 2:
@@ -2763,21 +2766,22 @@ def masked_reference_free_step_torch(
             state_delta[:, heads] = state_delta[:, heads] + noise_flux
 
             invalid_for_regression = drift_limited | noise_limited | drift_nonfinite | noise_nonfinite
-            # P0.8: raw edge counts overstate D0 damage when the limited edge
-            # carries negligible mobility/noise.  Accumulate signal-weighted
-            # limiter fractions using tensors already computed for the step; no
-            # extra diagnostic pass is required.
-            theta_weight = theta.detach().clamp_min(0.0)
-            noise_energy_weight = noise_std.detach().square().clamp_min(0.0)
-            mobility_weight_sum += float(theta_weight.sum().detach().cpu())
-            limited_mobility_weight_sum += float(theta_weight.masked_select(invalid_for_regression).sum().detach().cpu())
-            noise_energy_sum += float(noise_energy_weight.sum().detach().cpu())
-            limited_noise_energy_sum += float(noise_energy_weight.masked_select(invalid_for_regression).sum().detach().cpu())
-            proposed_edges += int(invalid_for_regression.numel())
-            drift_limited_edges += int(drift_limited.count_nonzero().detach().cpu())
-            noise_limited_edges += int(noise_limited.count_nonzero().detach().cpu())
-            nonfinite_edges += int((drift_nonfinite | noise_nonfinite).count_nonzero().detach().cpu())
-            masked_edges += int(invalid_for_regression.count_nonzero().detach().cpu())
+            if collect_diagnostics:
+                # P0.8: raw edge counts overstate D0 damage when the limited edge
+                # carries negligible mobility/noise.  Accumulate signal-weighted
+                # limiter fractions using tensors already computed for the step; no
+                # extra diagnostic pass is required.
+                theta_weight = theta.detach().clamp_min(0.0)
+                noise_energy_weight = noise_std.detach().square().clamp_min(0.0)
+                mobility_weight_sum += float(theta_weight.sum().detach().cpu())
+                limited_mobility_weight_sum += float(theta_weight.masked_select(invalid_for_regression).sum().detach().cpu())
+                noise_energy_sum += float(noise_energy_weight.sum().detach().cpu())
+                limited_noise_energy_sum += float(noise_energy_weight.masked_select(invalid_for_regression).sum().detach().cpu())
+                proposed_edges += int(invalid_for_regression.numel())
+                drift_limited_edges += int(drift_limited.count_nonzero().detach().cpu())
+                noise_limited_edges += int(noise_limited.count_nonzero().detach().cpu())
+                nonfinite_edges += int((drift_nonfinite | noise_nonfinite).count_nonzero().detach().cpu())
+                masked_edges += int(invalid_for_regression.count_nonzero().detach().cpu())
 
             if return_innovations and raw_flat is not None and mask_flat is not None:
                 raw_flat[:, edge_class.flux_indices] = xi
@@ -2790,12 +2794,14 @@ def masked_reference_free_step_torch(
         # negative roundoff/overshoot if the directional budgets were touched by
         # floating-point error.
         floored = before_floor.clamp_min(0.0)
-        floor_touched_pixels += int((before_floor < 0.0).count_nonzero().detach().cpu())
-        floor_correction_l1 += float((floored - before_floor).abs().sum().detach().cpu())
+        if collect_diagnostics:
+            floor_touched_pixels += int((before_floor < 0.0).count_nonzero().detach().cpu())
+            floor_correction_l1 += float((floored - before_floor).abs().sum().detach().cpu())
         before_renorm = floored
         sums = before_renorm.sum(dim=1, keepdim=True).clamp_min(tiny)
         out = before_renorm / sums
-        renorm_correction_l1 += float((out - before_renorm).abs().sum().detach().cpu())
+        if collect_diagnostics:
+            renorm_correction_l1 += float((out - before_renorm).abs().sum().detach().cpu())
         if return_substep_states:
             substep_state_chunks.append(out.clone())
         if return_innovations and raw_flat is not None and mask_flat is not None:
@@ -2805,6 +2811,9 @@ def masked_reference_free_step_torch(
     raw_tensor = torch.stack(raw_chunks, dim=0) if raw_chunks else None
     mask_tensor = torch.stack(mask_chunks, dim=0) if mask_chunks else None
     substep_state_tensor = torch.stack(substep_state_chunks, dim=0) if substep_state_chunks else None
+    if (not collect_diagnostics) and mask_tensor is not None:
+        proposed_edges = int(mask_tensor.numel())
+        masked_edges = int((~mask_tensor).count_nonzero().detach().cpu())
     masked_fraction = 0.0 if proposed_edges == 0 else float(masked_edges) / float(proposed_edges)
     mobility_masked_fraction = 0.0 if mobility_weight_sum <= 0.0 else float(limited_mobility_weight_sum) / float(mobility_weight_sum)
     noise_energy_masked_fraction = 0.0 if noise_energy_sum <= 0.0 else float(limited_noise_energy_sum) / float(noise_energy_sum)
