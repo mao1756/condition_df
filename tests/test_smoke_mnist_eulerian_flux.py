@@ -31,6 +31,9 @@ from mnist.eulerian_flux_mnist import (
     FluxTrainingBatch,
     make_experiment10_run_dir,
     _ot_coupled_target_indices,
+    masked_reference_free_step_torch,
+    reference_step_substep_diagnostics_torch,
+    choose_reference_substeps_torch,
     apply_flux_parameterization_torch,
     build_classwise_ot_cache,
     build_on_policy_replay_cache,
@@ -127,6 +130,140 @@ def test_poisson_flux_half_precision_uses_float32_fft_on_28_grid() -> None:
 
 
 
+
+def test_masked_reference_step_moves_mass_into_zero_endpoint() -> None:
+    config = DirectFluxMNISTConfig(
+        grid_size=4,
+        edge_alpha_mode="alpha_eff",
+        alpha_eff=1.0,
+        mass_floor=1e-12,
+        limiter_fraction=1.0,
+        source_lowfreq_size=2,
+        ot_lowres_size=2,
+    )
+    state = torch.zeros(1, 16)
+    # Put all mass at pixel 1.  Pixel 0 is the tail of the oriented horizontal
+    # edge 0 -> 1 with a=0,b>0, so the free drift should move mass into pixel 0.
+    state[0, 1] = 1.0
+    result = masked_reference_free_step_torch(
+        state,
+        dt=1e-4,
+        config=config,
+        free_weight=1.0,
+        noise_weight=0.0,
+        substeps=1,
+        stiffness_fraction=1.0,
+        deterministic=True,
+        return_innovations=True,
+    )
+    assert result.states[0, 1] < 1.0
+    assert result.states[0].count_nonzero() > 1
+    assert result.states[0, torch.arange(16) != 1].sum() > 0.0
+    assert torch.all(result.states >= 0.0)
+    assert torch.allclose(result.states.sum(dim=1), torch.ones(1), atol=1e-6)
+    assert result.floor_correction_l1 == 0.0
+    assert result.valid_edge_mask is not None
+    assert result.raw_innovations is not None
+
+
+def test_masked_reference_step_moves_mass_into_opposite_zero_endpoint() -> None:
+    config = DirectFluxMNISTConfig(
+        grid_size=4,
+        edge_alpha_mode="alpha_eff",
+        alpha_eff=1.0,
+        mass_floor=1e-12,
+        limiter_fraction=1.0,
+        source_lowfreq_size=2,
+        ot_lowres_size=2,
+    )
+    state = torch.zeros(1, 16)
+    # Now pixel 0 is the positive tail and pixel 1 is the zero head of edge
+    # 0 -> 1.  The same boundary rule should move mass into pixel 1.
+    state[0, 0] = 1.0
+    result = masked_reference_free_step_torch(
+        state,
+        dt=1e-4,
+        config=config,
+        free_weight=1.0,
+        noise_weight=0.0,
+        substeps=1,
+        stiffness_fraction=1.0,
+        deterministic=True,
+    )
+    assert result.states[0, 0] < 1.0
+    assert result.states[0, 1] > 0.0
+    assert torch.all(result.states >= 0.0)
+    assert torch.allclose(result.states.sum(dim=1), torch.ones(1), atol=1e-6)
+
+
+def test_double_zero_edge_without_positive_neighbor_has_no_local_flux() -> None:
+    config = DirectFluxMNISTConfig(
+        grid_size=4,
+        edge_alpha_mode="alpha_eff",
+        alpha_eff=1.0,
+        mass_floor=1e-12,
+        limiter_fraction=1.0,
+        source_lowfreq_size=2,
+        ot_lowres_size=2,
+    )
+    state = torch.zeros(1, 16)
+    # Pixels 0 and 1 form a double-zero horizontal edge.  The only positive
+    # mass is at pixel 10, which is not adjacent to either endpoint, so this
+    # edge should not create mass locally in one deterministic step.
+    state[0, 10] = 1.0
+    result = masked_reference_free_step_torch(
+        state,
+        dt=1e-4,
+        config=config,
+        free_weight=1.0,
+        noise_weight=0.0,
+        substeps=1,
+        stiffness_fraction=1.0,
+        deterministic=True,
+    )
+    assert torch.allclose(result.states[0, [0, 1]], torch.zeros(2), atol=1e-10)
+    assert torch.all(result.states >= 0.0)
+    assert torch.allclose(result.states.sum(dim=1), torch.ones(1), atol=1e-6)
+
+
+def test_reference_substep_diagnostics_and_adaptive_choice() -> None:
+    config = DirectFluxMNISTConfig(
+        grid_size=4,
+        edge_alpha_mode="alpha_eff",
+        alpha_eff=1.0,
+        mass_floor=1e-12,
+        limiter_fraction=0.25,
+        source_lowfreq_size=2,
+        ot_lowres_size=2,
+    )
+    state = torch.full((1, 16), 1e-6)
+    state[0, 1] = 1.0
+    state = state / state.sum(dim=1, keepdim=True)
+    diag = reference_step_substep_diagnostics_torch(
+        state,
+        dt=1e-3,
+        config=config,
+        free_weight=10.0,
+        noise_weight=0.0,
+        quantile=0.99,
+    )
+    chosen, adaptive = choose_reference_substeps_torch(
+        state,
+        dt=1e-3,
+        config=config,
+        free_weight=10.0,
+        noise_weight=0.0,
+        base_substeps=1,
+        max_substeps=64,
+        target_drift_ratio=0.05,
+        target_noise_ratio=0.05,
+        quantile=0.99,
+    )
+    assert diag["drift_ratio_q"] > 0.0
+    assert 1 < chosen <= 64
+    assert adaptive["required_substeps_unclipped"] >= chosen
+
+
 def test_free_aware_target_subtracts_free_drift_and_grid_alpha() -> None:
     rng = np.random.default_rng(11)
     config_plain = DirectFluxMNISTConfig(
@@ -145,7 +282,7 @@ def test_free_aware_target_subtracts_free_drift_and_grid_alpha() -> None:
         target_noise_weight=0.01,
         flux_scale=10.0,
     )
-    assert EDGE_ALPHA_MODES == ("legacy", "grid")
+    assert EDGE_ALPHA_MODES == ("legacy", "grid", "alpha_eff")
     assert abs(edge_alpha_value(config_plain) - 2.0 / 64.0) < 1e-12
     config_aware = DirectFluxMNISTConfig(
         grid_size=8,

@@ -64,7 +64,7 @@ VELOCITY_TARGET_MODES = ("constant", "residual", "mixed", "safe-residual")
 TAU_SAMPLING_MODES = ("uniform", "endpoint-mixture")
 OT_COST_MODES = ("lowres", "pixel")
 OT_MATCH_MODES = ("minibatch", "nearest", "topk")
-EDGE_ALPHA_MODES = ("legacy", "grid")
+EDGE_ALPHA_MODES = ("legacy", "grid", "alpha_eff")
 ON_POLICY_PREFIX_MODES = ("short", "uniform", "late-biased")
 ON_POLICY_MODES = ("online", "replay", "off")
 ON_POLICY_CACHE_MODES = ("independent", "trajectory")
@@ -115,6 +115,10 @@ __all__ = [
     "terminal_conditioning_flux_torch",
     "free_drift_flux_torch",
     "edge_noise_std_channels",
+    "reference_step_substep_diagnostics_torch",
+    "choose_reference_substeps_torch",
+    "MaskedReferenceStepResult",
+    "masked_reference_free_step_torch",
     "step_component_rms_torch",
     "poisson_flux_from_velocity_torch",
     "project_edge_flux_torch",
@@ -165,10 +169,13 @@ class DirectFluxMNISTConfig:
 
     grid_size: int = 28
     # Legacy experiments used ``alpha`` directly on every edge.  Theory uses
-    # alpha_h = beta h^d = beta / grid_size^2 on the 2D MNIST grid.  Keep
-    # legacy as the default for continuity and expose the grid mode explicitly.
+    # alpha_h = beta h^d = beta / grid_size^2 on the 2D MNIST grid.  D0/P0.5
+    # uses the soft practical reference ``alpha_eff`` by default in its own CLI:
+    # it is still a symmetric finite-dimensional Dirichlet(alpha_eff) reference,
+    # but is interior-typical enough for Gaussian innovation regression.
     alpha: float = 1.0
     beta: float = 1.0
+    alpha_eff: float = 1.0
     edge_alpha_mode: str = "legacy"
     horizon_scale: float = 1.0
     num_steps: int = 256
@@ -378,6 +385,8 @@ class DirectFluxMNISTConfig:
             raise ValueError("alpha must be positive and finite")
         if self.beta <= 0.0 or not math.isfinite(self.beta):
             raise ValueError("beta must be positive and finite")
+        if self.alpha_eff <= 0.0 or not math.isfinite(self.alpha_eff):
+            raise ValueError("alpha_eff must be positive and finite")
         if self.edge_alpha_mode not in EDGE_ALPHA_MODES:
             raise ValueError(f"edge_alpha_mode must be one of {EDGE_ALPHA_MODES}")
         if self.horizon_scale <= 0.0 or not math.isfinite(self.horizon_scale):
@@ -805,10 +814,19 @@ class _TorchEdgeClass:
 
 
 def edge_alpha_value(config: DirectFluxMNISTConfig) -> float:
-    """Return the edge Dirichlet parameter used by mobility/free SDE terms."""
-    if config.edge_alpha_mode == "grid":
+    """Return the edge Dirichlet parameter used by mobility/free SDE terms.
+
+    ``legacy`` uses the historical code parameter ``alpha``.  ``grid`` uses the
+    manuscript scaling ``beta / grid_size**2`` on MNIST.  ``alpha_eff`` is the
+    P0.5 soft practical reference: a symmetric Dirichlet(alpha_eff) grid law
+    with faithful time-change coupling of drift and noise.
+    """
+    mode = str(config.edge_alpha_mode)
+    if mode == "grid":
         n = float(config.grid_size)
         return float(config.beta) / (n * n)
+    if mode == "alpha_eff":
+        return float(config.alpha_eff)
     return float(config.alpha)
 
 
@@ -2393,6 +2411,431 @@ def edge_noise_std_channels(masses: Tensor, dt: float, config: DirectFluxMNISTCo
     n = int(config.grid_size)
     theta = harmonic_mobility_channels(masses, config)
     return torch.sqrt((2.0 * theta * float(n * n) * float(dt)).clamp_min(0.0))
+
+
+@torch.no_grad()
+def _finite_quantile_torch(values: Tensor, q: float) -> float:
+    flat = values.detach().reshape(-1)
+    finite = flat[torch.isfinite(flat)]
+    if finite.numel() == 0:
+        return 0.0
+    q_clamped = min(1.0, max(0.0, float(q)))
+    if finite.numel() == 1:
+        return float(finite[0].cpu())
+    try:
+        return float(torch.quantile(finite.float(), q_clamped).cpu())
+    except Exception:  # pragma: no cover - compatibility with older torch builds.
+        sorted_vals = torch.sort(finite.float()).values
+        idx = int(round(q_clamped * float(sorted_vals.numel() - 1)))
+        return float(sorted_vals[idx].cpu())
+
+
+@torch.no_grad()
+def reference_step_substep_diagnostics_torch(
+    states: Tensor,
+    dt: float,
+    config: DirectFluxMNISTConfig,
+    *,
+    free_weight: float | None = None,
+    noise_weight: float | None = None,
+    substeps: int = 1,
+    stiffness_fraction: float | None = None,
+    quantile: float = 0.99,
+) -> dict[str, float]:
+    """Estimate explicit-Euler proposal size relative to directional budgets.
+
+    The drift ratio is sign-aware: positive edge flux consumes tail mass and
+    negative edge flux consumes head mass.  The stochastic ratio is conservative
+    and uses the smaller endpoint budget because a Gaussian increment may have
+    either sign.  These diagnostics are used by Phase 0.7 to pick a fixed
+    substep count before calling the boundary-aware limiter.
+    """
+
+    if states.ndim != 2:
+        raise ValueError("states must have shape (B, N)")
+    if dt < 0.0 or not math.isfinite(float(dt)):
+        raise ValueError("dt must be non-negative and finite")
+    if int(substeps) <= 0:
+        raise ValueError("substeps must be positive")
+    n = int(config.grid_size)
+    if states.shape[1] != n * n:
+        raise ValueError("states have the wrong number of pixels")
+    free_w = float(config.free_weight if free_weight is None else free_weight)
+    noise_w = float(config.noise_weight if noise_weight is None else noise_weight)
+    stiff_c = float(config.limiter_fraction if stiffness_fraction is None else stiffness_fraction)
+    if not (0.0 < stiff_c <= 1.0 and math.isfinite(stiff_c)):
+        raise ValueError("stiffness_fraction must be finite and in (0, 1]")
+
+    sub_dt = float(dt) / float(int(substeps))
+    inv_h2 = float(n * n)
+    alpha = edge_alpha_value(config)
+    tiny = float(config.mass_floor)
+    drift_ratios: list[Tensor] = []
+    noise_ratios: list[Tensor] = []
+    endpoint_masses: list[Tensor] = []
+
+    for edge_class in _edge_classes_torch(n, states.device):
+        tails = edge_class.tails
+        heads = edge_class.heads
+        a0 = states[:, tails]
+        b0 = states[:, heads]
+        denom = a0 + b0
+        harmonic = torch.where(denom > tiny, a0 * b0 / denom.clamp_min(tiny), torch.zeros_like(denom))
+        ratio = torch.where(denom > tiny, (a0 - b0) / denom.clamp_min(tiny), torch.zeros_like(denom))
+        theta = ((2.0 * alpha + 1.0) / alpha) * harmonic
+        free_flux = (2.0 * alpha + 1.0) * inv_h2 * ratio
+        drift_delta = free_w * free_flux * sub_dt
+        noise_std = noise_w * torch.sqrt((2.0 * theta * inv_h2 * sub_dt).clamp_min(0.0))
+        tail_budget = (stiff_c * (a0 - tiny).clamp_min(0.0)).clamp_min(0.0)
+        head_budget = (stiff_c * (b0 - tiny).clamp_min(0.0)).clamp_min(0.0)
+        drift_budget = torch.where(drift_delta >= 0.0, tail_budget, head_budget).clamp_min(tiny)
+        noise_budget = torch.minimum(tail_budget, head_budget).clamp_min(tiny)
+        drift_ratios.append((drift_delta.abs() / drift_budget).reshape(-1))
+        noise_ratios.append((noise_std / noise_budget).reshape(-1))
+        endpoint_masses.append(torch.minimum(a0, b0).reshape(-1))
+
+    drift_all = torch.cat(drift_ratios) if drift_ratios else states.new_zeros(1)
+    noise_all = torch.cat(noise_ratios) if noise_ratios else states.new_zeros(1)
+    endpoint_all = torch.cat(endpoint_masses) if endpoint_masses else states.new_zeros(1)
+    q = min(1.0, max(0.0, float(quantile)))
+    return {
+        "dt": float(dt),
+        "sub_dt": float(sub_dt),
+        "diagnostic_substeps": float(int(substeps)),
+        "ratio_quantile": float(q),
+        "drift_ratio_q": _finite_quantile_torch(drift_all, q),
+        "drift_ratio_max": _finite_quantile_torch(drift_all, 1.0),
+        "noise_ratio_q": _finite_quantile_torch(noise_all, q),
+        "noise_ratio_max": _finite_quantile_torch(noise_all, 1.0),
+        "min_endpoint_mass_q01": _finite_quantile_torch(endpoint_all, 0.01),
+        "min_endpoint_mass_q50": _finite_quantile_torch(endpoint_all, 0.50),
+    }
+
+
+@torch.no_grad()
+def choose_reference_substeps_torch(
+    states: Tensor,
+    dt: float,
+    config: DirectFluxMNISTConfig,
+    *,
+    free_weight: float | None = None,
+    noise_weight: float | None = None,
+    base_substeps: int = 1,
+    max_substeps: int = 512,
+    target_drift_ratio: float = 0.25,
+    target_noise_ratio: float = 0.25,
+    stiffness_fraction: float | None = None,
+    quantile: float = 0.99,
+) -> tuple[int, dict[str, float]]:
+    """Choose substeps from one-substep drift/noise budget ratios.
+
+    Drift increments scale like ``1 / substeps`` and one-sigma stochastic
+    increments scale like ``1 / sqrt(substeps)``.  The diagnostics keep the
+    unclipped requirement so callers can see when the configured cap is
+    dominating the dynamics.
+    """
+
+    base = max(1, int(base_substeps))
+    cap = max(base, int(max_substeps))
+    diag = reference_step_substep_diagnostics_torch(
+        states,
+        dt,
+        config,
+        free_weight=free_weight,
+        noise_weight=noise_weight,
+        substeps=1,
+        stiffness_fraction=stiffness_fraction,
+        quantile=quantile,
+    )
+    drift_target = max(float(target_drift_ratio), 1e-12)
+    noise_target = max(float(target_noise_ratio), 1e-12)
+    drift_q = float(diag["drift_ratio_q"])
+    noise_q = float(diag["noise_ratio_q"])
+    drift_required = 1 if drift_q <= drift_target else int(math.ceil(drift_q / drift_target))
+    noise_required = 1 if noise_q <= noise_target else int(math.ceil((noise_q / noise_target) ** 2))
+    required_unclipped = max(base, drift_required, noise_required)
+    chosen = min(cap, required_unclipped)
+    diag.update(
+        {
+            "base_substeps": float(base),
+            "max_substeps": float(cap),
+            "target_drift_ratio": float(drift_target),
+            "target_noise_ratio": float(noise_target),
+            "drift_required_substeps": float(drift_required),
+            "noise_required_substeps": float(noise_required),
+            "required_substeps_unclipped": float(required_unclipped),
+            "chosen_substeps": float(chosen),
+            "hit_substep_cap": float(required_unclipped > cap),
+        }
+    )
+    return int(chosen), diag
+
+
+@dataclass(frozen=True)
+class MaskedReferenceStepResult:
+    """Result of the boundary-correct free reference integrator.
+
+    ``raw_innovations`` and ``valid_edge_mask`` are only populated when
+    ``return_innovations=True``.  They have shape ``(substeps, B, 2, H, W)``.
+    A true mask value means the raw Gaussian innovation on that edge/substep was
+    used without limiter modification.  A false value means the deterministic or
+    stochastic transfer touched the directional limiter and should be excluded
+    from innovation-regression losses.
+
+    The historical ``masked_*`` names are retained for dashboards.  In this
+    implementation they count limiter-touched edges, not frozen/no-op edges: the
+    integrator advances the feasible part of the transfer instead of dropping the
+    whole edge.  The weighted masked fractions down-weight limited edges carrying
+    negligible harmonic mobility or Brownian noise energy, which is the more
+    relevant health signal for D0 innovation regression.
+    """
+
+    states: Tensor
+    raw_innovations: Tensor | None
+    valid_edge_mask: Tensor | None
+    masked_edges: int
+    proposed_edges: int
+    substeps: int
+    masked_fraction: float
+    noise_stiff_edges: int
+    drift_stiff_edges: int
+    overflow_edges: int
+    limited_edges: int = 0
+    drift_limited_edges: int = 0
+    noise_limited_edges: int = 0
+    nonfinite_edges: int = 0
+    floor_touched_pixels: int = 0
+    floor_correction_l1: float = 0.0
+    renorm_correction_l1: float = 0.0
+    mobility_weight_sum: float = 0.0
+    limited_mobility_weight_sum: float = 0.0
+    noise_energy_sum: float = 0.0
+    limited_noise_energy_sum: float = 0.0
+    mobility_weighted_masked_fraction: float = 0.0
+    noise_energy_weighted_masked_fraction: float = 0.0
+    valid_innovation_mobility_fraction: float = 1.0
+    valid_innovation_noise_energy_fraction: float = 1.0
+    substep_states: Tensor | None = None
+
+
+def masked_reference_free_step_torch(
+    states: Tensor,
+    dt: float,
+    config: DirectFluxMNISTConfig,
+    *,
+    free_weight: float | None = None,
+    noise_weight: float | None = None,
+    substeps: int = 1,
+    stiffness_fraction: float | None = None,
+    deterministic: bool = False,
+    return_innovations: bool = False,
+    return_substep_states: bool = False,
+) -> MaskedReferenceStepResult:
+    """Boundary-correct free reference step with direction-aware limiting.
+
+    The old P0.5 rule rejected an edge whenever ``abs(delta)`` or even the
+    one-sigma noise scale was large relative to ``min(a, b)``.  That makes a
+    zero or nearly-zero endpoint behave like an absorbing wall: the deterministic
+    inward Dirichlet drift on a one-zero edge is also rejected because the
+    threshold is zero.
+
+    This version computes all coefficients from the beginning of each substep
+    and uses per-node directional mass budgets.  A positive oriented edge
+    transfer consumes tail mass; a negative transfer consumes head mass.  Mass
+    that arrives during the current substep is not made available for another
+    outgoing transfer until the next substep, avoiding edge-color cascade
+    artifacts at zero pixels.
+
+    Raw Gaussian innovations are stored before any limiter modification, and
+    limiter-touched edges are masked for D0 innovation regression.
+    """
+
+    if states.ndim != 2:
+        raise ValueError("states must have shape (B, N)")
+    if dt < 0.0 or not math.isfinite(float(dt)):
+        raise ValueError("dt must be non-negative and finite")
+    if int(substeps) <= 0:
+        raise ValueError("substeps must be positive")
+    if dt == 0.0:
+        raw = None
+        mask = None
+        sub_states = None
+        if return_innovations:
+            n0 = int(config.grid_size)
+            raw = torch.empty((0, states.shape[0], 2, n0, n0), device=states.device, dtype=states.dtype)
+            mask = torch.empty((0, states.shape[0], 2, n0, n0), device=states.device, dtype=torch.bool)
+        if return_substep_states:
+            n0 = int(config.grid_size)
+            sub_states = torch.empty((0, states.shape[0], n0 * n0), device=states.device, dtype=states.dtype)
+        return MaskedReferenceStepResult(states.clone(), raw, mask, 0, 0, int(substeps), 0.0, 0, 0, 0, substep_states=sub_states)
+
+    n = int(config.grid_size)
+    if states.shape[1] != n * n:
+        raise ValueError("states have the wrong number of pixels")
+    free_w = float(config.free_weight if free_weight is None else free_weight)
+    noise_w = float(config.noise_weight if noise_weight is None else noise_weight)
+    stiff_c = float(config.limiter_fraction if stiffness_fraction is None else stiffness_fraction)
+    if not (0.0 < stiff_c <= 1.0 and math.isfinite(stiff_c)):
+        raise ValueError("stiffness_fraction must be finite and in (0, 1]")
+    substeps_i = int(substeps)
+    sub_dt = float(dt) / float(substeps_i)
+    inv_h2 = float(n * n)
+    alpha = edge_alpha_value(config)
+    tiny = float(config.mass_floor)
+    out = states.clone()
+    raw_chunks: list[Tensor] = []
+    mask_chunks: list[Tensor] = []
+    substep_state_chunks: list[Tensor] = []
+    masked_edges = 0
+    proposed_edges = 0
+    drift_limited_edges = 0
+    noise_limited_edges = 0
+    nonfinite_edges = 0
+    floor_touched_pixels = 0
+    floor_correction_l1 = 0.0
+    renorm_correction_l1 = 0.0
+    mobility_weight_sum = 0.0
+    limited_mobility_weight_sum = 0.0
+    noise_energy_sum = 0.0
+    limited_noise_energy_sum = 0.0
+
+    def _budget_limiter(delta: Tensor, tail_budget: Tensor, head_budget: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        upper = tail_budget.clamp_min(0.0)
+        lower = -head_budget.clamp_min(0.0)
+        finite = torch.isfinite(delta)
+        safe = torch.where(finite, delta, torch.zeros_like(delta))
+        clipped = torch.minimum(torch.maximum(safe, lower), upper)
+        limited = (~finite) | (clipped != safe)
+        return clipped, limited, ~finite
+
+    for _sub in range(substeps_i):
+        base = out
+        state_delta = torch.zeros_like(base)
+        # Directional consumption budget from the start-of-substep state.  This
+        # keeps exact zero endpoints viable while preventing mass received during
+        # this substep from immediately cascading through other edges.
+        remaining = float(stiff_c) * (base - float(tiny)).clamp_min(0.0)
+
+        if return_innovations:
+            raw_flat = torch.zeros((base.shape[0], 2 * n * n), device=base.device, dtype=base.dtype)
+            mask_flat = torch.ones((base.shape[0], 2 * n * n), device=base.device, dtype=torch.bool)
+        else:
+            raw_flat = None
+            mask_flat = None
+
+        for edge_class in _edge_classes_torch(n, base.device):
+            tails = edge_class.tails
+            heads = edge_class.heads
+            a0 = base[:, tails]
+            b0 = base[:, heads]
+            denom = a0 + b0
+            harmonic = torch.where(denom > tiny, a0 * b0 / denom.clamp_min(tiny), torch.zeros_like(denom))
+            ratio = torch.where(denom > tiny, (a0 - b0) / denom.clamp_min(tiny), torch.zeros_like(denom))
+            theta = ((2.0 * alpha + 1.0) / alpha) * harmonic
+            free_flux = (2.0 * alpha + 1.0) * inv_h2 * ratio
+            drift_delta = free_w * free_flux * sub_dt
+            noise_std = noise_w * torch.sqrt((2.0 * theta * inv_h2 * sub_dt).clamp_min(0.0))
+            xi = torch.zeros_like(noise_std) if deterministic or noise_w <= 0.0 else torch.randn_like(noise_std)
+
+            drift_flux, drift_limited, drift_nonfinite = _budget_limiter(
+                drift_delta,
+                remaining[:, tails],
+                remaining[:, heads],
+            )
+            drift_tail_consume = drift_flux.clamp_min(0.0)
+            drift_head_consume = (-drift_flux).clamp_min(0.0)
+            remaining[:, tails] = (remaining[:, tails] - drift_tail_consume).clamp_min(0.0)
+            remaining[:, heads] = (remaining[:, heads] - drift_head_consume).clamp_min(0.0)
+            state_delta[:, tails] = state_delta[:, tails] - drift_flux
+            state_delta[:, heads] = state_delta[:, heads] + drift_flux
+
+            noise_delta = noise_std * xi
+            noise_flux, noise_limited, noise_nonfinite = _budget_limiter(
+                noise_delta,
+                remaining[:, tails],
+                remaining[:, heads],
+            )
+            noise_tail_consume = noise_flux.clamp_min(0.0)
+            noise_head_consume = (-noise_flux).clamp_min(0.0)
+            remaining[:, tails] = (remaining[:, tails] - noise_tail_consume).clamp_min(0.0)
+            remaining[:, heads] = (remaining[:, heads] - noise_head_consume).clamp_min(0.0)
+            state_delta[:, tails] = state_delta[:, tails] - noise_flux
+            state_delta[:, heads] = state_delta[:, heads] + noise_flux
+
+            invalid_for_regression = drift_limited | noise_limited | drift_nonfinite | noise_nonfinite
+            # P0.8: raw edge counts overstate D0 damage when the limited edge
+            # carries negligible mobility/noise.  Accumulate signal-weighted
+            # limiter fractions using tensors already computed for the step; no
+            # extra diagnostic pass is required.
+            theta_weight = theta.detach().clamp_min(0.0)
+            noise_energy_weight = noise_std.detach().square().clamp_min(0.0)
+            mobility_weight_sum += float(theta_weight.sum().detach().cpu())
+            limited_mobility_weight_sum += float(theta_weight.masked_select(invalid_for_regression).sum().detach().cpu())
+            noise_energy_sum += float(noise_energy_weight.sum().detach().cpu())
+            limited_noise_energy_sum += float(noise_energy_weight.masked_select(invalid_for_regression).sum().detach().cpu())
+            proposed_edges += int(invalid_for_regression.numel())
+            drift_limited_edges += int(drift_limited.count_nonzero().detach().cpu())
+            noise_limited_edges += int(noise_limited.count_nonzero().detach().cpu())
+            nonfinite_edges += int((drift_nonfinite | noise_nonfinite).count_nonzero().detach().cpu())
+            masked_edges += int(invalid_for_regression.count_nonzero().detach().cpu())
+
+            if return_innovations and raw_flat is not None and mask_flat is not None:
+                raw_flat[:, edge_class.flux_indices] = xi
+                mask_flat[:, edge_class.flux_indices] = ~invalid_for_regression
+
+        out = base + state_delta
+        before_floor = out
+        # Do not inject a positive floor into true zero pixels.  The finite-volume
+        # boundary rule is viable with exact zeros; this repair only removes
+        # negative roundoff/overshoot if the directional budgets were touched by
+        # floating-point error.
+        floored = before_floor.clamp_min(0.0)
+        floor_touched_pixels += int((before_floor < 0.0).count_nonzero().detach().cpu())
+        floor_correction_l1 += float((floored - before_floor).abs().sum().detach().cpu())
+        before_renorm = floored
+        sums = before_renorm.sum(dim=1, keepdim=True).clamp_min(tiny)
+        out = before_renorm / sums
+        renorm_correction_l1 += float((out - before_renorm).abs().sum().detach().cpu())
+        if return_substep_states:
+            substep_state_chunks.append(out.clone())
+        if return_innovations and raw_flat is not None and mask_flat is not None:
+            raw_chunks.append(raw_flat.reshape(base.shape[0], 2, n, n))
+            mask_chunks.append(mask_flat.reshape(base.shape[0], 2, n, n))
+
+    raw_tensor = torch.stack(raw_chunks, dim=0) if raw_chunks else None
+    mask_tensor = torch.stack(mask_chunks, dim=0) if mask_chunks else None
+    substep_state_tensor = torch.stack(substep_state_chunks, dim=0) if substep_state_chunks else None
+    masked_fraction = 0.0 if proposed_edges == 0 else float(masked_edges) / float(proposed_edges)
+    mobility_masked_fraction = 0.0 if mobility_weight_sum <= 0.0 else float(limited_mobility_weight_sum) / float(mobility_weight_sum)
+    noise_energy_masked_fraction = 0.0 if noise_energy_sum <= 0.0 else float(limited_noise_energy_sum) / float(noise_energy_sum)
+    return MaskedReferenceStepResult(
+        states=out,
+        raw_innovations=raw_tensor,
+        valid_edge_mask=mask_tensor,
+        masked_edges=int(masked_edges),
+        proposed_edges=int(proposed_edges),
+        substeps=int(substeps_i),
+        masked_fraction=float(masked_fraction),
+        noise_stiff_edges=int(noise_limited_edges),
+        drift_stiff_edges=int(drift_limited_edges),
+        overflow_edges=int(masked_edges),
+        limited_edges=int(masked_edges),
+        drift_limited_edges=int(drift_limited_edges),
+        noise_limited_edges=int(noise_limited_edges),
+        nonfinite_edges=int(nonfinite_edges),
+        floor_touched_pixels=int(floor_touched_pixels),
+        floor_correction_l1=float(floor_correction_l1),
+        renorm_correction_l1=float(renorm_correction_l1),
+        mobility_weight_sum=float(mobility_weight_sum),
+        limited_mobility_weight_sum=float(limited_mobility_weight_sum),
+        noise_energy_sum=float(noise_energy_sum),
+        limited_noise_energy_sum=float(limited_noise_energy_sum),
+        mobility_weighted_masked_fraction=float(mobility_masked_fraction),
+        noise_energy_weighted_masked_fraction=float(noise_energy_masked_fraction),
+        valid_innovation_mobility_fraction=float(1.0 - mobility_masked_fraction),
+        valid_innovation_noise_energy_fraction=float(1.0 - noise_energy_masked_fraction),
+        substep_states=substep_state_tensor,
+    )
 
 
 def step_component_rms_torch(
@@ -5851,6 +6294,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--horizon-scale", type=float, default=1.0)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=1.0)
+    parser.add_argument("--alpha-eff", type=float, default=1.0)
     parser.add_argument("--edge-alpha-mode", choices=EDGE_ALPHA_MODES, default="legacy")
     parser.add_argument("--upsample-mode", choices=UPSAMPLE_MODES, default="resize-conv")
     parser.add_argument("--flux-parameterization", choices=FLUX_PARAMETERIZATION_MODES, default="projected")
@@ -5928,6 +6372,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     config = DirectFluxMNISTConfig(
         alpha=float(args.alpha),
         beta=float(args.beta),
+        alpha_eff=float(args.alpha_eff),
         edge_alpha_mode=str(args.edge_alpha_mode),
         horizon_scale=float(args.horizon_scale),
         num_steps=int(args.sample_steps),
