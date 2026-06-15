@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from mnist.eulerian_flux_mnist import DirectFluxMNISTConfig, DirectFluxUNet, masked_reference_free_step_torch
 from mnist.experiment12_d0 import (
     Experiment12D0Config,
     build_d0_training_cache,
+    cache_summary,
+    d0_learned_block_reverse_diagnostic,
     d0_unweighted_innovation_loss,
     effective_time_integral,
     make_rate_schedule,
@@ -94,6 +97,7 @@ def test_d0_cache_loss_and_reverse_smoke(tmp_path) -> None:
         show_progress=False,
     )
     assert cache.states.shape == (8, 64)
+    assert cache.earlier_states.shape == (8, 64)
     assert cache.tau.shape == (8,)
     assert cache.labels.shape == (8,)
     assert cache.innovations.shape == (8, 2, 8, 8)
@@ -124,6 +128,8 @@ def test_d0_cache_loss_and_reverse_smoke(tmp_path) -> None:
         sample_steps=np.asarray([cache.sample_steps], dtype=np.int64),
         substeps=np.asarray([cache.reference_substeps], dtype=np.int64),
         horizon=np.asarray([cache.horizon], dtype=np.float64),
+        stride_substeps=np.asarray([cache.stride_substeps], dtype=np.int64),
+        lambda_mix=np.asarray([cache.lambda_mix], dtype=np.float64),
     )
     for param in model.parameters():
         param.data.zero_()
@@ -149,3 +155,156 @@ def test_d0_schedule_rate_mode() -> None:
     assert np.isclose(rates.mean(), 0.25)
     rates_legacy = make_rate_schedule(4, tau_eff=0.5, horizon=2.0, time_change_mode="rate")
     assert np.isclose(rates_legacy.mean(), 0.5)
+
+
+def test_d0_overfit_outer_stride_rounding_requires_opt_in() -> None:
+    images, labels = synthetic_digit_measures(examples_per_class=1, grid_size=8, seed=123)
+    cfg = _toy_config()
+    d0 = Experiment12D0Config(
+        cache_paths=2,
+        cache_batch_size=2,
+        time_slices_per_path=1,
+        sample_steps=2,
+        reference_substeps=2,
+        teacher_stride_substeps=1,
+        tau_eff=1e-4,
+        single_image_overfit=True,
+        train_steps=0,
+        num_samples=0,
+    )
+    with pytest.raises(ValueError, match="rounded teacher_stride_substeps"):
+        build_d0_training_cache(
+            dataset_images=images,
+            dataset_labels=labels,
+            dynamics_config=cfg,
+            d0_config=d0,
+            device=torch.device("cpu"),
+            rng=np.random.default_rng(5),
+            show_progress=False,
+        )
+
+
+def test_d0_prior_bank_mismatch_raises(tmp_path) -> None:
+    images, labels = synthetic_digit_measures(examples_per_class=1, grid_size=8, seed=123)
+    cfg = _toy_config()
+    d0 = Experiment12D0Config(
+        cache_paths=2,
+        cache_batch_size=2,
+        time_slices_per_path=1,
+        sample_steps=2,
+        reference_substeps=2,
+        teacher_stride_substeps=2,
+        tau_eff=1e-4,
+        train_steps=0,
+        num_samples=2,
+    )
+    cache = build_d0_training_cache(
+        dataset_images=images,
+        dataset_labels=labels,
+        dynamics_config=cfg,
+        d0_config=d0,
+        device=torch.device("cpu"),
+        rng=np.random.default_rng(6),
+        show_progress=False,
+    )
+    bad_prior = tmp_path / "bad_prior.npz"
+    np.savez_compressed(
+        bad_prior,
+        terminal_states=cache.terminal_states.reshape(cache.terminal_states.shape[0], -1),
+        labels=cache.requested_labels,
+        rate_schedule=cache.rate_schedule,
+        sample_steps=np.asarray([cache.sample_steps], dtype=np.int64),
+        substeps=np.asarray([1], dtype=np.int64),
+        horizon=np.asarray([cache.horizon], dtype=np.float64),
+    )
+    model = DirectFluxUNet(cfg, base_channels=4)
+    with pytest.raises(ValueError, match="Incompatible D0 prior bank"):
+        simulate_d0_reverse_generation(
+            model,
+            cache.requested_labels[:2],
+            dynamics_config=cfg,
+            d0_config=d0,
+            prior_bank_path=bad_prior,
+            device=torch.device("cpu"),
+            seed=9,
+            deterministic=True,
+            control_strength=0.0,
+            show_progress=False,
+        )
+
+
+
+def test_d0_projected_loss_reports_projection_diagnostics() -> None:
+    images, labels = synthetic_digit_measures(examples_per_class=1, grid_size=8, seed=222)
+    cfg = _toy_config()
+    d0 = Experiment12D0Config(
+        cache_paths=4,
+        cache_batch_size=2,
+        time_slices_per_path=2,
+        sample_steps=2,
+        reference_substeps=2,
+        teacher_stride_substeps=2,
+        tau_eff=1e-4,
+        d0_target_space="projected-edge",
+        invalid_output_l2_weight=1e-3,
+        curl_loss_weight=1e-3,
+        train_steps=0,
+        num_samples=0,
+    )
+    cache = build_d0_training_cache(
+        dataset_images=images,
+        dataset_labels=labels,
+        dynamics_config=cfg,
+        d0_config=d0,
+        device=torch.device("cpu"),
+        rng=np.random.default_rng(222),
+        show_progress=False,
+    )
+    model = DirectFluxUNet(cfg, base_channels=4)
+    batch = {
+        "states": cache.states[:4],
+        "tau": cache.tau[:4],
+        "labels": cache.labels[:4],
+        "innovations": cache.innovations[:4],
+        "masks": cache.masks[:4],
+    }
+    loss, diag = d0_unweighted_innovation_loss(model, batch, cfg, d0)
+    assert torch.isfinite(loss)
+    assert diag["d0_target_space"] == "projected-edge"
+    assert "projected_residual_rms" in diag
+    assert "prediction_removed_curl_rms" in diag
+    assert "invalid_output_l2" in diag
+    summary = cache_summary(cache)
+    assert sum(int(summary[f"cache_tau_bin{i}_count"]) for i in range(5)) == cache.size
+
+
+def test_d0_learned_block_diagnostic_smoke() -> None:
+    images, labels = synthetic_digit_measures(examples_per_class=1, grid_size=8, seed=333)
+    cfg = _toy_config()
+    d0 = Experiment12D0Config(
+        cache_paths=4,
+        cache_batch_size=2,
+        time_slices_per_path=1,
+        sample_steps=2,
+        reference_substeps=2,
+        teacher_stride_substeps=2,
+        tau_eff=1e-4,
+        d0_target_space="projected-edge",
+        sample_project_learned_mean=True,
+        train_steps=0,
+        num_samples=0,
+    )
+    cache = build_d0_training_cache(
+        dataset_images=images,
+        dataset_labels=labels,
+        dynamics_config=cfg,
+        d0_config=d0,
+        device=torch.device("cpu"),
+        rng=np.random.default_rng(333),
+        show_progress=False,
+    )
+    model = DirectFluxUNet(cfg, base_channels=4)
+    diag = d0_learned_block_reverse_diagnostic(model, cache, cfg, d0, max_slices=2, device=torch.device("cpu"))
+    assert diag["learned_block_slices"] == 2
+    assert diag["learned_block_best"] in {"plus", "minus", "zero"}
+    assert "learned_block_pred_projected_rms" in diag

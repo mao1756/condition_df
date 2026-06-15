@@ -43,6 +43,10 @@ from mnist.eulerian_flux_mnist import (
     load_mnist_measure_dataset,
     masked_reference_free_step_torch,
     natural_horizon,
+    project_edge_flux_torch,
+    flux_curl_torch,
+    flux_divergence_torch,
+    edge_laplacian_energy_torch,
     save_flux_samples_grid,
     temporary_ema_weights,
     update_ema_state,
@@ -66,9 +70,18 @@ class Experiment12D0Config:
     # expensive and disabled by default.  Set positive to resample periodically.
     cache_refresh_every: int = 0
     cache_build_mode: str = "outer"
+    cache_time_sampling: str = "endpoint-mixture"
+    cache_data_endpoint_prob: float = 0.50
+    cache_terminal_endpoint_prob: float = 0.10
+    cache_endpoint_window_fraction: float = 0.10
     time_slices_per_path: int = 4
     teacher_stride_substeps: int = 8
     eta_l2_weight: float = 1e-4
+    d0_target_space: str = "projected-edge"
+    invalid_output_l2_weight: float = 1e-3
+    curl_loss_weight: float = 1e-3
+    edge_laplacian_loss_weight: float = 0.0
+    sample_project_learned_mean: bool = True
     theta_mask_min: float = 1e-12
     lambda_mix: float = 0.35
     sample_steps: int = 512
@@ -94,6 +107,14 @@ class Experiment12D0Config:
     single_image_index: int = 0
     single_image_label: int | None = None
     train_cache_only: bool = False
+    # Safety/diagnostic flags for the overfit-one-image acceptance test.
+    allow_prior_bank_mismatch: bool = False
+    allow_stride_rounding: bool = False
+    use_external_prior_bank_for_overfit: bool = False
+    oracle_reverse_diagnostic: bool = True
+    oracle_reverse_slices: int = 16
+    learned_block_diagnostic: bool = True
+    learned_block_slices: int = 32
     save_cache_previews: bool = False
     seed: int = 0
     use_amp: bool = True
@@ -117,6 +138,7 @@ class D0TrainingCache:
     starts: Tensor
     path_indices: Tensor
     start_images: Tensor
+    earlier_states: Tensor
     terminal_states: np.ndarray
     source_indices: np.ndarray
     requested_labels: np.ndarray
@@ -137,6 +159,7 @@ class D0TrainingCache:
     renorm_correction_l1: float = 0.0
     teacher_mode: str = "d0-forward"
     cache_build_mode: str = "outer"
+    requested_stride_substeps: int = 0
 
     @property
     def size(self) -> int:
@@ -158,6 +181,16 @@ class D0GenerationResult:
     entropy: float
     total_variation: float
     checkerboard_energy: float
+    learned_raw_rms: float = float("nan")
+    learned_projected_rms: float = float("nan")
+    learned_removed_curl_rms: float = float("nan")
+    sample_start_corr_mean: float = float("nan")
+    sample_start_corr_max: float = float("nan")
+    sample_start_l1_mean: float = float("nan")
+    stride_substeps: int = 1
+    sample_steps: int = 0
+    reference_substeps: int = 0
+    prior_bank_path: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +297,200 @@ def effective_time_integral(rate_schedule: np.ndarray, *, horizon: float) -> flo
     if rates.size == 0:
         return float("nan")
     return float(np.nansum(rates) * float(horizon) / float(rates.size))
+
+
+def _actual_cache_stride_substeps(d0_config: Experiment12D0Config) -> int:
+    requested = max(1, int(d0_config.teacher_stride_substeps))
+    reference_substeps = max(1, int(d0_config.reference_substeps))
+    mode = str(d0_config.cache_build_mode).strip().lower().replace("_", "-")
+    if mode in {"outer", "fast", "outer-fast"}:
+        return int(math.ceil(float(requested) / float(reference_substeps)) * reference_substeps)
+    return int(requested)
+
+
+def _expected_rate_schedule(dynamics_config: DirectFluxMNISTConfig, d0_config: Experiment12D0Config) -> np.ndarray:
+    return make_rate_schedule(
+        int(d0_config.sample_steps),
+        tau_eff=float(d0_config.tau_eff),
+        horizon=natural_horizon(dynamics_config),
+        time_change_mode=str(d0_config.time_change_mode),
+        ramp=str(d0_config.rate_ramp),
+        ramp_ratio=float(d0_config.rate_ramp_ratio),
+        rate_min=d0_config.reference_rate_min,
+        rate_max=d0_config.reference_rate_max,
+    )
+
+
+
+
+def _sample_cache_start_substeps(
+    rng: np.random.Generator,
+    *,
+    shape: tuple[int, int],
+    total_substeps: int,
+    stride: int,
+    d0_config: Experiment12D0Config,
+) -> np.ndarray:
+    """Sample cache slice start indices with optional endpoint bias.
+
+    ``data`` endpoint means small forward time / high reverse tau, where the
+    overfit signal is strongest. ``terminal`` endpoint means large forward time
+    / low reverse tau, useful for sampler initialization diagnostics.
+    """
+
+    max_start = int(total_substeps) - int(stride)
+    if max_start < 0:
+        raise ValueError("stride cannot exceed total_substeps")
+    mode = str(d0_config.cache_time_sampling).strip().lower().replace("_", "-")
+    if mode == "uniform" or max_start == 0:
+        return rng.integers(0, max_start + 1, size=shape, dtype=np.int64)
+    if mode not in {"endpoint-mixture", "endpoint", "endpoint-biased", "data-biased"}:
+        raise ValueError("cache_time_sampling must be uniform or endpoint-mixture")
+    flat_count = int(np.prod(shape))
+    data_prob = max(0.0, min(1.0, float(d0_config.cache_data_endpoint_prob)))
+    terminal_prob = max(0.0, min(1.0 - data_prob, float(d0_config.cache_terminal_endpoint_prob)))
+    window = max(1, int(round(float(total_substeps) * float(d0_config.cache_endpoint_window_fraction))))
+    window = min(window, max_start + 1)
+    u = rng.random(flat_count)
+    starts = rng.integers(0, max_start + 1, size=flat_count, dtype=np.int64)
+    data_mask = u < data_prob
+    terminal_mask = (u >= data_prob) & (u < data_prob + terminal_prob)
+    if data_mask.any():
+        starts[data_mask] = rng.integers(0, window, size=int(data_mask.sum()), dtype=np.int64)
+    if terminal_mask.any():
+        lo = max(0, max_start - window + 1)
+        starts[terminal_mask] = rng.integers(lo, max_start + 1, size=int(terminal_mask.sum()), dtype=np.int64)
+    return starts.reshape(shape)
+
+
+def _project_d0_edge_field(field: Tensor, dynamics_config: DirectFluxMNISTConfig, d0_config: Experiment12D0Config) -> Tensor:
+    space = str(d0_config.d0_target_space).strip().lower().replace("_", "-")
+    if space in {"projected", "projected-edge", "edge-projected"}:
+        return project_edge_flux_torch(field, grid_size=int(dynamics_config.grid_size))
+    return field
+
+
+def _d0_masked_edge_mse(
+    pred: Tensor,
+    target: Tensor,
+    mask_f: Tensor,
+    dynamics_config: DirectFluxMNISTConfig,
+    d0_config: Experiment12D0Config,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Return main loss, zero loss, residual RMS, pred RMS, target RMS."""
+
+    space = str(d0_config.d0_target_space).strip().lower().replace("_", "-")
+    if space in {"raw", "edge"}:
+        pred_loss = pred
+        target_loss = target
+        denom = mask_f.sum(dim=(1, 2, 3)).clamp_min(1.0)
+        per_slice = ((pred_loss - target_loss).square() * mask_f).sum(dim=(1, 2, 3)) / denom
+        zero = (target_loss.square() * mask_f).sum(dim=(1, 2, 3)) / denom
+        pred_rms = torch.sqrt((pred_loss.square() * mask_f).sum() / mask_f.sum().clamp_min(1.0))
+        target_rms = torch.sqrt((target_loss.square() * mask_f).sum() / mask_f.sum().clamp_min(1.0))
+        residual_rms = torch.sqrt(((pred_loss - target_loss).square() * mask_f).sum() / mask_f.sum().clamp_min(1.0))
+        return per_slice.mean(), zero.mean(), residual_rms, pred_rms, target_rms
+    if space in {"projected", "projected-edge", "edge-projected"}:
+        pred_loss = project_edge_flux_torch(pred, grid_size=int(dynamics_config.grid_size))
+        target_loss = project_edge_flux_torch(target, grid_size=int(dynamics_config.grid_size))
+        denom = mask_f.sum(dim=(1, 2, 3)).clamp_min(1.0)
+        per_slice = ((pred_loss - target_loss).square() * mask_f).sum(dim=(1, 2, 3)) / denom
+        zero = (target_loss.square() * mask_f).sum(dim=(1, 2, 3)) / denom
+        pred_rms = torch.sqrt((pred_loss.square() * mask_f).sum() / mask_f.sum().clamp_min(1.0))
+        target_rms = torch.sqrt((target_loss.square() * mask_f).sum() / mask_f.sum().clamp_min(1.0))
+        residual_rms = torch.sqrt(((pred_loss - target_loss).square() * mask_f).sum() / mask_f.sum().clamp_min(1.0))
+        return per_slice.mean(), zero.mean(), residual_rms, pred_rms, target_rms
+    if space in {"divergence", "node", "node-divergence"}:
+        pred_node = flux_divergence_torch(pred).reshape(pred.shape[0], -1)
+        target_node = flux_divergence_torch(target).reshape(target.shape[0], -1)
+        per_slice = (pred_node - target_node).square().mean(dim=1)
+        zero = target_node.square().mean(dim=1)
+        pred_rms = torch.sqrt(pred_node.square().mean())
+        target_rms = torch.sqrt(target_node.square().mean())
+        residual_rms = torch.sqrt((pred_node - target_node).square().mean())
+        return per_slice.mean(), zero.mean(), residual_rms, pred_rms, target_rms
+    raise ValueError("d0_target_space must be raw, projected-edge, or divergence")
+
+
+def _sample_start_reference_stats(samples: np.ndarray, reference: np.ndarray | None) -> dict[str, float]:
+    if reference is None:
+        return {"sample_start_corr_mean": float("nan"), "sample_start_corr_max": float("nan"), "sample_start_l1_mean": float("nan")}
+    s = np.asarray(samples, dtype=np.float64).reshape(samples.shape[0], -1)
+    r = np.asarray(reference, dtype=np.float64).reshape(1, -1)
+    s0 = s - s.mean(axis=1, keepdims=True)
+    r0 = r - r.mean(axis=1, keepdims=True)
+    corr = (s0 * r0).sum(axis=1) / np.maximum(np.sqrt((s0 * s0).sum(axis=1) * float((r0 * r0).sum())), 1e-30)
+    l1 = np.abs(s - r).sum(axis=1)
+    return {
+        "sample_start_corr_mean": float(np.mean(corr)),
+        "sample_start_corr_max": float(np.max(corr)),
+        "sample_start_l1_mean": float(np.mean(l1)),
+    }
+
+
+def _validate_prior_bank_compatibility(
+    bank: dict[str, np.ndarray | float | int | str],
+    *,
+    d0_config: Experiment12D0Config,
+    dynamics_config: DirectFluxMNISTConfig,
+    prior_bank_path: str | Path,
+) -> None:
+    """Reject prior banks whose forward noising law differs from training.
+
+    The overfit failure mode that motivated D0.1 was sampling from a generic
+    Phase-0 bank with a different substep grid.  This guard keeps the reverse
+    sampler from silently mixing time grids, lambda conventions, or schedules.
+    """
+
+    if bool(d0_config.allow_prior_bank_mismatch):
+        return
+    mismatches: list[str] = []
+    expected_steps = int(d0_config.sample_steps)
+    expected_substeps = int(d0_config.reference_substeps)
+    expected_horizon = float(natural_horizon(dynamics_config))
+    expected_stride = int(_actual_cache_stride_substeps(d0_config))
+    expected_rate = _expected_rate_schedule(dynamics_config, d0_config)
+
+    sample_steps = int(bank.get("sample_steps", expected_steps))
+    substeps = int(bank.get("substeps", expected_substeps))
+    horizon = float(bank.get("horizon", expected_horizon))
+    if sample_steps != expected_steps:
+        mismatches.append(f"sample_steps bank={sample_steps} expected={expected_steps}")
+    if substeps != expected_substeps:
+        mismatches.append(f"substeps bank={substeps} expected={expected_substeps}")
+    if not math.isclose(horizon, expected_horizon, rel_tol=1e-6, abs_tol=1e-12):
+        mismatches.append(f"horizon bank={horizon:.12g} expected={expected_horizon:.12g}")
+    if "lambda_mix" in bank:
+        bank_lambda = float(bank["lambda_mix"])
+        if not math.isclose(bank_lambda, float(d0_config.lambda_mix), rel_tol=1e-6, abs_tol=1e-12):
+            mismatches.append(f"lambda_mix bank={bank_lambda:.12g} expected={float(d0_config.lambda_mix):.12g}")
+    if "stride_substeps" in bank:
+        bank_stride = int(bank["stride_substeps"])
+        if bank_stride != expected_stride:
+            mismatches.append(f"stride_substeps bank={bank_stride} expected_actual_cache_stride={expected_stride}")
+    if "edge_alpha_mode" in bank:
+        mode = str(bank["edge_alpha_mode"])
+        if mode != str(dynamics_config.edge_alpha_mode):
+            mismatches.append(f"edge_alpha_mode bank={mode} expected={dynamics_config.edge_alpha_mode}")
+    if "alpha_eff" in bank:
+        bank_alpha_eff = float(bank["alpha_eff"])
+        if not math.isclose(bank_alpha_eff, float(dynamics_config.alpha_eff), rel_tol=1e-6, abs_tol=1e-12):
+            mismatches.append(f"alpha_eff bank={bank_alpha_eff:.12g} expected={float(dynamics_config.alpha_eff):.12g}")
+    rate = np.asarray(bank.get("rate_schedule", expected_rate), dtype=np.float64).reshape(-1)
+    if rate.shape != expected_rate.shape:
+        mismatches.append(f"rate_schedule length bank={rate.shape[0]} expected={expected_rate.shape[0]}")
+    elif not np.allclose(rate, expected_rate, rtol=1e-5, atol=1e-12):
+        max_abs = float(np.max(np.abs(rate - expected_rate)))
+        mismatches.append(f"rate_schedule differs; max_abs_diff={max_abs:.4g}")
+    if mismatches:
+        joined = "; ".join(mismatches)
+        raise ValueError(
+            "Incompatible D0 prior bank for this trained sampler: "
+            f"{prior_bank_path}. Mismatches: {joined}. "
+            "For a one-image overfit run, omit --prior-bank-path to use the current run's "
+            "experiment12_d0_training_terminal_bank.npz. To bypass only for debugging, pass "
+            "--allow-prior-bank-mismatch."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +670,7 @@ def _build_d0_training_cache_substep_exact(
     all_starts: list[Tensor] = []
     all_path_indices: list[Tensor] = []
     all_start_images: list[Tensor] = []
+    all_earlier_states: list[Tensor] = []
     terminal_states: list[np.ndarray] = []
     source_indices_chunks: list[np.ndarray] = []
     requested_label_chunks: list[np.ndarray] = []
@@ -477,17 +705,26 @@ def _build_d0_training_cache_substep_exact(
         )
         states = torch.as_tensor(initial_np, dtype=torch.float32, device=device)
         labels_t = torch.as_tensor(labels_np, dtype=torch.long)
-        starts_np = rng.integers(0, total_substeps - stride + 1, size=(bsz, slices_per_path), dtype=np.int64)
+        starts_np = _sample_cache_start_substeps(
+            rng,
+            shape=(bsz, slices_per_path),
+            total_substeps=total_substeps,
+            stride=stride,
+            d0_config=d0_config,
+        )
         starts_t = torch.as_tensor(starts_np, dtype=torch.long, device=device)
         ends_t = starts_t + int(stride) - 1
         accum = torch.zeros((bsz, slices_per_path, 2, n, n), dtype=torch.float32, device=device)
         masks = torch.ones((bsz, slices_per_path, 2, n, n), dtype=torch.bool, device=device)
         later_states = torch.empty((bsz, slices_per_path, n * n), dtype=torch.float32, device=device)
+        earlier_states = torch.empty((bsz, slices_per_path, n * n), dtype=torch.float32, device=device)
         later_tau = torch.empty((bsz, slices_per_path), dtype=torch.float32, device=device)
         filled = torch.zeros((bsz, slices_per_path), dtype=torch.bool, device=device)
+        start_filled = torch.zeros((bsz, slices_per_path), dtype=torch.bool, device=device)
 
         for outer_k in range(sample_steps):
             rate = float(rate_schedule[outer_k])
+            states_before_outer = states
             result = masked_reference_free_step_torch(
                 states,
                 dt_outer,
@@ -507,6 +744,12 @@ def _build_d0_training_cache_substep_exact(
             sub_states = result.substep_states
             for q in range(reference_substeps):
                 g = outer_k * reference_substeps + q
+                starting = starts_t == g
+                if bool(starting.any()):
+                    rows, cols = torch.nonzero(starting, as_tuple=True)
+                    before_q = states_before_outer if q == 0 else sub_states[q - 1]
+                    earlier_states[rows, cols] = before_q.index_select(0, rows)
+                    start_filled[rows, cols] = True
                 active = (starts_t <= g) & (g < starts_t + int(stride))
                 if bool(active.any()):
                     rows, cols = torch.nonzero(active, as_tuple=True)
@@ -527,8 +770,8 @@ def _build_d0_training_cache_substep_exact(
             total_limited_noise_energy += float(result.limited_noise_energy_sum)
             total_floor_correction_l1 += float(result.floor_correction_l1)
             total_renorm_correction_l1 += float(result.renorm_correction_l1)
-        if not bool(filled.all()):
-            raise RuntimeError("internal D0 cache bug: some later-state slices were not filled")
+        if not bool(filled.all() and start_filled.all()):
+            raise RuntimeError("internal D0 cache bug: some start/later-state slices were not filled")
         accum = accum / math.sqrt(float(stride))
         flat_later = later_states.reshape(bsz * slices_per_path, n * n)
         mobility_valid = harmonic_mobility_channels(flat_later, dynamics_config) > float(d0_config.theta_mask_min)
@@ -544,6 +787,7 @@ def _build_d0_training_cache_substep_exact(
         all_path_indices.append(local_paths)
         start_images_t = torch.as_tensor(initial_np, dtype=torch.float32).repeat_interleave(slices_per_path, dim=0)
         all_start_images.append(start_images_t)
+        all_earlier_states.append(earlier_states.reshape(bsz * slices_per_path, n * n).detach().cpu())
         terminal_states.append(states.detach().cpu().numpy().reshape(bsz, n, n))
         source_indices_chunks.append(source_idx_np)
         requested_label_chunks.append(labels_np)
@@ -569,6 +813,7 @@ def _build_d0_training_cache_substep_exact(
         starts=torch.cat(all_starts, dim=0).long(),
         path_indices=torch.cat(all_path_indices, dim=0).long(),
         start_images=torch.cat(all_start_images, dim=0).float(),
+        earlier_states=torch.cat(all_earlier_states, dim=0).float(),
         terminal_states=np.concatenate(terminal_states, axis=0).astype(np.float32),
         source_indices=np.concatenate(source_indices_chunks, axis=0).astype(np.int64),
         requested_labels=np.concatenate(requested_label_chunks, axis=0).astype(np.int64),
@@ -588,6 +833,7 @@ def _build_d0_training_cache_substep_exact(
         floor_correction_l1=float(total_floor_correction_l1),
         renorm_correction_l1=float(total_renorm_correction_l1),
         cache_build_mode="substep",
+        requested_stride_substeps=int(stride),
     )
 
 
@@ -624,6 +870,13 @@ def _build_d0_training_cache_outer_fast(
     if outer_stride > sample_steps:
         raise ValueError("teacher_stride_substeps is longer than the full forward noising run")
     block_substeps = int(outer_stride * reference_substeps)
+    if bool(d0_config.single_image_overfit) and requested_stride != block_substeps and not bool(d0_config.allow_stride_rounding):
+        raise ValueError(
+            "cache_build_mode='outer' rounded teacher_stride_substeps "
+            f"from {requested_stride} to {block_substeps}. For an overfit correctness run, "
+            "use --cache-build-mode substep, set --teacher-stride-substeps to the rounded value, "
+            "or pass --allow-stride-rounding only for speed/debugging."
+        )
     horizon = natural_horizon(dynamics_config)
     dt_outer = horizon / float(sample_steps)
     dt_sub = horizon / float(sample_steps * reference_substeps)
@@ -649,6 +902,7 @@ def _build_d0_training_cache_outer_fast(
     all_starts: list[Tensor] = []
     all_path_indices: list[Tensor] = []
     all_start_images: list[Tensor] = []
+    all_earlier_states: list[Tensor] = []
     terminal_states: list[np.ndarray] = []
     source_indices_chunks: list[np.ndarray] = []
     requested_label_chunks: list[np.ndarray] = []
@@ -681,18 +935,32 @@ def _build_d0_training_cache_outer_fast(
         )
         states = torch.as_tensor(initial_np, dtype=torch.float32, device=device)
         labels_t = torch.as_tensor(labels_np, dtype=torch.long)
-        outer_starts_np = rng.integers(0, sample_steps - outer_stride + 1, size=(bsz, slices_per_path), dtype=np.int64)
+        outer_starts_np = _sample_cache_start_substeps(
+            rng,
+            shape=(bsz, slices_per_path),
+            total_substeps=sample_steps,
+            stride=outer_stride,
+            d0_config=d0_config,
+        )
         outer_starts = torch.as_tensor(outer_starts_np, dtype=torch.long, device=device)
         outer_ends = outer_starts + int(outer_stride) - 1
         starts_t = outer_starts * int(reference_substeps)
         accum = torch.zeros((bsz, slices_per_path, 2, n, n), dtype=torch.float32, device=device)
         masks = torch.ones((bsz, slices_per_path, 2, n, n), dtype=torch.bool, device=device)
         later_states = torch.empty((bsz, slices_per_path, n * n), dtype=torch.float32, device=device)
+        earlier_states = torch.empty((bsz, slices_per_path, n * n), dtype=torch.float32, device=device)
         later_tau = torch.empty((bsz, slices_per_path), dtype=torch.float32, device=device)
         filled = torch.zeros((bsz, slices_per_path), dtype=torch.bool, device=device)
+        start_filled = torch.zeros((bsz, slices_per_path), dtype=torch.bool, device=device)
 
         for outer_k in range(sample_steps):
             rate = float(rate_schedule[outer_k])
+            states_before_outer = states
+            starting = outer_starts == outer_k
+            if bool(starting.any()):
+                rows, cols = torch.nonzero(starting, as_tuple=True)
+                earlier_states[rows, cols] = states_before_outer.index_select(0, rows)
+                start_filled[rows, cols] = True
             result = masked_reference_free_step_torch(
                 states,
                 dt_outer,
@@ -725,8 +993,8 @@ def _build_d0_training_cache_outer_fast(
             total_proposed_edges += int(result.proposed_edges)
             total_floor_correction_l1 += float(result.floor_correction_l1)
             total_renorm_correction_l1 += float(result.renorm_correction_l1)
-        if not bool(filled.all()):
-            raise RuntimeError("internal D0 cache bug: some later-state slices were not filled")
+        if not bool(filled.all() and start_filled.all()):
+            raise RuntimeError("internal D0 cache bug: some start/later-state slices were not filled")
         accum = accum / math.sqrt(float(block_substeps))
         flat_later = later_states.reshape(bsz * slices_per_path, n * n)
         mobility_valid = harmonic_mobility_channels(flat_later, dynamics_config) > float(d0_config.theta_mask_min)
@@ -745,6 +1013,7 @@ def _build_d0_training_cache_outer_fast(
         all_path_indices.append(local_paths)
         start_images_t = torch.as_tensor(initial_np, dtype=torch.float32).repeat_interleave(slices_per_path, dim=0)
         all_start_images.append(start_images_t)
+        all_earlier_states.append(earlier_states.reshape(bsz * slices_per_path, n * n).detach().cpu())
         terminal_states.append(states.detach().cpu().numpy().reshape(bsz, n, n))
         source_indices_chunks.append(source_idx_np)
         requested_label_chunks.append(labels_np)
@@ -772,6 +1041,7 @@ def _build_d0_training_cache_outer_fast(
         starts=torch.cat(all_starts, dim=0).long(),
         path_indices=torch.cat(all_path_indices, dim=0).long(),
         start_images=torch.cat(all_start_images, dim=0).float(),
+        earlier_states=torch.cat(all_earlier_states, dim=0).float(),
         terminal_states=np.concatenate(terminal_states, axis=0).astype(np.float32),
         source_indices=np.concatenate(source_indices_chunks, axis=0).astype(np.int64),
         requested_labels=np.concatenate(requested_label_chunks, axis=0).astype(np.int64),
@@ -791,6 +1061,7 @@ def _build_d0_training_cache_outer_fast(
         floor_correction_l1=float(total_floor_correction_l1),
         renorm_correction_l1=float(total_renorm_correction_l1),
         cache_build_mode="outer",
+        requested_stride_substeps=int(requested_stride),
     )
 
 
@@ -846,25 +1117,51 @@ def d0_unweighted_innovation_loss(
     dynamics_config: DirectFluxMNISTConfig,
     d0_config: Experiment12D0Config,
 ) -> tuple[Tensor, dict[str, float]]:
-    """Unweighted masked D0 MSE for ``E[Xi | later state, label]``."""
+    """Unweighted masked D0 MSE for ``E[Xi | later state, label]``.
 
-    pred = model(batch["tau"], batch["states"], batch["labels"], None)
+    D0.2 makes the default state-relevant target the minimum-energy projected
+    edge field with the same divergence.  This removes the unidentifiable curl
+    component of raw edge noise from the primary loss while preserving raw-edge
+    diagnostics and optional regularizers.
+    """
+
+    pred_raw = model(batch["tau"], batch["states"], batch["labels"], None)
     if float(d0_config.control_output_clip) > 0.0:
-        pred = pred.clamp(-float(d0_config.control_output_clip), float(d0_config.control_output_clip))
-    target = batch["innovations"]
+        pred_raw = pred_raw.clamp(-float(d0_config.control_output_clip), float(d0_config.control_output_clip))
+    target_raw = batch["innovations"]
     mask = batch["masks"] & (harmonic_mobility_channels(batch["states"], dynamics_config) > float(d0_config.theta_mask_min))
-    mask_f = mask.to(dtype=pred.dtype)
-    denom = mask_f.sum(dim=(1, 2, 3)).clamp_min(1.0)
-    per_slice = ((pred - target).square() * mask_f).sum(dim=(1, 2, 3)) / denom
-    loss_main = per_slice.mean()
-    zero = (target.square() * mask_f).sum(dim=(1, 2, 3)) / denom
-    zero_loss = zero.mean()
-    pred_l2 = (pred.square() * mask_f).sum() / mask_f.sum().clamp_min(1.0)
-    loss = loss_main + float(d0_config.eta_l2_weight) * pred_l2
-    target_rms = torch.sqrt((target.square() * mask_f).sum() / mask_f.sum().clamp_min(1.0))
-    residual_rms = torch.sqrt(((pred - target).square() * mask_f).sum() / mask_f.sum().clamp_min(1.0))
-    pred_rms = torch.sqrt((pred.square() * mask_f).sum() / mask_f.sum().clamp_min(1.0))
+    mask_f = mask.to(dtype=pred_raw.dtype)
+
+    loss_main, zero_loss, residual_rms, pred_rms, target_rms = _d0_masked_edge_mse(
+        pred_raw,
+        target_raw,
+        mask_f,
+        dynamics_config,
+        d0_config,
+    )
+    pred_l2 = (pred_raw.square() * mask_f).sum() / mask_f.sum().clamp_min(1.0)
+    invalid_mask_f = (~mask).to(dtype=pred_raw.dtype)
+    invalid_l2 = (pred_raw.square() * invalid_mask_f).sum() / invalid_mask_f.sum().clamp_min(1.0)
+    curl_loss = flux_curl_torch(pred_raw).square().mean()
+    edge_lap_loss = edge_laplacian_energy_torch(pred_raw)
+    loss = (
+        loss_main
+        + float(d0_config.eta_l2_weight) * pred_l2
+        + float(d0_config.invalid_output_l2_weight) * invalid_l2
+        + float(d0_config.curl_loss_weight) * curl_loss
+        + float(d0_config.edge_laplacian_loss_weight) * edge_lap_loss
+    )
     gain = 1.0 - float(loss_main.detach().cpu()) / max(float(zero_loss.detach().cpu()), 1e-12)
+
+    with torch.no_grad():
+        pred_projected = project_edge_flux_torch(pred_raw, grid_size=int(dynamics_config.grid_size))
+        target_projected = project_edge_flux_torch(target_raw, grid_size=int(dynamics_config.grid_size))
+        projected_residual_rms = torch.sqrt(((pred_projected - target_projected).square() * mask_f).sum() / mask_f.sum().clamp_min(1.0))
+        raw_residual_rms = torch.sqrt(((pred_raw - target_raw).square() * mask_f).sum() / mask_f.sum().clamp_min(1.0))
+        removed_curl_rms = torch.sqrt((pred_raw - pred_projected).square().mean())
+        pred_projected_rms = torch.sqrt((pred_projected.square() * mask_f).sum() / mask_f.sum().clamp_min(1.0))
+        target_projected_rms = torch.sqrt((target_projected.square() * mask_f).sum() / mask_f.sum().clamp_min(1.0))
+
     diag = {
         "loss": float(loss.detach().cpu()),
         "loss_main": float(loss_main.detach().cpu()),
@@ -873,9 +1170,18 @@ def d0_unweighted_innovation_loss(
         "prediction_rms": float(pred_rms.detach().cpu()),
         "target_rms": float(target_rms.detach().cpu()),
         "residual_rms": float(residual_rms.detach().cpu()),
+        "raw_residual_rms": float(raw_residual_rms.detach().cpu()),
+        "projected_residual_rms": float(projected_residual_rms.detach().cpu()),
+        "prediction_projected_rms": float(pred_projected_rms.detach().cpu()),
+        "target_projected_rms": float(target_projected_rms.detach().cpu()),
+        "prediction_removed_curl_rms": float(removed_curl_rms.detach().cpu()),
         "mask_fraction": float(mask_f.mean().detach().cpu()),
         "eta_l2": float(pred_l2.detach().cpu()),
+        "invalid_output_l2": float(invalid_l2.detach().cpu()),
+        "curl_loss": float(curl_loss.detach().cpu()),
+        "edge_laplacian_loss": float(edge_lap_loss.detach().cpu()),
         "batch_ess_fraction": 1.0,
+        "d0_target_space": str(d0_config.d0_target_space),
     }
     return loss, diag
 
@@ -950,12 +1256,24 @@ def _apply_oriented_edge_transfer(
     }
 
 
+def _maybe_np_scalar(bank: np.lib.npyio.NpzFile, key: str) -> float | int | str | None:
+    if key not in bank:
+        return None
+    arr = np.asarray(bank[key]).reshape(-1)
+    if arr.size == 0:
+        return None
+    value = arr[0]
+    if isinstance(value, np.generic):
+        return value.item()
+    return str(value)
+
+
 def _load_prior_bank(
     path: str | Path,
     *,
     fallback_rate_schedule: np.ndarray | None = None,
     fallback_horizon: float | None = None,
-) -> dict[str, np.ndarray | float | int]:
+) -> dict[str, np.ndarray | float | int | str]:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"Phase-0 prior bank not found: {p}")
@@ -970,7 +1288,7 @@ def _load_prior_bank(
     horizon = float(np.asarray(bank["horizon"]).reshape(-1)[0]) if "horizon" in bank else float(fallback_horizon)
     sample_steps = int(np.asarray(bank["sample_steps"]).reshape(-1)[0]) if "sample_steps" in bank else int(len(rate_schedule))
     substeps = int(np.asarray(bank["substeps"]).reshape(-1)[0]) if "substeps" in bank else 1
-    return {
+    out: dict[str, np.ndarray | float | int | str] = {
         "terminal_states": states,
         "labels": labels,
         "rate_schedule": np.asarray(rate_schedule, dtype=np.float64),
@@ -978,6 +1296,15 @@ def _load_prior_bank(
         "sample_steps": int(sample_steps),
         "substeps": int(substeps),
     }
+    for key in ("lambda_mix", "stride_substeps", "requested_stride_substeps", "cache_build_mode", "edge_alpha_mode", "alpha_eff"):
+        value = _maybe_np_scalar(bank, key)
+        if value is not None:
+            out[key] = value
+    for key in ("start_image", "overfit_start_image"):
+        if key in bank:
+            out[key] = np.asarray(bank[key], dtype=np.float32).reshape(-1)
+            break
+    return out
 
 
 @torch.no_grad()
@@ -1012,6 +1339,12 @@ def simulate_d0_reverse_generation(
         rate_max=d0_config.reference_rate_max,
     )
     bank = _load_prior_bank(prior_bank_path, fallback_rate_schedule=fallback_rate, fallback_horizon=fallback_horizon)
+    _validate_prior_bank_compatibility(
+        bank,
+        d0_config=d0_config,
+        dynamics_config=dynamics_config,
+        prior_bank_path=prior_bank_path,
+    )
     bank_states = np.asarray(bank["terminal_states"], dtype=np.float32)
     bank_labels = np.asarray(bank["labels"], dtype=np.int64)
     chosen: list[int] = []
@@ -1030,7 +1363,7 @@ def simulate_d0_reverse_generation(
     total_substeps = sample_steps * reference_substeps
     horizon = float(bank["horizon"])
     dt_sub = horizon / float(total_substeps)
-    stride = max(1, int(d0_config.teacher_stride_substeps))
+    stride = max(1, int(bank.get("stride_substeps", _actual_cache_stride_substeps(d0_config))))
     strength = float(d0_config.control_strength if control_strength is None else control_strength)
 
     total_limited = 0.0
@@ -1038,6 +1371,9 @@ def simulate_d0_reverse_generation(
     total_mobility = 0.0
     total_limited_mobility = 0.0
     learned_sq = 0.0
+    learned_raw_sq = 0.0
+    learned_projected_sq = 0.0
+    learned_removed_curl_sq = 0.0
     free_sq = 0.0
     noise_sq = 0.0
     step_count = 0
@@ -1050,10 +1386,15 @@ def simulate_d0_reverse_generation(
     for q_start in bar:
         block_len = min(stride, int(q_start) + 1)
         tau = torch.full((states.shape[0],), max(horizon - float(q_start + 1) * dt_sub, 0.0), dtype=states.dtype, device=device)
-        m_block = model(tau, states, labels_t, None)
+        m_block_raw = model(tau, states, labels_t, None)
         if float(d0_config.control_output_clip) > 0.0:
-            m_block = m_block.clamp(-float(d0_config.control_output_clip), float(d0_config.control_output_clip))
+            m_block_raw = m_block_raw.clamp(-float(d0_config.control_output_clip), float(d0_config.control_output_clip))
+        m_block_projected = project_edge_flux_torch(m_block_raw, grid_size=int(dynamics_config.grid_size))
+        m_block = m_block_projected if bool(d0_config.sample_project_learned_mean) else m_block_raw
         m_step = strength * m_block / math.sqrt(float(block_len))
+        learned_raw_sq += float((m_block_raw.detach().square().mean()).cpu())
+        learned_projected_sq += float((m_block_projected.detach().square().mean()).cpu())
+        learned_removed_curl_sq += float(((m_block_raw - m_block_projected).detach().square().mean()).cpu())
         for local in range(block_len):
             q = int(q_start) - local
             outer_k = min(max(q // reference_substeps, 0), rate_schedule.size - 1)
@@ -1080,8 +1421,13 @@ def simulate_d0_reverse_generation(
     samples = states.detach().cpu().numpy().astype(np.float32)
     shape = compute_shape_statistics_np(samples, grid_size=int(dynamics_config.grid_size))
     learned_rms = math.sqrt(learned_sq / max(step_count, 1))
+    learned_raw_rms = math.sqrt(learned_raw_sq / max(len(q_values), 1))
+    learned_projected_rms = math.sqrt(learned_projected_sq / max(len(q_values), 1))
+    learned_removed_curl_rms = math.sqrt(learned_removed_curl_sq / max(len(q_values), 1))
     noise_rms = math.sqrt(noise_sq / max(step_count, 1))
     free_rms = math.sqrt(free_sq / max(step_count, 1))
+    start_reference = np.asarray(bank.get("start_image"), dtype=np.float32) if "start_image" in bank else None
+    start_stats = _sample_start_reference_stats(samples, start_reference)
     return D0GenerationResult(
         samples=samples,
         labels=labels_np.astype(np.int64),
@@ -1096,6 +1442,16 @@ def simulate_d0_reverse_generation(
         entropy=float(np.mean(shape["entropy"])),
         total_variation=float(np.mean(shape["tv"])),
         checkerboard_energy=float(np.mean(shape["checkerboard"] ** 2)),
+        learned_raw_rms=float(learned_raw_rms),
+        learned_projected_rms=float(learned_projected_rms),
+        learned_removed_curl_rms=float(learned_removed_curl_rms),
+        sample_start_corr_mean=float(start_stats["sample_start_corr_mean"]),
+        sample_start_corr_max=float(start_stats["sample_start_corr_max"]),
+        sample_start_l1_mean=float(start_stats["sample_start_l1_mean"]),
+        stride_substeps=int(stride),
+        sample_steps=int(sample_steps),
+        reference_substeps=int(reference_substeps),
+        prior_bank_path=str(prior_bank_path),
     )
 
 
@@ -1104,13 +1460,16 @@ def simulate_d0_reverse_generation(
 # ---------------------------------------------------------------------------
 
 
-def cache_summary(cache: D0TrainingCache) -> dict[str, float | int]:
-    return {
+def cache_summary(cache: D0TrainingCache) -> dict[str, float | int | str]:
+    valid_mask_fraction = float(cache.masks.float().mean().item()) if cache.size else 0.0
+    summary: dict[str, float | int | str] = {
         "cache_size": int(cache.size),
         "cache_paths": int(cache.terminal_states.shape[0]),
         "cache_sample_steps": int(cache.sample_steps),
         "cache_reference_substeps": int(cache.reference_substeps),
+        "cache_requested_stride_substeps": int(cache.requested_stride_substeps or cache.stride_substeps),
         "cache_stride_substeps": int(cache.stride_substeps),
+        "cache_actual_stride_substeps": int(cache.stride_substeps),
         "cache_build_mode": str(cache.cache_build_mode),
         "cache_horizon": float(cache.horizon),
         "cache_dt_sub": float(cache.dt_sub),
@@ -1118,7 +1477,10 @@ def cache_summary(cache: D0TrainingCache) -> dict[str, float | int]:
         "cache_tau_mean": float(cache.tau.mean().item()) if cache.size else float("nan"),
         "cache_tau_max": float(cache.tau.max().item()) if cache.size else float("nan"),
         "cache_target_rms": float(torch.sqrt(cache.innovations.square().mean()).item()) if cache.size else 0.0,
-        "cache_mask_fraction": float(cache.masks.float().mean().item()) if cache.size else 0.0,
+        "cache_valid_mask_fraction": valid_mask_fraction,
+        "cache_invalid_mask_fraction": float(1.0 - valid_mask_fraction),
+        # Historical alias; this is the valid mask fraction, not the invalid fraction.
+        "cache_mask_fraction": valid_mask_fraction,
         "cache_raw_limited_fraction": float(cache.raw_limited_fraction),
         "cache_mobility_weighted_limited_fraction": float(cache.mobility_weighted_limited_fraction),
         "cache_noise_energy_weighted_limited_fraction": float(cache.noise_energy_weighted_limited_fraction),
@@ -1129,6 +1491,30 @@ def cache_summary(cache: D0TrainingCache) -> dict[str, float | int]:
         "cache_renorm_correction_l1": float(cache.renorm_correction_l1),
         "cache_effective_time_integral": float(effective_time_integral(cache.rate_schedule, horizon=cache.horizon)),
     }
+    if cache.size:
+        tau = cache.tau.detach().cpu()
+        innov = cache.innovations.detach().cpu().reshape(cache.size, -1)
+        mask = cache.masks.detach().cpu().reshape(cache.size, -1)
+        # Five fixed bins from terminal-prior end (tau=0) to data end (tau=T).
+        h = max(float(cache.horizon), 1e-30)
+        tau_frac = (tau / h).clamp(0.0, 1.0)
+        for idx in range(5):
+            lo = float(idx) / 5.0
+            hi = float(idx + 1) / 5.0
+            sel = (tau_frac >= lo) & (tau_frac <= hi if idx == 4 else tau_frac < hi)
+            key = f"cache_tau_bin{idx}"
+            summary[f"{key}_lo"] = lo
+            summary[f"{key}_hi"] = hi
+            summary[f"{key}_count"] = int(sel.count_nonzero().item())
+            if bool(sel.any()):
+                vals = innov[sel]
+                m = mask[sel]
+                summary[f"{key}_valid_mask_fraction"] = float(m.float().mean().item())
+                summary[f"{key}_target_rms"] = float(torch.sqrt((vals[m].float().square().mean()).clamp_min(0.0)).item()) if bool(m.any()) else float("nan")
+            else:
+                summary[f"{key}_valid_mask_fraction"] = float("nan")
+                summary[f"{key}_target_rms"] = float("nan")
+    return summary
 
 
 def save_d0_cache_npz(cache: D0TrainingCache, path: Path) -> None:
@@ -1143,6 +1529,7 @@ def save_d0_cache_npz(cache: D0TrainingCache, path: Path) -> None:
         starts=cache.starts.numpy().astype(np.int64),
         path_indices=cache.path_indices.numpy().astype(np.int64),
         start_images=cache.start_images.numpy().astype(np.float32),
+        earlier_states=cache.earlier_states.numpy().astype(np.float32),
         terminal_states=cache.terminal_states.astype(np.float32),
         source_indices=cache.source_indices.astype(np.int64),
         requested_labels=cache.requested_labels.astype(np.int64),
@@ -1150,12 +1537,192 @@ def save_d0_cache_npz(cache: D0TrainingCache, path: Path) -> None:
         horizon=np.asarray([cache.horizon], dtype=np.float64),
         dt_sub=np.asarray([cache.dt_sub], dtype=np.float64),
         stride_substeps=np.asarray([cache.stride_substeps], dtype=np.int64),
+        requested_stride_substeps=np.asarray([cache.requested_stride_substeps or cache.stride_substeps], dtype=np.int64),
         sample_steps=np.asarray([cache.sample_steps], dtype=np.int64),
         reference_substeps=np.asarray([cache.reference_substeps], dtype=np.int64),
         lambda_mix=np.asarray([cache.lambda_mix], dtype=np.float64),
         cache_build_mode=np.asarray([cache.cache_build_mode]),
     )
 
+
+@torch.no_grad()
+def d0_oracle_reverse_diagnostic(
+    cache: D0TrainingCache,
+    dynamics_config: DirectFluxMNISTConfig,
+    *,
+    max_slices: int = 16,
+    device: torch.device | None = None,
+) -> dict[str, float | int | str]:
+    """Reverse cached slices with their stored target to catch sign/stride bugs.
+
+    For stride 1 this is a direct one-step oracle.  For larger block strides the
+    stored block innovation is distributed uniformly over the block, so the
+    diagnostic is approximate; its main purpose is comparing the two possible
+    innovation signs and checking that stride bookkeeping is self-consistent.
+    """
+
+    if cache.size == 0:
+        return {"oracle_slices": 0, "oracle_status": "empty_cache"}
+    dev = device if device is not None else torch.device("cpu")
+    count = min(int(max_slices), int(cache.size))
+    idx = torch.arange(count, dtype=torch.long)
+    later = cache.states.index_select(0, idx).to(dev)
+    earlier = cache.earlier_states.index_select(0, idx).to(dev)
+    block_innov = cache.innovations.index_select(0, idx).to(dev)
+    starts = cache.starts.index_select(0, idx).to(dev)
+    stride = int(cache.stride_substeps)
+    rate_schedule = np.asarray(cache.rate_schedule, dtype=np.float64).reshape(-1)
+    dt_sub = float(cache.dt_sub)
+    reference_substeps = int(cache.reference_substeps)
+
+    def run(sign: float) -> tuple[Tensor, float, float]:
+        states = later.clone()
+        limited_total = 0.0
+        proposed_total = 0.0
+        xi_step = float(sign) * block_innov / math.sqrt(float(max(stride, 1)))
+        for offset in range(stride - 1, -1, -1):
+            q_global = starts + int(offset)
+            # The smoke/overfit diagnostic usually uses common starts; handle
+            # mixed starts by grouping the tiny diagnostic batch by outer step.
+            next_states = states
+            for outer_k in torch.unique(torch.div(q_global, reference_substeps, rounding_mode="floor")):
+                mask = torch.div(q_global, reference_substeps, rounding_mode="floor") == outer_k
+                rows = torch.nonzero(mask, as_tuple=True)[0]
+                k = int(outer_k.item())
+                rate = float(rate_schedule[min(max(k, 0), rate_schedule.size - 1)])
+                chunk = states.index_select(0, rows)
+                free_delta = rate * free_drift_flux_torch(chunk, dynamics_config) * dt_sub
+                noise_std = math.sqrt(max(rate, 0.0)) * edge_noise_std_channels(chunk, dt_sub, dynamics_config)
+                forward_delta = free_delta + noise_std * xi_step.index_select(0, rows)
+                updated, limited = _apply_oriented_edge_transfer(chunk, -forward_delta, dynamics_config)
+                next_states = next_states.clone()
+                next_states[rows] = updated
+                limited_total += float(limited["limited_edges"])
+                proposed_total += float(limited["proposed_edges"])
+            states = next_states
+        return states, limited_total, proposed_total
+
+    plus, plus_limited, plus_proposed = run(1.0)
+    minus, minus_limited, minus_proposed = run(-1.0)
+    plus_l1 = float((plus - earlier).abs().sum(dim=1).mean().cpu())
+    minus_l1 = float((minus - earlier).abs().sum(dim=1).mean().cpu())
+    plus_rms = float(torch.sqrt((plus - earlier).square().mean()).cpu())
+    minus_rms = float(torch.sqrt((minus - earlier).square().mean()).cpu())
+    return {
+        "oracle_slices": int(count),
+        "oracle_stride_substeps": int(stride),
+        "oracle_mode": "exact" if stride == 1 else "block_constant_approx",
+        "oracle_plus_l1": plus_l1,
+        "oracle_minus_l1": minus_l1,
+        "oracle_plus_rms": plus_rms,
+        "oracle_minus_rms": minus_rms,
+        "oracle_preferred_sign": "plus" if plus_l1 <= minus_l1 else "minus",
+        "oracle_plus_limiter_fraction": 0.0 if plus_proposed <= 0.0 else float(plus_limited / plus_proposed),
+        "oracle_minus_limiter_fraction": 0.0 if minus_proposed <= 0.0 else float(minus_limited / minus_proposed),
+    }
+
+
+
+@torch.no_grad()
+def d0_learned_block_reverse_diagnostic(
+    model: DirectFluxUNet,
+    cache: D0TrainingCache,
+    dynamics_config: DirectFluxMNISTConfig,
+    d0_config: Experiment12D0Config,
+    *,
+    max_slices: int = 32,
+    device: torch.device | None = None,
+) -> dict[str, float | int | str]:
+    """One-block learned reverse diagnostic against cached earlier states.
+
+    This tests whether the learned mean can improve a single cached block before
+    asking a full reverse trajectory to make a digit.
+    """
+
+    if cache.size == 0:
+        return {"learned_block_slices": 0, "learned_block_status": "empty_cache"}
+    dev = device if device is not None else torch.device("cpu")
+    model_was_training = model.training
+    model.eval()
+    count = min(int(max_slices), int(cache.size))
+    idx = torch.arange(count, dtype=torch.long)
+    later = cache.states.index_select(0, idx).to(dev)
+    earlier = cache.earlier_states.index_select(0, idx).to(dev)
+    tau = cache.tau.index_select(0, idx).to(dev)
+    labels = cache.labels.index_select(0, idx).to(dev)
+    starts = cache.starts.index_select(0, idx).to(dev)
+    stride = int(cache.stride_substeps)
+    reference_substeps = int(cache.reference_substeps)
+    rate_schedule = np.asarray(cache.rate_schedule, dtype=np.float64).reshape(-1)
+    dt_sub = float(cache.dt_sub)
+    pred_raw = model(tau, later, labels, None)
+    if float(d0_config.control_output_clip) > 0.0:
+        pred_raw = pred_raw.clamp(-float(d0_config.control_output_clip), float(d0_config.control_output_clip))
+    pred_projected = project_edge_flux_torch(pred_raw, grid_size=int(dynamics_config.grid_size))
+    pred = pred_projected if bool(d0_config.sample_project_learned_mean) else pred_raw
+
+    def run(mean_block: Tensor, sign: float) -> tuple[Tensor, float, float]:
+        states = later.clone()
+        limited_total = 0.0
+        proposed_total = 0.0
+        xi_step = float(sign) * mean_block / math.sqrt(float(max(stride, 1)))
+        for offset in range(stride - 1, -1, -1):
+            q_global = starts + int(offset)
+            next_states = states
+            outer_indices = torch.div(q_global, reference_substeps, rounding_mode="floor")
+            for outer_k in torch.unique(outer_indices):
+                mask = outer_indices == outer_k
+                rows = torch.nonzero(mask, as_tuple=True)[0]
+                k = int(outer_k.item())
+                rate = float(rate_schedule[min(max(k, 0), rate_schedule.size - 1)])
+                chunk = states.index_select(0, rows)
+                free_delta = rate * free_drift_flux_torch(chunk, dynamics_config) * dt_sub
+                noise_std = math.sqrt(max(rate, 0.0)) * edge_noise_std_channels(chunk, dt_sub, dynamics_config)
+                forward_delta = free_delta + noise_std * xi_step.index_select(0, rows)
+                updated, limited = _apply_oriented_edge_transfer(chunk, -forward_delta, dynamics_config)
+                next_states = next_states.clone()
+                next_states[rows] = updated
+                limited_total += float(limited["limited_edges"])
+                proposed_total += float(limited["proposed_edges"])
+            states = next_states
+        return states, limited_total, proposed_total
+
+    plus, plus_limited, plus_proposed = run(pred, 1.0)
+    minus, minus_limited, minus_proposed = run(pred, -1.0)
+    zero, zero_limited, zero_proposed = run(torch.zeros_like(pred), 1.0)
+
+    def stats(name: str, value: Tensor, limited: float, proposed: float) -> dict[str, float]:
+        diff = value - earlier
+        centered_a = value - value.mean(dim=1, keepdim=True)
+        centered_b = earlier - earlier.mean(dim=1, keepdim=True)
+        corr = (centered_a * centered_b).sum(dim=1) / (centered_a.square().sum(dim=1).sqrt() * centered_b.square().sum(dim=1).sqrt()).clamp_min(1e-30)
+        return {
+            f"learned_block_{name}_l1": float(diff.abs().sum(dim=1).mean().detach().cpu()),
+            f"learned_block_{name}_rms": float(torch.sqrt(diff.square().mean()).detach().cpu()),
+            f"learned_block_{name}_corr": float(corr.mean().detach().cpu()),
+            f"learned_block_{name}_limiter_fraction": 0.0 if proposed <= 0.0 else float(limited / proposed),
+        }
+
+    plus_stats = stats("plus", plus, plus_limited, plus_proposed)
+    minus_stats = stats("minus", minus, minus_limited, minus_proposed)
+    zero_stats = stats("zero", zero, zero_limited, zero_proposed)
+    if model_was_training:
+        model.train()
+    best_name = min(
+        ("plus", "minus", "zero"),
+        key=lambda name: {"plus": plus_stats, "minus": minus_stats, "zero": zero_stats}[name][f"learned_block_{name}_l1"],
+    )
+    return {
+        "learned_block_slices": int(count),
+        "learned_block_stride_substeps": int(stride),
+        "learned_block_pred_raw_rms": float(torch.sqrt(pred_raw.square().mean()).detach().cpu()),
+        "learned_block_pred_projected_rms": float(torch.sqrt(pred_projected.square().mean()).detach().cpu()),
+        "learned_block_removed_curl_rms": float(torch.sqrt((pred_raw - pred_projected).square().mean()).detach().cpu()),
+        "learned_block_best": str(best_name),
+        **plus_stats,
+        **minus_stats,
+        **zero_stats,
+    }
 
 def train_experiment12_d0(
     *,
@@ -1188,6 +1755,17 @@ def train_experiment12_d0(
     )
     save_d0_cache_npz(cache, run_dir / "experiment12_d0_cache_initial.npz")
     summary = cache_summary(cache)
+    oracle_summary: dict[str, float | int | str] = {}
+    if bool(d0_config.oracle_reverse_diagnostic):
+        oracle_summary = d0_oracle_reverse_diagnostic(
+            cache,
+            dynamics_config,
+            max_slices=int(d0_config.oracle_reverse_slices),
+            device=device,
+        )
+        summary.update(oracle_summary)
+        with (run_dir / "experiment12_d0_oracle_reverse_diagnostic.json").open("w", encoding="utf-8") as handle:
+            json.dump(oracle_summary, handle, indent=2, default=_serializable)
     with (run_dir / "experiment12_d0_cache_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, default=_serializable)
     if bool(d0_config.train_cache_only) or int(d0_config.train_steps) <= 0:
@@ -1225,6 +1803,19 @@ def train_experiment12_d0(
         history.append(row)
         if hasattr(bar, "set_postfix"):
             bar.set_postfix(loss=float(diag["loss"]), gain=float(diag["innovation_gain"]), mask=float(diag["mask_fraction"]))
+    if bool(d0_config.learned_block_diagnostic):
+        learned_block_summary = d0_learned_block_reverse_diagnostic(
+            model,
+            cache,
+            dynamics_config,
+            d0_config,
+            max_slices=int(d0_config.learned_block_slices),
+            device=device,
+        )
+        with (run_dir / "experiment12_d0_learned_block_diagnostic.json").open("w", encoding="utf-8") as handle:
+            json.dump(learned_block_summary, handle, indent=2, default=_serializable)
+        if history:
+            history[-1].update({f"diagnostic_{k}": v for k, v in learned_block_summary.items() if isinstance(v, (int, float))})
     write_csv_rows(run_dir / "experiment12_d0_train_metrics.csv", history)
     torch.save(
         {
@@ -1287,9 +1878,18 @@ def _make_d0_config(args: argparse.Namespace) -> Experiment12D0Config:
         cache_batch_size=int(args.cache_batch_size),
         cache_refresh_every=int(args.cache_refresh_every),
         cache_build_mode=str(args.cache_build_mode),
+        cache_time_sampling=str(args.cache_time_sampling),
+        cache_data_endpoint_prob=float(args.cache_data_endpoint_prob),
+        cache_terminal_endpoint_prob=float(args.cache_terminal_endpoint_prob),
+        cache_endpoint_window_fraction=float(args.cache_endpoint_window_fraction),
         time_slices_per_path=int(args.time_slices_per_path),
         teacher_stride_substeps=int(args.teacher_stride_substeps),
         eta_l2_weight=float(args.eta_l2_weight),
+        d0_target_space=str(args.d0_target_space),
+        invalid_output_l2_weight=float(args.invalid_output_l2_weight),
+        curl_loss_weight=float(args.curl_loss_weight),
+        edge_laplacian_loss_weight=float(args.edge_laplacian_loss_weight),
+        sample_project_learned_mean=not bool(args.no_sample_project_learned_mean),
         theta_mask_min=float(args.theta_mask_min),
         lambda_mix=float(args.lambda_mix),
         sample_steps=int(args.sample_steps),
@@ -1315,6 +1915,13 @@ def _make_d0_config(args: argparse.Namespace) -> Experiment12D0Config:
         single_image_index=int(args.single_image_index),
         single_image_label=args.single_image_label,
         train_cache_only=bool(args.train_cache_only),
+        allow_prior_bank_mismatch=bool(args.allow_prior_bank_mismatch),
+        allow_stride_rounding=bool(args.allow_stride_rounding),
+        use_external_prior_bank_for_overfit=bool(args.use_external_prior_bank_for_overfit),
+        oracle_reverse_diagnostic=bool(args.oracle_reverse_diagnostic),
+        oracle_reverse_slices=int(args.oracle_reverse_slices),
+        learned_block_diagnostic=not bool(args.no_learned_block_diagnostic),
+        learned_block_slices=int(args.learned_block_slices),
         save_cache_previews=bool(args.save_cache_previews),
         seed=int(args.seed),
         use_amp=not bool(args.no_amp),
@@ -1337,6 +1944,17 @@ def load_d0_dataset(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray]:
         seed=int(args.seed),
     )
     return np.asarray(dataset.train_images, dtype=np.float64), np.asarray(dataset.train_labels, dtype=np.int64)
+
+
+def _sampling_jobs(d0_config: Experiment12D0Config) -> list[tuple[str, bool, float]]:
+    explicit = _parse_csv_floats(d0_config.sample_control_strengths)
+    if bool(d0_config.save_sampling_ablations):
+        det_strengths = explicit or [-4.0, -2.0, -1.0, 0.0, 1.0, 2.0, 4.0, 8.0]
+        stoch_strengths = explicit or [0.0, 1.0, 2.0, 4.0]
+        return [("det", True, float(s)) for s in det_strengths] + [("stoch", False, float(s)) for s in stoch_strengths]
+    strengths = explicit or [float(d0_config.control_strength)]
+    mode = "det" if bool(d0_config.deterministic_sampling) else "stoch"
+    return [(mode, bool(d0_config.deterministic_sampling), float(s)) for s in strengths]
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -1395,7 +2013,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cache-batch-size", type=int, default=64)
     parser.add_argument("--cache-refresh-every", type=int, default=0, help="Model-independent cache refresh interval. Default 0 disables refresh.")
     parser.add_argument("--cache-build-mode", choices=("outer", "substep"), default="outer", help="Fast outer-step cache by default; use 'substep' for the exact but slow elementary-substep cache.")
+    parser.add_argument("--cache-time-sampling", choices=("uniform", "endpoint-mixture"), default="endpoint-mixture")
+    parser.add_argument("--cache-data-endpoint-prob", type=float, default=0.50)
+    parser.add_argument("--cache-terminal-endpoint-prob", type=float, default=0.10)
+    parser.add_argument("--cache-endpoint-window-fraction", type=float, default=0.10)
     parser.add_argument("--eta-l2-weight", type=float, default=1e-4)
+    parser.add_argument("--d0-target-space", choices=("raw", "projected-edge", "divergence"), default="projected-edge")
+    parser.add_argument("--invalid-output-l2-weight", type=float, default=1e-3)
+    parser.add_argument("--curl-loss-weight", type=float, default=1e-3)
+    parser.add_argument("--edge-laplacian-loss-weight", type=float, default=0.0)
+    parser.add_argument("--no-sample-project-learned-mean", action="store_true")
     parser.add_argument("--control-output-clip", type=float, default=0.0)
     parser.add_argument("--train-cache-only", action="store_true")
     parser.add_argument("--save-cache-previews", action="store_true")
@@ -1416,6 +2043,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sample-control-strengths", type=str, default="")
     parser.add_argument("--deterministic-sampling", action="store_true")
     parser.add_argument("--save-sampling-ablations", action="store_true")
+    parser.add_argument("--allow-prior-bank-mismatch", action="store_true", help="Allow sampling from a prior bank whose time grid/schedule differs from the trained D0 config. Debug only.")
+    parser.add_argument("--allow-stride-rounding", action="store_true", help="Allow outer cache mode to round the requested elementary stride. Disabled by default for one-image overfit correctness runs.")
+    parser.add_argument("--use-external-prior-bank-for-overfit", action="store_true", help="In single-image overfit mode, honor --prior-bank-path instead of automatically sampling from this run's terminal bank.")
+    parser.add_argument("--no-oracle-reverse-diagnostic", dest="oracle_reverse_diagnostic", action="store_false")
+    parser.set_defaults(oracle_reverse_diagnostic=True)
+    parser.add_argument("--oracle-reverse-slices", type=int, default=16)
+    parser.add_argument("--no-learned-block-diagnostic", action="store_true")
+    parser.add_argument("--learned-block-slices", type=int, default=32)
     return parser.parse_args(argv)
 
 
@@ -1462,18 +2097,30 @@ def main(argv: Sequence[str] | None = None) -> None:
         rate_schedule=cache.rate_schedule.astype(np.float64),
         sample_steps=np.asarray([cache.sample_steps], dtype=np.int64),
         substeps=np.asarray([cache.reference_substeps], dtype=np.int64),
+        stride_substeps=np.asarray([cache.stride_substeps], dtype=np.int64),
+        requested_stride_substeps=np.asarray([cache.requested_stride_substeps or cache.stride_substeps], dtype=np.int64),
         horizon=np.asarray([cache.horizon], dtype=np.float64),
         lambda_mix=np.asarray([cache.lambda_mix], dtype=np.float64),
+        edge_alpha_mode=np.asarray([str(dynamics_config.edge_alpha_mode)]),
+        alpha_eff=np.asarray([float(dynamics_config.alpha_eff)], dtype=np.float64),
         cache_build_mode=np.asarray([cache.cache_build_mode]),
+        start_image=cache.start_images[:1].numpy().astype(np.float32),
+        overfit_start_image=cache.start_images[:1].numpy().astype(np.float32),
+        d0_target_space=np.asarray([str(d0_config.d0_target_space)]),
     )
-    prior_path = Path(d0_config.prior_bank_path) if str(d0_config.prior_bank_path) else generated_bank
+    explicit_prior_path = Path(d0_config.prior_bank_path) if str(d0_config.prior_bank_path) else None
+    if bool(d0_config.single_image_overfit) and not bool(d0_config.use_external_prior_bank_for_overfit):
+        prior_path = generated_bank
+        prior_source = "current_run_overfit_terminal_bank"
+    else:
+        prior_path = explicit_prior_path if explicit_prior_path is not None else generated_bank
+        prior_source = "external_prior_bank" if explicit_prior_path is not None else "current_run_terminal_bank"
     if int(d0_config.num_samples) > 0 and not bool(d0_config.train_cache_only):
         sample_labels = np.arange(int(d0_config.num_samples), dtype=np.int64) % 10
         if bool(d0_config.single_image_overfit):
             sample_labels[:] = int(cache.requested_labels[0])
-        strengths = _parse_csv_floats(d0_config.sample_control_strengths) or [float(d0_config.control_strength)]
         sample_rows: list[dict[str, float | int | str]] = []
-        for strength in strengths:
+        for sample_mode, deterministic_flag, strength in _sampling_jobs(d0_config):
             context = temporary_ema_weights(model, ema_state) if str(d0_config.sampling_weights) == "ema" and ema_state else nullcontext()
             with context:
                 gen = simulate_d0_reverse_generation(
@@ -1484,25 +2131,39 @@ def main(argv: Sequence[str] | None = None) -> None:
                     prior_bank_path=prior_path,
                     device=device,
                     seed=int(d0_config.sample_seed),
-                    deterministic=bool(d0_config.deterministic_sampling),
+                    deterministic=bool(deterministic_flag),
                     control_strength=float(strength),
                     show_progress=show_progress,
                     save_trajectory=False,
                 )
             tag = str(strength).replace(".", "p").replace("-", "m")
-            npz_path = run_dir / f"experiment12_d0_samples_strength_{tag}.npz"
+            prefix = f"experiment12_d0_samples_{sample_mode}_strength_{tag}"
+            npz_path = run_dir / f"{prefix}.npz"
             np.savez_compressed(npz_path, samples=gen.samples, labels=gen.labels)
-            png_path = run_dir / f"experiment12_d0_samples_strength_{tag}.png"
+            png_path = run_dir / f"{prefix}.png"
             save_flux_samples_grid(gen.samples, gen.labels, png_path, grid_size=int(dynamics_config.grid_size), max_images=min(64, int(d0_config.num_samples)))
             sample_rows.append(
                 {
+                    "sample_mode": str(sample_mode),
+                    "deterministic": int(bool(deterministic_flag)),
                     "control_strength": float(strength),
+                    "prior_bank_path": str(prior_path),
+                    "prior_bank_source": str(prior_source),
+                    "sampler_stride_substeps": int(gen.stride_substeps),
+                    "sampler_sample_steps": int(gen.sample_steps),
+                    "sampler_reference_substeps": int(gen.reference_substeps),
                     "limiter_fraction": float(gen.limiter_fraction),
                     "mobility_weighted_limiter_fraction": float(gen.mobility_weighted_limiter_fraction),
                     "learned_step_rms": float(gen.learned_step_rms),
                     "free_step_rms": float(gen.free_step_rms),
                     "noise_step_rms": float(gen.noise_step_rms),
                     "learned_to_noise_ratio": float(gen.learned_to_noise_ratio),
+                    "learned_raw_rms": float(gen.learned_raw_rms),
+                    "learned_projected_rms": float(gen.learned_projected_rms),
+                    "learned_removed_curl_rms": float(gen.learned_removed_curl_rms),
+                    "sample_start_corr_mean": float(gen.sample_start_corr_mean),
+                    "sample_start_corr_max": float(gen.sample_start_corr_max),
+                    "sample_start_l1_mean": float(gen.sample_start_l1_mean),
                     "entropy": float(gen.entropy),
                     "total_variation": float(gen.total_variation),
                     "checkerboard_energy": float(gen.checkerboard_energy),
