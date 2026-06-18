@@ -1,0 +1,558 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{bm}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+
+\numberwithin{equation}{section}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{assumption}[theorem]{Assumption}
+\newtheorem{remark}[theorem]{Remark}
+\newtheorem{definition}[theorem]{Definition}
+
+\newcommand{\T}{\mathbb T}
+\newcommand{\R}{\mathbb R}
+\newcommand{\E}{\mathbb E}
+\newcommand{\Pbb}{\mathbb P}
+\newcommand{\nuH}{\nu_h}
+\newcommand{\SigmaH}{\Sigma_h}
+\newcommand{\Ih}{I_h}
+\newcommand{\Eh}{\mathcal E_h}
+\newcommand{\Dh}{\mathcal D(\mathcal E_h)}
+\newcommand{\Th}{T_h}
+\newcommand{\dt}{\Delta t}
+\newcommand{\dive}{\operatorname{Div}_h}
+\newcommand{\unif}{\operatorname{unif}_h}
+\newcommand{\1}{\mathbf 1}
+
+\title{Experiment D0: Forward-from-Data Reverse Innovation Matching\\
+\large Theory note and implementation-level patch plan}
+\author{Internal note}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note writes the theory behind the D0 patch plan.  D0 replaces terminal-reward bridge estimation from a source/noise distribution by reverse-time learning on free forward rollouts that start at data.  The key observation is that, for the symmetric finite-volume Dirichlet--Ferguson reference process, the time reversal of the free process started from the data law is itself a time-inhomogeneous Doob transform.  Its heat potential is the forward data density relative to the grid Dirichlet law, propagated by the same free semigroup.  Therefore the desired reverse control can be learned by an unweighted conditional-mean regression on the raw Brownian edge innovations, keyed at the later noised state.  This is the finite-volume analogue of DDPM noise prediction, but in conservative edge coordinates and with state-dependent harmonic mobility.
+
+The continuum Doob/Girsanov construction and the Lagrangian conditioning mechanism are in \cite[Sec.~3]{main-manuscript}.  The finite-volume grid, renormalized harmonic mobility, closed form, symmetric Hunt process, grid SDE, and terminal h-transform simulation rule are in \cite[Secs.~3--7]{eulerian-manuscript}.  The C0 weighted-innovation estimator and Brownian-coordinate loss are in \cite[Secs.~6--11]{c0-note}.  The C0--C3 failure record motivating D0 is summarized in \cite[Secs.~4--8]{experiment11-report}.
+\end{abstract}
+
+\tableofcontents
+
+\section{Purpose of the D0 patch}
+
+The original Level C program asked for a class-conditional Eulerian h-transform sampler on the MNIST mass simplex.  The previous estimators tried to learn a conditional law of the free reference process given that a terminal state looked digit-like.  In practice the free reference endpoints did not overlap the digit manifold: high-weight terminals were still noise blobs, C0 produced an almost zero learned/noise ratio, C1 suffered Girsanov effective-sample-size collapse, branch methods learned noise-level fluctuations, and the scalar value method learned a smooth value without producing a useful edge-gradient generator \cite[Secs.~4--8]{experiment11-report}.
+
+D0 changes the measure on which the score is learned.  Every training path starts at a lambda-floored data image and is then noised by the free conservative finite-volume dynamics.  The regression target is the raw forward innovation conditioned on the later state.  Thus the high-signal regime near data is actually sampled, rather than being reached only through an exponentially rare terminal event.
+
+The central claim is:
+\begin{quote}
+\emph{D0 is not an abandonment of the h-transform program.  It is the h-transform whose terminal datum is the data density relative to the finite-volume reference law, propagated forward from data rather than estimated backward from a rare terminal reward.}
+\end{quote}
+
+\section{Finite-volume background}
+
+This section fixes notation.  It is intentionally short; the detailed construction, closedness, Mosco program, boundary handling, and exact h-transform simulation rule are in \cite{eulerian-manuscript}.  The infinite-dimensional Doob transform behind the construction is in \cite{main-manuscript}.
+
+\subsection{Grid state space and conservative incidence}
+
+Let \(h=1/n\), let
+\[
+  \Ih = \{0,1,\ldots,n-1\}^d
+\]
+with periodic indexing, and let \(\SigmaH\) be the probability simplex
+\[
+  \SigmaH=\left\{s=(s_i)_{i\in\Ih}: s_i\ge 0,\quad \sum_{i\in\Ih}s_i=1\right\}.
+\]
+The reconstructed measure is
+\[
+  I_h(s)=\sum_{i\in\Ih}s_i\delta_{x_i^h}.
+\]
+A positively oriented edge is \(e=(i,\ell)\), with tail \(i\) and head \(j=i+e_\ell\).  For smooth \(F:\SigmaH\to\R\), define
+\begin{equation}\label{eq:edge-derivative-d0}
+  \partial_e^h F(s)=\frac{\partial_{s_j}F(s)-\partial_{s_i}F(s)}{h}.
+\end{equation}
+For an edge flux \(J=(J_{i,\ell})\), use the conservative incidence convention
+\begin{equation}\label{eq:incidence-d0}
+  (\dive J)_p=\sum_{\ell=1}^d J_{p-e_\ell,\ell}-\sum_{\ell=1}^d J_{p,\ell}.
+\end{equation}
+A positive edge flux moves mass from the tail to the head.  The state update is
+\[
+  \dot s=\dive J.
+\]
+This convention matches the finite-volume simulation rule in \cite[Sec.~7.4]{eulerian-manuscript}.
+
+\subsection{Renormalized harmonic mobility}
+
+The finite-volume program uses the renormalized harmonic mobility
+\begin{equation}\label{eq:theta-d0}
+  \theta_e(s)=\theta^h_{i,\ell}(s)=\frac{2\alpha_h+1}{\alpha_h}\frac{s_i s_j}{s_i+s_j},
+  \qquad \alpha_h=\beta h^d,
+\end{equation}
+with value zero if \(s_i=s_j=0\).  The code sometimes uses a legacy fixed value \(\bar \alpha=1\) in place of \(\alpha_h\).  The formulas below remain meaningful if \(\alpha_h\) is replaced by the effective implementation parameter, but the exact finite-volume convergence and symmetry statements refer to the manuscript choice \(\alpha_h=\beta h^d\); see \cite[Secs.~4--6]{eulerian-manuscript}.
+
+It is useful to write
+\begin{equation}\label{eq:R-d0}
+  R(a,b)=\begin{cases}
+  \dfrac{a-b}{a+b},&a+b>0,\\[0.5em]
+  0,&a=b=0.
+  \end{cases}
+\end{equation}
+The canonical free Dirichlet drift edge flux is
+\begin{equation}\label{eq:canonical-drift-flux-d0}
+  b_e^0(s)=\frac{2\alpha_h+1}{h^2}R(s_i,s_j).
+\end{equation}
+The closed-form SDE and its boundary rules are derived in \cite[Sec.~6]{eulerian-manuscript}.
+
+\subsection{The symmetric reference process}
+
+The clean D0 theory uses a \(\nu_h\)-symmetric reference process.  Let \(\nu_h\) be the grid Dirichlet law
+\[
+  \nu_h=\operatorname{Dir}\bigl((\beta h^d)_{i\in\Ih}\bigr),
+\]
+and let \(L_h\) be the generator of the closed symmetric form \((\mathcal E_h,\mathcal D(\mathcal E_h))\).  In edge coordinates the canonical process can be written formally as
+\begin{equation}\label{eq:canonical-edge-flux-d0}
+  dK_e(t)=b_e^0(S_t)\,dt+\frac{\sqrt{2\theta_e(S_t)}}{h}\,dW_e(t),
+  \qquad dS_t=\dive dK(t).
+\end{equation}
+
+For numerical calibration it is often convenient to use a time-change or noise schedule.  The exact symmetric version is
+\begin{equation}\label{eq:symmetric-scaled-reference-d0}
+  dK_e(t)=a(t)b_e^0(S_t)\,dt+\sqrt{a(t)}\frac{\sqrt{2\theta_e(S_t)}}{h}\,dW_e(t),
+  \qquad a(t)>0.
+\end{equation}
+Equivalently, if the code parameter is \(w_\sigma(t)\), then exact symmetry corresponds to
+\begin{equation}\label{eq:symmetry-scaling-condition-d0}
+  a(t)=w_\sigma(t)^2,\qquad w_{\mathrm{free}}(t)=w_\sigma(t)^2.
+\end{equation}
+A code path that independently chooses \(w_{\mathrm{free}}\) and \(w_\sigma\) still has a well-defined Euler kernel and a valid conditional-innovation regression target, but the exact identification of the reverse dynamics with a \(\nu_h\)-symmetric h-transform is then no longer literal.  In that case the experiment should be reported as learning the reverse kernel of the chosen practical Euler reference.
+
+\section{Standard terminal h-transform at fixed grid size}
+
+For comparison with D0, recall the ordinary terminal h-transform.  Let \(g_h:\SigmaH\to(0,\infty)\) be bounded above and below away from zero.  Let \(T_h(t)=e^{tL_h}\) denote the free semigroup and set
+\begin{equation}\label{eq:ordinary-h-potential-d0}
+  u_t^h(s)=T_h(T-t)g_h(s).
+\end{equation}
+Then \(u_t^h\) solves the backward heat equation \(\partial_tu_t^h+L_hu_t^h=0\), \(u_T^h=g_h\).  The tilted path law from time \(\tau\) and state \(s\) is
+\begin{equation}\label{eq:ordinary-tilted-law-d0}
+  \frac{d\widetilde {\Pbb}^{h}_{\tau,s}}{d\Pbb^{h}_{\tau,s}}\Big|_{\mathcal F_T}
+  =\frac{g_h(S_T)}{u^h_\tau(s)}.
+\end{equation}
+The h-transform keeps the same edge noise and adds the Brownian-coordinate shift
+\begin{equation}\label{eq:brownian-shift-d0}
+  \eta_e^u(t,s)=w_\sigma(t)\sqrt{2\theta_e(s)}\,\partial_e^h\log u_t^h(s).
+\end{equation}
+In physical edge-flux coordinates this is
+\begin{equation}\label{eq:physical-conditioning-flux-d0}
+  J_e^u(t,s)=\sigma_e(t,s)\eta_e^u(t,s)
+  =\frac{2w_\sigma(t)^2}{h}\theta_e(s)\partial_e^h\log u_t^h(s),
+\end{equation}
+where \(\sigma_e(t,s)=w_\sigma(t)\sqrt{2\theta_e(s)}/h\).  This is the finite-volume conditioning flux from \cite[Sec.~7]{eulerian-manuscript}.  The C0 note uses the same Brownian-coordinate shift in its weighted innovation identity \cite[Secs.~6--8]{c0-note}.
+
+The problem with C0--C3 was not the validity of \eqref{eq:brownian-shift-d0}.  It was the proposal measure: under free rollouts from the low-frequency source, the terminal digit event had negligible probability, so terminal weighting and branch weighting estimated a real but practically uninformative conditional mean \cite[Secs.~4--8]{experiment11-report}.
+
+\section{D0 as a data-density h-transform}
+
+\subsection{Data initialization and the density convention}
+
+For each class label \(y\), let \(\mathcal A_y\) be the set of normalized MNIST training images with that label.  D0 uses the lambda-floored data convention
+\begin{equation}\label{eq:data-floor-d0}
+  S_0=(1-\lambda)a+\lambda\unif,
+  \qquad a\in\mathcal A_y,
+  \qquad (\unif)_i=|\Ih|^{-1},
+\end{equation}
+where \(0<\lambda<1\) is fixed once and used consistently in rollouts, previews, feature computations, and evaluation.
+
+The floor has two roles.  First, it is an implementation convention defining the target distribution.  Second, it avoids the frozen-edge pathology \(\theta_e(s)=0\) on edges whose two endpoint masses are zero.  With \(\lambda>0\), every data-start state lies in the simplex interior.
+
+There is a small measure-theoretic point.  An empirical data distribution is still singular with respect to \(\nu_h\), even after adding a uniform floor, because it is a finite mixture of point masses.  The exact h-transform statement below may therefore be read in either of the following equivalent practical ways:
+\begin{enumerate}[label=\textup{(D\arabic*)},leftmargin=2.4em]
+  \item replace the empirical data law by a small smooth density \(v_0^y\nu_h\) concentrated near the floored data images;
+  \item or start the theoretical density identity at a small positive time \(t_{\min}>0\), where the free noising kernel has regularized the initial law.
+\end{enumerate}
+The code implements the empirical limit by sampling \eqref{eq:data-floor-d0} directly.
+
+\subsection{Forward density and reverse transition}
+
+Assume first that the class-conditional initial law is
+\[
+  p_0^y(ds)=v_0^y(s)\nu_h(ds),\qquad v_0^y\ge0,\quad \int v_0^y\,d\nu_h=1.
+\]
+Let \(p_t^y\) be the law at forward time \(t\) under the symmetric free reference process, and write
+\begin{equation}\label{eq:forward-density-d0}
+  p_t^y(ds)=v_t^y(s)\nu_h(ds),
+  \qquad v_t^y=T_h(t)v_0^y
+\end{equation}
+for a time-homogeneous reference.  For a time-inhomogeneous symmetric time-change \(a(t)L_h\), replace \(T_h(t)\) by the corresponding forward propagator.
+
+Define the reversed path
+\[
+  Y_\tau=S_{T-\tau},\qquad 0\le \tau\le T.
+\]
+Then \(Y_0\sim p_T^y\) and \(Y_T\sim p_0^y\).  By \(\nu_h\)-symmetry, the reverse transition from \(\tau\) to \(\tau+\delta\) is
+\begin{equation}\label{eq:reverse-transition-d0}
+  \widetilde T^y_{\tau,\tau+\delta}F(s)
+  =\frac{1}{v_{T-\tau}^y(s)}
+  T_h(\delta)\bigl(v_{T-\tau-\delta}^yF\bigr)(s)+o(\delta),
+\end{equation}
+with the obvious exact propagator version in the time-inhomogeneous case.  Thus the reverse process is a time-inhomogeneous Doob transform of the same free reference with heat potential
+\begin{equation}\label{eq:data-heat-potential-d0}
+  h_\tau^y(s)=v_{T-\tau}^y(s).
+\end{equation}
+Indeed \(h_\tau^y\) solves the backward equation in reverse time,
+\[
+  \partial_\tau h_\tau^y+L_hh_\tau^y=0.
+\]
+Consequently the reverse Brownian-coordinate h-transform shift is
+\begin{equation}\label{eq:eta-rev-d0}
+  \eta_{\mathrm{rev},e}^y(\tau,s)
+  =w_\sigma(T-\tau)\sqrt{2\theta_e(s)}\,\partial_e^h\log v_{T-\tau}^y(s).
+\end{equation}
+The associated physical conditioning flux is
+\begin{equation}\label{eq:reverse-physical-flux-d0}
+  J_{\mathrm{rev},e}^y(\tau,s)
+  =\frac{2w_\sigma(T-\tau)^2}{h}\theta_e(s)\partial_e^h\log v_{T-\tau}^y(s).
+\end{equation}
+This is the same object class as the usual terminal h-transform flux \eqref{eq:physical-conditioning-flux-d0}; the only change is the choice of terminal datum.  In C0--C3, the heat potential was generated from a terminal preference/reward and had to be estimated in a rare-event region.  In D0, the potential is the data density propagated by the forward noising process, so its high-signal region is directly populated by training trajectories.
+
+\begin{proposition}[D0 reverse law as a Doob transform]\label{prop:d0-reverse-doob}
+Under the symmetric reference assumption \eqref{eq:symmetric-scaled-reference-d0} and the density convention above, the time reversal of the free process started from the class-conditional data law is the h-transform with space-time potential \(h_\tau^y=v_{T-\tau}^y\).  Its Brownian edge shift is \eqref{eq:eta-rev-d0}, and its physical conservative edge flux is \eqref{eq:reverse-physical-flux-d0}.
+\end{proposition}
+
+\begin{proof}
+For simplicity write the homogeneous case.  Let \(p_\delta(s,s')\nu_h(ds')\) be the transition kernel of the \(\nu_h\)-symmetric free process.  Bayes' formula gives
+\[
+  \Pbb(Y_{\tau+\delta}\in ds'\mid Y_\tau=s,Y\text{ label}=y)
+  =\frac{p_\delta(s',s)v_{T-\tau-\delta}^y(s')\nu_h(ds')}{v_{T-\tau}^y(s)}.
+\]
+Symmetry gives \(p_\delta(s',s)=p_\delta(s,s')\), which yields \eqref{eq:reverse-transition-d0}.  Differentiating the h-transform transition family at \(\delta=0\) gives the generator \(L_h+2\Gamma_h(\log h_\tau^y,\cdot)\).  In edge Brownian coordinates this is exactly the Girsanov shift \eqref{eq:eta-rev-d0}; converting to physical edge flux using \(\sigma_e=w_\sigma\sqrt{2\theta_e}/h\) gives \eqref{eq:reverse-physical-flux-d0}.  The same argument applies to a symmetric time-inhomogeneous time-change after replacing \(T_h(\delta)\) by the short-time propagator.
+\end{proof}
+
+\section{Unweighted reverse innovation matching}
+
+\subsection{Forward rollout cache}
+
+For each cached trajectory:
+\begin{enumerate}[label=\textup{(C\arabic*)},leftmargin=2.4em]
+  \item sample a label \(y\) and a floored data start \(S_0=(1-\lambda)a+\lambda\unif\), \(a\in\mathcal A_y\);
+  \item simulate the free reference process with learned control exactly zero;
+  \item store every raw Gaussian edge innovation \(\xi_{k,e}\) before clipping or limiting;
+  \item store clip masks and mobility-threshold masks.
+\end{enumerate}
+
+For a stride \(r\), define the block innovation
+\begin{equation}\label{eq:block-innovation-d0}
+  \Xi_{k,e}^{(r)}=\frac{1}{\sqrt r}\sum_{q=0}^{r-1}\xi_{k+q,e},
+  \qquad \Delta t_{\mathrm{eff}}=r\Delta t.
+\end{equation}
+The D0 cache slice is keyed at the later state:
+\begin{equation}\label{eq:d0-cache-slice}
+  \left(S_{k+r},\; \tau_{k+r}=T-t_{k+r},\; y,\; \Xi_k^{(r)},\; M_k^{(r)}\right),
+\end{equation}
+where \(M_k^{(r)}\) is the edge mask.  There is no terminal endpoint, no terminal reward, no log weight, and no source variable \(z\) as a model input.  The original data image \(a\) may be stored for diagnostics but is not an input to the network.
+
+This is the minimal cache change from C0: C0 stored the same raw innovations but keyed them at the earlier state and trained with self-normalized terminal weights \cite[Secs.~8--11]{c0-note}.  D0 keeps the raw-innovation machinery and deletes the terminal weights.
+
+\subsection{Population regression identity}
+
+Let \(X=(\tau_{k+r},S_{k+r},y)\) be the model input for a D0 slice and let \(Y_e=\Xi_{k,e}^{(r)}\).  For any measurable predictor \(m=(m_e)_e\), define the population loss
+\begin{equation}\label{eq:population-d0-loss}
+  \mathcal L_{\mathrm{D0}}(m)=
+  \E\left[\sum_e |m_e(X)-Y_e|^2\right],
+\end{equation}
+where the expectation is over the unweighted forward-from-data rollout law.  Then the minimizer is the conditional mean
+\begin{equation}\label{eq:conditional-mean-target-d0}
+  m_e^\star(\tau_{k+r},s,y)=\E\left[\Xi_{k,e}^{(r)}\mid S_{k+r}=s,\;Y=y\right].
+\end{equation}
+For one step \(r=1\), and in the small-step symmetric reference limit,
+\begin{equation}\label{eq:innovation-sign-d0}
+  m_e^\star(\tau_{k+1},s,y)
+  =-\sqrt{\Delta t}\,\eta_{\mathrm{rev},e}^y(\tau_{k+1},s)+O(\Delta t).
+\end{equation}
+For a block of length \(r\), if the reverse field is approximately constant on the block,
+\begin{equation}\label{eq:block-sign-d0}
+  m_e^\star(\tau_{k+r},s,y)
+  \approx -\sqrt{\Delta t_{\mathrm{eff}}}\,\eta_{\mathrm{rev},e}^y(\tau_{k+r},s).
+\end{equation}
+The sign in \eqref{eq:innovation-sign-d0} is important.  The reverse h-transform has positive Brownian shift \(\eta_{\mathrm{rev}}\) when run forward in reverse time, but the stored \(\xi_k\) is the forward innovation used in the update \(S_{k+1}=S_k+\dive\Delta K_k\).  To reconstruct \(S_k\) from \(S_{k+1}\), the sampler subtracts the forward-oriented incidence update.  Therefore D0 should train the network to predict the conditional forward innovation mean \(m^\star\) directly and handle the sign only in the reverse sampler.
+
+\begin{proof}[Proof sketch]
+Equation \eqref{eq:conditional-mean-target-d0} is the standard \(L^2\)-projection identity.  For \eqref{eq:innovation-sign-d0}, apply the C0 one-step innovation identity \cite[Sec.~8.2]{c0-note} to the reversed chain \(Y_\tau=S_{T-\tau}\).  The reversed chain has Brownian shift \(+\eta_{\mathrm{rev}}\).  The Brownian increment of the reversed physical step corresponds to the negative of the forward-oriented raw innovation that must be subtracted to undo the forward conservative update.  This gives the minus sign.  State-dependent mobility and the divergence-of-diffusion correction are included in the exact one-step conditional mean; when the sampler uses the conditional innovation target rather than an explicit score formula, those first-order corrections are absorbed by \(m^\star\).
+\end{proof}
+
+\subsection{Training loss}
+
+The recommended network head predicts the conditional block innovation mean itself:
+\[
+  m_\theta(\tau,s,y)\in\R^{d\times n\times n}.
+\]
+For a cached slice, use the masked per-slice loss
+\begin{equation}\label{eq:masked-d0-loss}
+  \ell_{\mathrm{D0}}(\theta)=
+  \frac{\sum_e M_e\left|m_{\theta,e}(\tau_{k+r},S_{k+r},y)-\Xi_{k,e}^{(r)}\right|^2}
+       {\sum_e M_e+\delta_M}.
+\end{equation}
+The full training objective is
+\begin{equation}\label{eq:d0-training-objective}
+  L_{\mathrm{D0}}(\theta)=\E_{\mathrm{cache}}[\ell_{\mathrm{D0}}(\theta)]
+  +\lambda_m\E_{\mathrm{cache}}\left[
+  \frac{\sum_eM_e|m_{\theta,e}(\tau,S,y)|^2}{\sum_eM_e+\delta_M}
+  \right].
+\end{equation}
+There are no self-normalized weights.  AdamW, gradient clipping, EMA weights, cache refresh, raw innovation storage, and edge masks can be kept from C0.  If an existing implementation insists on a Brownian-shift head \(\eta_\theta\), use the convention
+\begin{equation}\label{eq:m-to-eta-convention-d0}
+  m_\theta(\tau,s,y)=-\sqrt{\Delta t_{\mathrm{eff}}}\,\eta_\theta(\tau,s,y)
+\end{equation}
+when comparing to the theoretical reverse shift \(\eta_{\mathrm{rev}}\).  To avoid sign bugs, the first D0 implementation should use \(m_\theta\) directly.
+
+\section{Reverse sampler}
+
+\subsection{One-step sampler}
+
+The ideal initialization for the first D0 experiments is not a handcrafted source distribution.  It is the prior bank
+\begin{equation}\label{eq:prior-bank-d0}
+  S_K\sim p_T^y,
+\end{equation}
+obtained by storing terminal states of calibrated forward noising rollouts from data.  This removes prior mismatch from the first test of the reverse field.
+
+For clarity, first take stride \(r=1\).  Suppose the current reverse state is the later forward state \(s'=S_{k+1}\), at reverse time \(\tau_{k+1}=T-t_{k+1}\).  Draw independent fresh noises \(\zeta_e\sim N(0,1)\) and set
+\begin{equation}\label{eq:reverse-xihat-d0}
+  \widehat\xi_e=m_{\theta,e}(\tau_{k+1},s',y)+\zeta_e.
+\end{equation}
+Compute the forward-oriented edge increment using coefficients evaluated at \(s'\):
+\begin{equation}\label{eq:reverse-forward-increment-d0}
+  \Delta K_e=b_e^{\mathrm{ref}}(s')\Delta t+\sigma_e^{\mathrm{ref}}(s')\sqrt{\Delta t}\,\widehat\xi_e.
+\end{equation}
+Then undo a forward conservative step:
+\begin{equation}\label{eq:reverse-state-update-d0}
+  s=s'-\dive(\Delta K).
+\end{equation}
+Use the same edge limiter, floor/renormalization, and adaptive substepping conventions as the forward code.  Coefficients at \(s'\) are first-order consistent with the exact reverse kernel.  The exact conditional covariance of \(\xi_k\) given \(S_{k+1}\) is smaller than the identity; using fresh identity covariance is the usual reverse-SDE approximation, exact in the small-step limit.
+
+\subsection{Block stride}
+
+If the head is trained with stride \(r>1\), the target \(m_\theta\) predicts the block average \(r^{-1/2}\sum_{q<r}\xi_{k+q}\).  A simple first implementation uses the per-substep mean
+\begin{equation}\label{eq:block-per-step-mean-d0}
+  \mu_{\mathrm{step},e}=\frac{m_{\theta,e}(\tau,s,y)}{\sqrt r}
+\end{equation}
+for each of the \(r\) reverse substeps.  This is accurate when the reverse field is nearly constant over the block.  Near the data end, where the field and clipping behavior may change rapidly, start with \(r=1\) or small \(r\in\{4,8\}\) before using larger strides.
+
+\subsection{Why no explicit reverse It\^o correction is needed in the first implementation}
+
+For a general state-dependent diffusion, a score-form reverse SDE contains a divergence-of-diffusion correction.  D0 does not separately code that term because the supervised object is not a hand-written score; it is the exact Euler-kernel conditional mean \(\E[\xi_k\mid S_{k+1},y]\).  To first order in \(\Delta t\), this mean contains the score part, the drift contribution, and the mobility-divergence contribution needed by the reverse kernel.  The approximation in the sampler is the Gaussian conditional-covariance approximation, not the omission of a deterministic correction.
+
+\section{Diagnostics and calibration}
+
+D0 should start with diagnostics before training a model.  These diagnostics are part of the theory because the reverse h-transform interpretation assumes that the forward noising law actually connects data to a usable terminal prior without being dominated by numerical clipping.
+
+\subsection{Phase 0: noising calibration}
+
+Run free forward noising from floored data starts and log:
+\begin{enumerate}[label=\textup{(P0.\arabic*)},leftmargin=2.9em]
+  \item preview grids of \(S_k\) at \(k\in\{0,K/8,K/4,\ldots,K\}\);
+  \item digit destruction curves: feature distance \(D_h(S_k,S_0)^2\), pixel correlation with \(S_0\), entropy, total variation, high-frequency/checkerboard energy;
+  \item numerical health: clip fraction, mobility-threshold masked fraction, and frozen-edge fraction;
+  \item a schedule sweep over \(w_\sigma\), \(K\), \(\lambda\), and, if kept, \(w_{\mathrm{free}}\).
+\end{enumerate}
+The gate is: by time \(T\), digit correlation should be near zero and entropy near its terminal plateau, while the clip fraction remains small.  If no schedule destroys digits without clip blowup, the limiter, substepping, or symmetry-compatible scaling should be fixed before training.
+
+\subsection{Acceptance tests}
+
+The first D0 training runs should be ordered as follows.
+\begin{enumerate}[leftmargin=2.0em]
+  \item \textbf{Overfit-one-image smoke test.}  Train on a single floored digit and initialize from that digit's forward terminal bank.  The reverse sampler must reconstruct the same digit.  Failure indicates an implementation bug: sign, time indexing, incidence orientation, masking, or stride handling.
+  \item \textbf{Held-out forward reconstruction.}  Take a held-out forward path, start at its exact terminal state, and verify that reverse sampling reforms a same-class digit.  This tests the learned field without prior mismatch.
+  \item \textbf{Per-time-bin signal.}  Plot target RMS, residual RMS, and learned/noise step ratio by time bin.  Unlike C0's nearly flat zero signal, D0 should show strong time dependence, with largest signal near the data end.
+  \item \textbf{Sampler ablations.}  Compare deterministic reverse drift only, fresh-noise stochastic reverse, data-init cache versus source-init cache, and control-strength sweeps.  The honest setting is strength one.
+\end{enumerate}
+
+\section{Relation to the failed C0--C3 estimators}
+
+D0 changes where the conditional mean is estimated.
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{C0 weighted innovations.}  C0 asked for \(\E[\xi_k\mid S_k=s,\text{rare digit-like terminal event}]\) under free rollouts from a source.  Since free terminals were not digit-like, the true conditional mean on visited states was nearly zero.  D0 asks for \(\E[\xi_k\mid S_{k+1}=s,\text{trajectory started at data}]\), which is directly sampled.
+  \item \textbf{C1 Girsanov proposals.}  C1 remained an importance-sampling correction for a rare terminal event, hence path weights collapsed in high dimension.  D0 has no terminal weights and no path-space ESS.
+  \item \textbf{C2/C2.1 branches.}  Branch continuations from off-data free states mostly selected among noise blobs.  D0 puts the branch point distribution on actual noised data states.
+  \item \textbf{C3 scalar value.}  Value MSE can be high-quality while spatial derivatives are poor.  D0 directly supervises the Brownian-coordinate edge innovation mean rather than differentiating a fitted scalar value.
+\end{itemize}
+
+This explains why D0 is the natural Eulerian DDPM analogue: it moves the learning problem from a terminal rare-event estimator to a noising-process denoising estimator, while retaining the conservative finite-volume h-transform geometry.
+
+\section{Reconnecting D0 to terminal preferences}
+
+D0 first learns the data-density h-transform.  After this generator reaches digit-like states, terminal preference conditioning can be layered on top.
+
+\paragraph{Guidance.}
+For a positive preference \(g_h(s)\), add a conservative guidance flux at sampling time:
+\begin{equation}\label{eq:d0-guidance-flux}
+  J_{\mathrm{guidance},e}(s)=\gamma\frac{2w_\sigma^2}{h}\theta_e(s)\partial_e^h\log g_h(s),
+\end{equation}
+or equivalently add the Brownian-coordinate shift
+\begin{equation}\label{eq:d0-guidance-brownian}
+  \eta_{\mathrm{guidance},e}(s)=\gamma w_\sigma\sqrt{2\theta_e(s)}\partial_e^h\log g_h(s).
+\end{equation}
+This is the conservative-flux analogue of classifier guidance.  It should be reported as an approximate h-transform of the learned data generator, not as the exact original terminal bridge unless corrected.
+
+\paragraph{Reviving C1.}
+Use the D0 generator as the proposal for Girsanov-corrected terminal tilting.  The proposal then has mass on digit-like paths, so ESS collapse should be substantially reduced.
+
+\paragraph{Reviving C3.}
+Estimate branch or value targets on-policy under the D0 generator's state distribution, with derivative regularization.  This addresses the C3 issue that value accuracy alone did not imply useful edge gradients.
+
+\section{Risks and open implementation items}
+
+\begin{enumerate}[leftmargin=2.0em]
+  \item \textbf{Sign and time conventions.}  The model should predict \(m_\theta=\E[\Xi\mid\text{later state}]\) directly.  Reverse sampling subtracts the forward incidence update.  Use \(\tau=T-t\) consistently if the time embedding is reverse time.
+  \item \textbf{Symmetry of the practical reference.}  The exact data-density h-transform theory requires the noising reference to be \(\nu_h\)-symmetric.  If the code decouples \(w_{\mathrm{free}}\) and \(w_\sigma\), D0 is still a valid reverse-kernel regression but is no longer exactly the symmetric h-transform above.
+  \item \textbf{Initial-law singularity.}  Empirical data is singular relative to \(\nu_h\).  The rigorous statement uses a smoothed data density or starts at a positive noising time.  The implementation is the empirical limit.
+  \item \textbf{Conditional covariance.}  The exact conditional covariance of the forward innovation given the later state is not identity.  The fresh-noise sampler uses the standard small-step approximation.  Log residual covariance on held-out forward steps.
+  \item \textbf{Block bias.}  Conditioning a block innovation only on \(S_{k+r}\) is biased if the state moves substantially across the block.  Use small stride near data.
+  \item \textbf{Clip bias.}  Raw Gaussian innovations are valid only before limiter modifications.  Mask clipped or invalid edges and keep clip fraction as a first-class diagnostic.
+  \item \textbf{Lambda defines the target.}  The generated samples live on the \(\lambda\)-floored simplex.  Use the same \(\lambda\) everywhere.
+  \item \textbf{Code-dependent unknowns.}  The exact horizon, time embedding, limiter API, trainer weight bypass, network input signature, and cache schema must be checked against the actual codebase.
+\end{enumerate}
+
+\appendix
+\section{Minimal D0 checklist}
+
+\begin{enumerate}[leftmargin=2.0em]
+  \item Forward rollouts start at \(S_0=(1-\lambda)a+\lambda\unif\), with learned weight exactly zero.
+  \item The same reference coefficients, limiter, substeps, and time grid are used for cache generation and reverse sampling.
+  \item Raw Gaussian edge innovations are stored before clipping.
+  \item Clipped, invalid, or near-zero-mobility edges are masked in the loss.
+  \item Cache slices are keyed at \(S_{k+r}\), not \(S_k\).
+  \item There are no terminal weights, no endpoint input, and no source \(z\) input in D0 mode.
+  \item The network sees only time, state, and label: \((\tau,S_{k+r},y)\) or the consistently chosen equivalent time convention.
+  \item The network predicts the conditional innovation mean \(m_\theta\), not a signed score unless the sign convention is explicitly encoded.
+  \item Reverse sampling uses fresh unit noise plus the learned mean and then subtracts the forward incidence update.
+  \item First runs initialize from the bank of forward terminal states.
+  \item The overfit-one-image test passes before any full dataset run.
+  \item Per-time-bin target RMS, residual RMS, learned/noise ratio, clip fraction, frozen-edge fraction, entropy, TV, and preview grids are logged at every cache refresh.
+\end{enumerate}
+
+\section{Suggested cache schema}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Field & Meaning \\
+\midrule
+\texttt{state} & later state \(S_{k+r}\in\R^{n\times n}\) \\
+\texttt{time} & \(t_{k+r}\) or \(\tau_{k+r}=T-t_{k+r}\), fixed consistently \\
+\texttt{label} & class label \(y\) \\
+\texttt{innovation} & block innovation \(\Xi_k^{(r)}\in\R^{d\times n\times n}\) \\
+\texttt{edge\_mask} & unclipped and valid edge mask over the whole block \\
+\texttt{start\_image} & optional diagnostic-only data image \(a\) \\
+\texttt{terminal\_state} & optional diagnostic-only final state for prior-bank checks \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Pseudocode}
+
+\paragraph{Cache generation.}
+\begin{verbatim}
+for path in range(cache_paths):
+    y = sample_label()
+    a = sample_training_image(label=y)
+    s0 = (1 - lambda_floor) * normalize(a) + lambda_floor * uniform_grid()
+    rollout = simulate_free_reference(
+        state=s0,
+        learned_weight=0.0,
+        store_states=True,
+        store_raw_gaussian_xi=True,
+        store_clip_masks=True,
+    )
+    prior_bank.add(rollout.states[K])
+    for slice in range(time_slices_per_path):
+        k = sample_start_index(0, K - r)
+        Xi = sum(rollout.raw_xi[k:k+r]) / sqrt(r)
+        mask = all_unclipped(rollout.edge_masks[k:k+r])
+        mask = mask & mobility_valid(rollout.states[k+r])
+        cache.add(state=rollout.states[k+r],
+                  time=reverse_or_forward_time(k+r),
+                  label=y,
+                  innovation=Xi,
+                  edge_mask=mask,
+                  start_image_for_diagnostics=a)
+\end{verbatim}
+
+\paragraph{Training step.}
+\begin{verbatim}
+batch = sample_cache(batch_size)
+m_pred = model(time=batch.time, state=batch.state, label=batch.label)
+per_edge = (m_pred - batch.innovation)**2
+per_slice = (batch.edge_mask * per_edge).sum(edge_dims) \
+            / (batch.edge_mask.sum(edge_dims) + delta_M)
+reg = (batch.edge_mask * m_pred**2).sum(edge_dims) \
+      / (batch.edge_mask.sum(edge_dims) + delta_M)
+loss = per_slice.mean() + lambda_m * reg.mean()
+loss.backward()
+clip_grad_norm_(model.parameters(), 1.0)
+optimizer.step(); ema.update()
+\end{verbatim}
+
+\paragraph{Reverse sampling, stride one.}
+\begin{verbatim}
+s = sample_from_prior_bank(label=y)
+for k in reversed(range(K)):
+    tau = T - t[k+1]
+    m = ema_model(time=tau, state=s, label=y)
+    xi_hat = m + randn_like(m)
+    dK = b_ref(s) * dt + sigma_ref(s) * sqrt(dt) * xi_hat
+    s = s - incidence_divergence(dK)
+    s = limiter_floor_renorm_substep(s)
+\end{verbatim}
+
+\begin{thebibliography}{9}
+
+\bibitem{main-manuscript}
+Internal manuscript.
+\newblock \emph{Conditioning a measure-valued diffusion on the Wasserstein space}.
+\newblock Project manuscript, \texttt{main.tex}, 2026.
+\newblock See especially Sec.~3 for the continuum Doob h-transform, Girsanov density, and drifted particle dynamics.
+
+\bibitem{eulerian-manuscript}
+Draft manuscript.
+\newblock \emph{A renormalized finite-volume program for the Dirichlet--Ferguson diffusion on the torus}.
+\newblock Project manuscript, \texttt{eulerian\_approx.tex}, 2026.
+\newblock See especially Secs.~3--7 for the grid simplex, grid Dirichlet law, renormalized harmonic mobility, closed form, grid SDE, terminal h-transform, and simulation rule.
+
+\bibitem{c0-note}
+Internal note.
+\newblock \emph{Experiment C0: Weighted Free-Rollout Innovation Matching}.
+\newblock Theory and implementation note, 2026.
+\newblock See especially Secs.~6--9 for Brownian-shift coordinates, conditional innovation matching, and the weighted loss, and Sec.~11 for cache machinery.
+
+\bibitem{experiment11-report}
+Internal progress note.
+\newblock \emph{Experiment 11: Toward a DDPM-like Eulerian h-transform generator for MNIST}.
+\newblock Background, experiment log, and current failure diagnosis, 2026.
+\newblock See especially Secs.~4--8 for the C0--C3 experiments and failure interpretation.
+
+\bibitem{ho2020ddpm}
+Jonathan Ho, Ajay Jain, and Pieter Abbeel.
+\newblock Denoising diffusion probabilistic models.
+\newblock \emph{Advances in Neural Information Processing Systems}, 2020.
+
+\bibitem{anderson1982reverse}
+Brian D. O. Anderson.
+\newblock Reverse-time diffusion equation models.
+\newblock \emph{Stochastic Processes and their Applications}, 12(3):313--326, 1982.
+
+\end{thebibliography}
+
+\end{document}

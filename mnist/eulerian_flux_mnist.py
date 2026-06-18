@@ -2616,6 +2616,7 @@ class MaskedReferenceStepResult:
     valid_innovation_mobility_fraction: float = 1.0
     valid_innovation_noise_energy_fraction: float = 1.0
     substep_states: Tensor | None = None
+    realized_edge_transfers: Tensor | None = None
 
 
 def masked_reference_free_step_torch(
@@ -2630,6 +2631,7 @@ def masked_reference_free_step_torch(
     deterministic: bool = False,
     return_innovations: bool = False,
     return_substep_states: bool = False,
+    return_realized_transfers: bool = False,
     collect_diagnostics: bool = True,
 ) -> MaskedReferenceStepResult:
     """Boundary-correct free reference step with direction-aware limiting.
@@ -2663,6 +2665,7 @@ def masked_reference_free_step_torch(
         raw = None
         mask = None
         sub_states = None
+        realized = None
         if return_innovations:
             n0 = int(config.grid_size)
             raw = torch.empty((0, states.shape[0], 2, n0, n0), device=states.device, dtype=states.dtype)
@@ -2670,7 +2673,10 @@ def masked_reference_free_step_torch(
         if return_substep_states:
             n0 = int(config.grid_size)
             sub_states = torch.empty((0, states.shape[0], n0 * n0), device=states.device, dtype=states.dtype)
-        return MaskedReferenceStepResult(states.clone(), raw, mask, 0, 0, int(substeps), 0.0, 0, 0, 0, substep_states=sub_states)
+        if return_realized_transfers:
+            n0 = int(config.grid_size)
+            realized = torch.empty((0, states.shape[0], 2, n0, n0), device=states.device, dtype=states.dtype)
+        return MaskedReferenceStepResult(states.clone(), raw, mask, 0, 0, int(substeps), 0.0, 0, 0, 0, substep_states=sub_states, realized_edge_transfers=realized)
 
     n = int(config.grid_size)
     if states.shape[1] != n * n:
@@ -2689,6 +2695,7 @@ def masked_reference_free_step_torch(
     raw_chunks: list[Tensor] = []
     mask_chunks: list[Tensor] = []
     substep_state_chunks: list[Tensor] = []
+    realized_transfer_chunks: list[Tensor] = []
     masked_edges = 0
     proposed_edges = 0
     drift_limited_edges = 0
@@ -2725,6 +2732,11 @@ def masked_reference_free_step_torch(
         else:
             raw_flat = None
             mask_flat = None
+        realized_flat = (
+            torch.zeros((base.shape[0], 2 * n * n), device=base.device, dtype=base.dtype)
+            if return_realized_transfers
+            else None
+        )
 
         for edge_class in _edge_classes_torch(n, base.device):
             tails = edge_class.tails
@@ -2786,6 +2798,11 @@ def masked_reference_free_step_torch(
             if return_innovations and raw_flat is not None and mask_flat is not None:
                 raw_flat[:, edge_class.flux_indices] = xi
                 mask_flat[:, edge_class.flux_indices] = ~invalid_for_regression
+            if realized_flat is not None:
+                # Actual forward-oriented edge transfer after direction-aware
+                # limiting.  Positive values move mass tail -> head and are
+                # exactly the edge increments used in the conservative update.
+                realized_flat[:, edge_class.flux_indices] = drift_flux + noise_flux
 
         out = base + state_delta
         before_floor = out
@@ -2807,10 +2824,13 @@ def masked_reference_free_step_torch(
         if return_innovations and raw_flat is not None and mask_flat is not None:
             raw_chunks.append(raw_flat.reshape(base.shape[0], 2, n, n))
             mask_chunks.append(mask_flat.reshape(base.shape[0], 2, n, n))
+        if realized_flat is not None:
+            realized_transfer_chunks.append(realized_flat.reshape(base.shape[0], 2, n, n))
 
     raw_tensor = torch.stack(raw_chunks, dim=0) if raw_chunks else None
     mask_tensor = torch.stack(mask_chunks, dim=0) if mask_chunks else None
     substep_state_tensor = torch.stack(substep_state_chunks, dim=0) if substep_state_chunks else None
+    realized_transfer_tensor = torch.stack(realized_transfer_chunks, dim=0) if realized_transfer_chunks else None
     if (not collect_diagnostics) and mask_tensor is not None:
         proposed_edges = int(mask_tensor.numel())
         masked_edges = int((~mask_tensor).count_nonzero().detach().cpu())
@@ -2844,6 +2864,7 @@ def masked_reference_free_step_torch(
         valid_innovation_mobility_fraction=float(1.0 - mobility_masked_fraction),
         valid_innovation_noise_energy_fraction=float(1.0 - noise_energy_masked_fraction),
         substep_states=substep_state_tensor,
+        realized_edge_transfers=realized_transfer_tensor,
     )
 
 
