@@ -17,6 +17,7 @@ from mnist.experiment12_d0 import (
     d0_unweighted_innovation_loss,
     effective_time_integral,
     make_rate_schedule,
+    load_d0_cache_npz,
     sample_d0_cache_batch,
     save_d0_cache_npz,
     simulate_d0_reverse_generation,
@@ -124,7 +125,13 @@ def test_d0_cache_loss_and_reverse_smoke(tmp_path) -> None:
     assert diag["batch_ess_fraction"] == 1.0
 
     prior_path = tmp_path / "prior_bank.npz"
-    save_d0_cache_npz(cache, tmp_path / "cache.npz")
+    cache_path = tmp_path / "cache.npz"
+    save_d0_cache_npz(cache, cache_path)
+    loaded_cache = load_d0_cache_npz(cache_path, require_complete=True)
+    assert torch.equal(loaded_cache.states, cache.states)
+    assert torch.equal(loaded_cache.path_indices, cache.path_indices)
+    assert loaded_cache.raw_limited_fraction == pytest.approx(cache.raw_limited_fraction)
+    assert loaded_cache.floor_touched_pixels == cache.floor_touched_pixels
     np.savez_compressed(
         prior_path,
         terminal_states=cache.terminal_states.reshape(cache.terminal_states.shape[0], -1),
@@ -373,6 +380,46 @@ def test_d0_physical_edge_loss_and_rollout_diagnostic_smoke() -> None:
     )
     assert rollout["learned_rollout_slices"] == 2
     assert "learned_rollout_depth1_l1_to_start" in rollout
+    assert "learned_rollout_depth2_corr_to_start" in rollout
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the cross-device rollout regression")
+def test_d0_learned_rollout_diagnostic_keeps_indices_on_cuda() -> None:
+    images, labels = synthetic_digit_measures(examples_per_class=1, grid_size=8, seed=445)
+    cfg = _toy_config()
+    d0 = Experiment12D0Config(
+        cache_paths=4,
+        cache_batch_size=2,
+        time_slices_per_path=1,
+        sample_steps=2,
+        reference_substeps=2,
+        teacher_stride_substeps=2,
+        tau_eff=1e-4,
+        d0_target_space="realized-physical",
+        train_steps=0,
+        num_samples=0,
+    )
+    cache = build_d0_training_cache(
+        dataset_images=images,
+        dataset_labels=labels,
+        dynamics_config=cfg,
+        d0_config=d0,
+        device=torch.device("cpu"),
+        rng=np.random.default_rng(445),
+        show_progress=False,
+    )
+    device = torch.device("cuda")
+    model = DirectFluxUNet(cfg, base_channels=4).to(device)
+    rollout = d0_learned_rollout_diagnostic(
+        model,
+        cache,
+        cfg,
+        d0,
+        max_slices=2,
+        block_counts=[1, 2],
+        device=device,
+    )
+    assert rollout["learned_rollout_slices"] == 2
     assert "learned_rollout_depth2_corr_to_start" in rollout
 
 

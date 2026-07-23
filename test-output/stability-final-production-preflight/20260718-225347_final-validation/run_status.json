@@ -1,0 +1,23 @@
+{
+  "artifact_registry_sha256": "9cb741414bfa97ce3eeffadd3b131d624c242968d5041cf879e8eb5f9c91e407",
+  "artifact_registry_size": 2082,
+  "attempt_count": 1,
+  "decision": "optimizer_stability_unresolved",
+  "outcome": "complete",
+  "phase": "preflight",
+  "physical_training_authorized": 0,
+  "physical_training_performed": 0,
+  "probe_bank_status": "not_evaluated",
+  "recommended_next_action": "run the train/selection-only stability pilot",
+  "require_gate": "preflight",
+  "required_gate": "preflight",
+  "required_gate_pass": 1,
+  "sampling_authorized": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-control-stability-confirmation",
+  "schema_version": 1,
+  "skips": [],
+  "stage": "preflight",
+  "status": "complete",
+  "updated_at": "2026-07-18T22:56:05.028193+09:00"
+}

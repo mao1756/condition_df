@@ -1,0 +1,3 @@
+accumulation_steps,learning_rate,passed,teacher_mean_ab_bce,maximum_clip_fraction_observed,physical_training_performed,sampling_performed
+8,3e-05,0,0.6931469324044883,0.0,0,0
+8,1e-05,0,0.6931470818817616,0.0,0,0

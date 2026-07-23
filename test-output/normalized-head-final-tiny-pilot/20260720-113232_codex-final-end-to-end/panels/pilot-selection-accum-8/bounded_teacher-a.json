@@ -1,0 +1,51 @@
+{
+  "binding": {
+    "path_count": 1,
+    "phase": "pilot-selection-accum-8",
+    "physical_training_performed": 0,
+    "role": "a",
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-controls-panel-binding",
+    "schema_version": 1,
+    "scientific_fingerprint": "0cf2bd1fabcc8d63416c2faad9ade1d8959cca92845ace39fabac3c90c5766f8",
+    "start_step": 3000000,
+    "stream_plan_fingerprint": "f65fb72566e99d15b17d6025c91fb9387c60ba6be4d497c4883aa6697dafcbbb",
+    "task": "bounded_teacher"
+  },
+  "identity": {
+    "anchor_ids_sha256": "2eec0f2b0f71ddc492a3964f49d6e28eb40d7eb7b24076a17455467a091311ce",
+    "class_counts": [
+      32,
+      32
+    ],
+    "class_targets_sha256": "f3708e0344d5b46c29b89c73b94708784b82e945eefc1db2b40b3f13c18cb14f",
+    "fingerprint": "252298a553d02b0145879f15bfc814c1b9e1880cf479f8a720b43e14ade0fdb1",
+    "labels_sha256": "5f6de7215c7ec20f11e5dd55f5c9a12e382f80a8b482208c665c24e959a33736",
+    "panel_version": "d0-density-ratio-panel-v1",
+    "path_count": 1,
+    "path_ids_sha256": "9c0b29054ae018321d498bb83ff4f2d037232947302595c2233776f0a9d61891",
+    "phase": "pilot-selection-accum-8",
+    "physical_training_performed": 0,
+    "pixels": 784,
+    "plan_fingerprint": "f65fb72566e99d15b17d6025c91fb9387c60ba6be4d497c4883aa6697dafcbbb",
+    "role": "a",
+    "rows": 64,
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-panel",
+    "schema_version": 1,
+    "state_sha256": "befac9f21c4b14dcaf3b260829337a095fd7aab101f7d57ff22ca6accc05ac33",
+    "strata_sha256": "6e2466fe487fe1c784b83671794440d157f963c734eba0e13fed272139a6028d",
+    "stream_fingerprints": [
+      "eb12d796924d64602316668e1761bb41af4df7210490d5da742625b14194876f"
+    ],
+    "task": "bounded_teacher",
+    "tau_fraction_sha256": "2c3cbff84d5095514a2d2fc89e5914ab4294349a0bfe2495f59f99308c281f7d",
+    "unique_path_count": 1
+  },
+  "physical_training_performed": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-controls-panel-sidecar",
+  "schema_version": 1,
+  "sha256": "6775f707f571549c591889533c1798762520c0ac90a4200d0d0a273df8f952fc",
+  "size": 209027
+}

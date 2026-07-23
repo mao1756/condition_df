@@ -1,0 +1,72 @@
+{
+  "physical_training_performed": 0,
+  "records": {
+    "adamw_ema_conjugacy.json": {
+      "sha256": "b94bc6c6fceae5e6f1a13c5a2a399d9337c9be6b4013534fa3889e5958c97ad2",
+      "size": 2605
+    },
+    "head_equivalence.json": {
+      "sha256": "02838b60a3c3b0c1301facb585feef4dd39579449fb5e43affaddb911dd314bc",
+      "size": 1420
+    },
+    "model_size_forensics.json": {
+      "sha256": "180be662de7906c346d7c56bc22e41726c0ccf7bea80194c48dc10d252174647",
+      "size": 563
+    },
+    "normalized_head_control_gate.json": {
+      "sha256": "28394d6a2ab48ba13f6e46d939bde43c1426aca585df983cc744aa36fd26d4ea",
+      "size": 103962
+    },
+    "normalized_head_decision.json": {
+      "sha256": "06b1722551b5bd04fca8478e6de11de65b8e8dfa6b834a03f7dbc0a2ec792f39",
+      "size": 354
+    },
+    "normalized_head_gradient_forensics.png": {
+      "sha256": "1ce43d3781110659b61b2261f0460850f80c10431bdc2095da86cfa8b5f45541",
+      "size": 102307
+    },
+    "normalized_head_preflight.json": {
+      "sha256": "b3ac73e79941a41446597afe7eab32d6a9da2f7870b0d750aaf9441fda23836a",
+      "size": 5986
+    },
+    "normalized_head_preflight_gate.json": {
+      "sha256": "dc2dbd7e8de8879818d1f22e75fd7fa3240f498515095db30d62cc843f568a90",
+      "size": 6432
+    },
+    "normalized_head_stream_plans.json": {
+      "sha256": "3c1d528a7bacafde720ec2f0533177a3ef2792aa0f7bac9c7da86a9e954a80b2",
+      "size": 2230
+    },
+    "paired_ratio_stream_replay.json": {
+      "sha256": "d5cb0aa89ecd455ce54e3e6ed6e7f9de74b6745b36022cc86f0396b29f9b7be2",
+      "size": 19270
+    },
+    "paired_ratio_structural_law_certificate.json": {
+      "sha256": "2b1a9c26c5198de97c7915f81ffcd487c7cad84e94df24de345b34a4b8707086",
+      "size": 703
+    },
+    "parent_head_gradient_forensics.csv": {
+      "sha256": "c612744d8f679c5596d8590b811a4d1026b0735e6b7548db18264e79fc82865d",
+      "size": 2886
+    },
+    "parent_head_layerwise_gradients.csv": {
+      "sha256": "563f9e5af04e7f28290572c6dc1134211541136f7b91780db407c7b04f5e89e5",
+      "size": 51946
+    },
+    "parent_provenance.json": {
+      "sha256": "bf67e631bf7f116f873924d9e1fc156dfc65ca2ac63cc7c1921d5038d76c4e86",
+      "size": 81566
+    },
+    "run_manifest.json": {
+      "sha256": "74691a1bc6c6da2f019d115169a19d343455494d6ac72cbe2e6ea5b2070c4ab2",
+      "size": 8743
+    }
+  },
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-head-confirmation-artifact-registry",
+  "schema_version": 1,
+  "terminal_files_excluded_to_avoid_self_reference": [
+    "artifact_registry.json",
+    "run_status.json"
+  ]
+}

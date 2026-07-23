@@ -1,0 +1,31 @@
+{
+  "backbone_gradient_relative_error": 7.406042935799059e-16,
+  "coordinate_version": "d0-spatial-sum-to-mean-head-coordinate-v1",
+  "device": {
+    "backbone_gradient_relative_error": 2.522577342674579e-06,
+    "bce_max_abs_error": 0.0,
+    "edge_score_relative_error": 1.0475623737306776e-06,
+    "flux_relative_error": 7.977370295497324e-07,
+    "head_gradient_scale_relative_error": 1.390966391443148e-06,
+    "logit_max_abs_error": 2.9802322387695312e-08,
+    "state_gradient_relative_error": 1.056197451598659e-06
+  },
+  "device_type": "cuda",
+  "float64": {
+    "backbone_gradient_relative_error": 7.406042935799059e-16,
+    "bce_max_abs_error": 0.0,
+    "edge_score_relative_error": 4.277402520668476e-16,
+    "flux_relative_error": 3.193614518794246e-16,
+    "head_gradient_scale_relative_error": 1.1072481653516083e-15,
+    "logit_max_abs_error": 2.7755575615628914e-17,
+    "state_gradient_relative_error": 4.201401055582537e-16
+  },
+  "head_gradient_scale_relative_error": 1.1072481653516083e-15,
+  "model_version": "d0-boundary-smooth-potential-unet-mean-head-v2",
+  "parent_cuda_backbone_gradient_relative_error_advisory": 1.0962763593926131e-05,
+  "parent_cuda_head_gradient_scale_relative_error_advisory": 1.6584429747363068e-05,
+  "physical_training_performed": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-head-confirmation-head-equivalence",
+  "schema_version": 1
+}

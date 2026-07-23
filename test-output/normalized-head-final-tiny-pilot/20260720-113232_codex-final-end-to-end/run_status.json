@@ -1,0 +1,27 @@
+{
+  "artifact_registry_sha256": "be533dfd7083cd57c6fc628540e9c01403e4e0f53f0ce68db7c6ef28fb531609",
+  "artifact_registry_size": 15724,
+  "attempt_count": 1,
+  "decision": "classification_coordinate_repair_unresolved",
+  "outcome": "complete",
+  "phase": "pilot",
+  "physical_training_authorized": 0,
+  "physical_training_performed": 0,
+  "recommended_next_action": "investigate a separately gated H1-like function-step trust region",
+  "require_gate": "none",
+  "required_gate": "none",
+  "required_gate_pass": 1,
+  "sampling_authorized": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-head-confirmation",
+  "schema_version": 1,
+  "skips": [
+    {
+      "reason": "no normalized-head profile qualified",
+      "stage": "confirmation"
+    }
+  ],
+  "stage": "pilot",
+  "status": "complete",
+  "updated_at": "2026-07-20T11:33:31.248278+09:00"
+}

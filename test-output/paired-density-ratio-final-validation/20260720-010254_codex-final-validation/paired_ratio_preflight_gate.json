@@ -1,0 +1,161 @@
+{
+  "claim_scope": "exact unbiased paired-mixture BCE and deterministic accumulation",
+  "evaluation_status": "evaluated",
+  "gate": "paired_ratio_preflight",
+  "passed": 1,
+  "physical_training_performed": 0,
+  "sampling_performed": 0,
+  "subchecks": {
+    "accumulation_gradient_max_error": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 1e-06,
+      "value": 0.0
+    },
+    "adaptive_loss_scaling": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 0,
+      "value": 0
+    },
+    "boundary_operator_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "candidate_order_invariance_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "class_balance_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "common_gamma_coupling_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "complete": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "device_smoke_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "dirichlet_marginals_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "expanded_gradient_max_error": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 1e-06,
+      "value": 5.551115123125783e-17
+    },
+    "expanded_loss_max_error": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 1e-07,
+      "value": 0.0
+    },
+    "finite": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "fresh_panel_isolation_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "loss_algebra_max_error": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 1e-12,
+      "value": 0.0
+    },
+    "mixture_coefficients_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "parent_loss_scale_reused": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "parent_provenance_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "physical_training_performed": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 0,
+      "value": 0
+    },
+    "preflight_confidence": {
+      "operator": ">=",
+      "passed": 1,
+      "threshold": 0.99,
+      "value": 0.99
+    },
+    "preflight_paths": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 128,
+      "value": 128
+    },
+    "sampling_performed": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 0,
+      "value": 0
+    },
+    "simultaneous_directional_gradient_intervals_contain_zero": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "simultaneous_loss_interval_contains_zero": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "stream_replay_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "time_strata_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    }
+  },
+  "variance_forensics_gate_eligible": 0
+}

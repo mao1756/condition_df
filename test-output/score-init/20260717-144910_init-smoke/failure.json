@@ -1,0 +1,8 @@
+{
+  "at": "2026-07-17T14:49:15.797117+09:00",
+  "message": "test-output\\score-init\\20260717-144910_init-smoke\\cache\\preflight\\cache_index.json",
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-dirichlet-score-learnability-failure",
+  "schema_version": 1,
+  "type": "FileNotFoundError"
+}

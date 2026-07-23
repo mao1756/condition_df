@@ -1,0 +1,389 @@
+{
+  "passed": 1,
+  "physical_training_performed": 0,
+  "records": [
+    {
+      "record": {
+        "accumulation_level": 2,
+        "canonical_microbatch_fingerprints": [
+          "ba05e30521ce0aa1e566768c263cd618d513a355f2a9ae11c1bd2f3966aba06f",
+          "a6cafff7525a517c4f9e4024cf74cf48a8405b34c0361542e409d26f83985404"
+        ],
+        "derivation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "fingerprint": "d3abeacc01a6185c6f7a52fd0de62d1cd707307fe7550e4a2a7eeb4569b824ab",
+        "optimizer_step": 1,
+        "phase": "pilot",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-paired-mixture-replay",
+        "schema_version": 1,
+        "stream_fingerprint": "f18cb407f04497a49480168371f8c9059777863d39ee27f9c02e9f50358c06e3",
+        "task": "bounded_teacher"
+      },
+      "verification": {
+        "actual_fingerprint": "d3abeacc01a6185c6f7a52fd0de62d1cd707307fe7550e4a2a7eeb4569b824ab",
+        "expected_fingerprint": "d3abeacc01a6185c6f7a52fd0de62d1cd707307fe7550e4a2a7eeb4569b824ab",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "accumulation_level": 4,
+        "canonical_microbatch_fingerprints": [
+          "639d110b00ef3ec6e1b71451a07990a599f4b18ca3d9fdb710af0969717ef600",
+          "e08fe397ac3c86502102e360eb3e42542bb1b702f67db42b4965ac1c58dcb47e",
+          "b0a97265435c547d50c6a3938059bd60af449038b27c7a45f29e25934d5b59fc",
+          "f1fc469a569fba1f1efa2bcc6f286f7e1c9d3d652b86ad2d4da55cf3bbb4457b"
+        ],
+        "derivation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "fingerprint": "37fb04e548220e256f93cf3aea03811a391ce0a7f277e6cca6df239f2a7786b2",
+        "optimizer_step": 17,
+        "phase": "pilot",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-paired-mixture-replay",
+        "schema_version": 1,
+        "stream_fingerprint": "2be9c419bb0c85f5e4d3ecaea878df8d3dd23d9fc955026f141f444c098f1a0f",
+        "task": "bounded_teacher"
+      },
+      "verification": {
+        "actual_fingerprint": "37fb04e548220e256f93cf3aea03811a391ce0a7f277e6cca6df239f2a7786b2",
+        "expected_fingerprint": "37fb04e548220e256f93cf3aea03811a391ce0a7f277e6cca6df239f2a7786b2",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "accumulation_level": 8,
+        "canonical_microbatch_fingerprints": [
+          "c90e6ce135bad694ee386cb1ae39c0a6c7ef05d54cd240ded9e37231cadd6c47",
+          "2c4a4783cede5088f30de2b225259c61ca0815db33b3e17fe6fc2b425c15df91",
+          "00c18b4f990169ac945c9f0e88a06cc63e0788f2d6df135a7ca252b72985a7b7",
+          "e33a4474e78583f6b9f247972388f0b60deee4e4923e40ea795a965a13aa4153",
+          "574cd2edb802e082c674adf443b9ef889a1919297b5b43179b4372cb60e5f6bb",
+          "8e40b54a2c2225c6a1410430b1be10d44182b9072c478d3bbc4ac95bc8d15b6e",
+          "5d597601928c302dc17c0b9e4071f7148c57c5b991abbede7dafb247c3050684",
+          "1e3ed970669c9a42db63f829159cf8761bcb29d6571a776e5dc638e369f137b3"
+        ],
+        "derivation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "fingerprint": "4e0f58ef7fa2a757f22194b79ed5c8787e1708dd917d5ab8fbffb7f099b330c6",
+        "optimizer_step": 31,
+        "phase": "pilot",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-paired-mixture-replay",
+        "schema_version": 1,
+        "stream_fingerprint": "049e5ee26b5759bcc9bcc86a699ca11d4c68138f134b347f19de4d8f9b572700",
+        "task": "bounded_teacher"
+      },
+      "verification": {
+        "actual_fingerprint": "4e0f58ef7fa2a757f22194b79ed5c8787e1708dd917d5ab8fbffb7f099b330c6",
+        "expected_fingerprint": "4e0f58ef7fa2a757f22194b79ed5c8787e1708dd917d5ab8fbffb7f099b330c6",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "accumulation_level": 2,
+        "canonical_microbatch_fingerprints": [
+          "bbbcc31c92879abca53bf5ae9a379709843af3b9e54daa632a2778b97b0346de",
+          "ef79c7ed2721f9a808b52c6b92f8864fa90b72cbcc3e2202319c2eab84be20f1"
+        ],
+        "derivation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "fingerprint": "80e6d4d9fffde29785312b0ff0c47f940556c919ee70604399fcadec3d1b650b",
+        "optimizer_step": 1,
+        "phase": "pilot",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-paired-mixture-replay",
+        "schema_version": 1,
+        "stream_fingerprint": "5ffe9e6337fa8a1cb449fbfc6f285fb3001a06c9ac8064faab64573ae8d2704b",
+        "task": "dirichlet_null"
+      },
+      "verification": {
+        "actual_fingerprint": "80e6d4d9fffde29785312b0ff0c47f940556c919ee70604399fcadec3d1b650b",
+        "expected_fingerprint": "80e6d4d9fffde29785312b0ff0c47f940556c919ee70604399fcadec3d1b650b",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "accumulation_level": 4,
+        "canonical_microbatch_fingerprints": [
+          "d28157aae5c555c0780176b426035833dbf2babb84e2fa0403c9fd900384ea53",
+          "545fa5354b55df6b91e1edf7765cc700d749fae9a1edb4b77dc55dbb8715265d",
+          "4652afe4b624ddfa8bf0d1f08955b45c7cab4c013a53516088fe65c68cc7bf6e",
+          "1c046e6970e386d76afaafad382ed7afee6e460fcd5b1cf4b06f36db934916a7"
+        ],
+        "derivation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "fingerprint": "f87b253f0512879777e8b1fd906917aaea743ab2ed9c1ae836a67f17e9571e36",
+        "optimizer_step": 17,
+        "phase": "pilot",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-paired-mixture-replay",
+        "schema_version": 1,
+        "stream_fingerprint": "30be19e6ccee9a245aeb3e972188030f46b2eb44bb641d22f3bf74a3759ddf95",
+        "task": "dirichlet_null"
+      },
+      "verification": {
+        "actual_fingerprint": "f87b253f0512879777e8b1fd906917aaea743ab2ed9c1ae836a67f17e9571e36",
+        "expected_fingerprint": "f87b253f0512879777e8b1fd906917aaea743ab2ed9c1ae836a67f17e9571e36",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "accumulation_level": 8,
+        "canonical_microbatch_fingerprints": [
+          "8d5347fa1c947aeec5cf4ee7a4baf12dbf9c722b01e5c1cf4384c58eff524860",
+          "90b68a9da00f34d092a5e85120321bf40fd32c0fdd879a75e730388f7cba64db",
+          "3e671b6851a4e7be7f089158dce0133f97c32b37dbcac097755d118d197a6e3b",
+          "dfd1e0ac26da5fc95ae74a8d7597abd956ecada746ff756d4295f0e6c9986af3",
+          "5be3d43b45031747b48120877206ff076f40c8c262a50376937e39028433f015",
+          "df30dee65979a11e4f3c2d22df73eccfa8bc1925c5fae2018b3a9c085842bf87",
+          "090de9e0193c4cb737401751c860807805b630ab9aaf20a647d25f39daf62e4f",
+          "26bf61e13a5578a4e921c3a7e65d16bf0eab7dd13f56a4b79b99d7e99df377fa"
+        ],
+        "derivation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "fingerprint": "21008119c93d50de0d62de2b97e94a10dbac90e917614878a8c09b53e62fa1d9",
+        "optimizer_step": 31,
+        "phase": "pilot",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-paired-mixture-replay",
+        "schema_version": 1,
+        "stream_fingerprint": "2b7842eba0beb4329b114a6a08534f8c4e8d5472c468f0b6122dcbdc0c79cdc3",
+        "task": "dirichlet_null"
+      },
+      "verification": {
+        "actual_fingerprint": "21008119c93d50de0d62de2b97e94a10dbac90e917614878a8c09b53e62fa1d9",
+        "expected_fingerprint": "21008119c93d50de0d62de2b97e94a10dbac90e917614878a8c09b53e62fa1d9",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "accumulation_level": 2,
+        "canonical_microbatch_fingerprints": [
+          "afcccfffe51d05e46276e904740fa81a365b4b24aec66188c89d2b05f54df6c2",
+          "00bf78581c93a6cabbefc9edcf94cce8ce181c515d99a1785ad0871ef3bce2fa"
+        ],
+        "derivation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "fingerprint": "e40dba128f8e7f22a449e0137604a1d9e0e0c8e5c37f5c6c3f6a0bef2de56769",
+        "optimizer_step": 1,
+        "phase": "confirmation",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-paired-mixture-replay",
+        "schema_version": 1,
+        "stream_fingerprint": "279b169cb4cb3ecea678c18861174a8269edce689cf1a423b584714c5af91872",
+        "task": "bounded_teacher"
+      },
+      "verification": {
+        "actual_fingerprint": "e40dba128f8e7f22a449e0137604a1d9e0e0c8e5c37f5c6c3f6a0bef2de56769",
+        "expected_fingerprint": "e40dba128f8e7f22a449e0137604a1d9e0e0c8e5c37f5c6c3f6a0bef2de56769",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "accumulation_level": 4,
+        "canonical_microbatch_fingerprints": [
+          "1fa4fedab287cf901e8159a73aff7d3186ce6f24b3ec37b57a53f74e4e5b33d2",
+          "8fcf913bcd029df362aa7dd541dd6a71f6bc18a3f6bca7a31537f62bf9e712ec",
+          "fc254937dfb0e8683496bbf86f6a4d3d30e5cd3c8af95bdb71a4439684a2b5c6",
+          "0f96a79fad60833b23a76d5dc26411d722e0e61cc4e863783210ed92c60be5ce"
+        ],
+        "derivation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "fingerprint": "2a81116b17b966aeabcee2c3af89f4ac625a9576f56414c774fe972d94c091db",
+        "optimizer_step": 17,
+        "phase": "confirmation",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-paired-mixture-replay",
+        "schema_version": 1,
+        "stream_fingerprint": "fa430919c4f71893c1dcd5d20bd87de1c8dfde6d22e43e3641dccf7aa9fb5eab",
+        "task": "bounded_teacher"
+      },
+      "verification": {
+        "actual_fingerprint": "2a81116b17b966aeabcee2c3af89f4ac625a9576f56414c774fe972d94c091db",
+        "expected_fingerprint": "2a81116b17b966aeabcee2c3af89f4ac625a9576f56414c774fe972d94c091db",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "accumulation_level": 8,
+        "canonical_microbatch_fingerprints": [
+          "ac219baa540f088575c01e59feeafa6bfe1af08a85c64a482024df7aad3291dd",
+          "b3a7bd10a1196223faab57118350c47709e6025b9a0cdf253556d469e30bbc9f",
+          "6c067842c27716ea03b65bee380fd6c5199f142c90cca82ac89c7d624bbc30a1",
+          "75ea73626b97ab809273eebb7d38bc130a072c1e920abaae5b07c00453923eb6",
+          "7fdff222dd1fa9baf0e0d34c4e7dfa7b0b9c278f4b871741c6b6d8be0632102f",
+          "1ec49595a5ec8872687cecef4186d7795f5166989fc3f7ada68742eea70ab321",
+          "a0b5f3172491938a4b5b0d42a5b007de3524a111ae1909cda3a8848958c7783a",
+          "57368578a1387819fa5d0b910e7f446a0d9f1fda5c250376153b15be2ef4e04e"
+        ],
+        "derivation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "fingerprint": "0d7a5496d1ba90488ff1435d98edf1c0021ece8d3ea776c6b8c1de1d352ea86b",
+        "optimizer_step": 31,
+        "phase": "confirmation",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-paired-mixture-replay",
+        "schema_version": 1,
+        "stream_fingerprint": "ee66bcb6a1da8924a13c86122a64ed5814bc315ff759dbfb6ca608f4098cb85f",
+        "task": "bounded_teacher"
+      },
+      "verification": {
+        "actual_fingerprint": "0d7a5496d1ba90488ff1435d98edf1c0021ece8d3ea776c6b8c1de1d352ea86b",
+        "expected_fingerprint": "0d7a5496d1ba90488ff1435d98edf1c0021ece8d3ea776c6b8c1de1d352ea86b",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "accumulation_level": 2,
+        "canonical_microbatch_fingerprints": [
+          "bc139fbe522a795c199ca527e48f2a062bbc051cc1719c605b68652c3f21d2e7",
+          "114f843dc185249b935cd51d34fc1e2fa5a534b751b35e2cc0ee98c0f1ecc96e"
+        ],
+        "derivation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "fingerprint": "8fb505919086a1f2bea2999718efefca8182ab1f2b8872337bb0f0c13cfc108d",
+        "optimizer_step": 1,
+        "phase": "confirmation",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-paired-mixture-replay",
+        "schema_version": 1,
+        "stream_fingerprint": "2cf7f99d51e1887dbe5e50dc305e61be7fb2872cc9a16dec72c159a47dc47363",
+        "task": "dirichlet_null"
+      },
+      "verification": {
+        "actual_fingerprint": "8fb505919086a1f2bea2999718efefca8182ab1f2b8872337bb0f0c13cfc108d",
+        "expected_fingerprint": "8fb505919086a1f2bea2999718efefca8182ab1f2b8872337bb0f0c13cfc108d",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "accumulation_level": 4,
+        "canonical_microbatch_fingerprints": [
+          "308b94fd1a8a99b7187c025ceda42ca1048448af1a4cb1ebd6bd2b52ca8072fc",
+          "623ceeb7489fd8d8a5ffec617427d3851e4e61a192609eb7eface756ef190a8a",
+          "d8b80837b26a3196f9c0a3573bfec4da77e545b676a62db5fde8cb4cb938e8e0",
+          "273dd84798cd9599999987c887b2f667564b1b61995dbc2d43e16fb8fe82283b"
+        ],
+        "derivation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "fingerprint": "0709f69094a7c95efbca0ecdef24d477c34cf10d0dd6ffafedd1ef7ee618e840",
+        "optimizer_step": 17,
+        "phase": "confirmation",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-paired-mixture-replay",
+        "schema_version": 1,
+        "stream_fingerprint": "46a94694ea32c2afce19a9915e0acd13907f7c2c1e39e3cfd7674881367a833c",
+        "task": "dirichlet_null"
+      },
+      "verification": {
+        "actual_fingerprint": "0709f69094a7c95efbca0ecdef24d477c34cf10d0dd6ffafedd1ef7ee618e840",
+        "expected_fingerprint": "0709f69094a7c95efbca0ecdef24d477c34cf10d0dd6ffafedd1ef7ee618e840",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "accumulation_level": 8,
+        "canonical_microbatch_fingerprints": [
+          "e064e417e4af966772300a9a503450009a45b22593dc4967ae6a92fa563a6560",
+          "78f90a1d9481d5ce6da88da4305c558399a1dc8e4c92ed11272cdde278ff6422",
+          "1a44bedbdb9f22c5d999d938a0b3589e35109aecbc3e927c06e93346cf82d15b",
+          "843c6f577354ce4a0ba95fd524b94efa5265a016dfb835758fbc1a86ca2ce7b1",
+          "7a4240d05f60ec0a63fc642266eed41d8a58c6050c19aba6569d4bfff8c42b45",
+          "3b703676bc6ebc3bbb3edd284d4f28a9d0fb1d73167e581b18227336b9e01814",
+          "3eded9254cb3a03fd8d05ed3712b56647c723ead3d24e1b3130dab344a685806",
+          "58ca3be03a8f560b491a615e1bcfd794479e53174411cb7f2a2659c2438422ac"
+        ],
+        "derivation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "fingerprint": "798ce155fd25be698ae43112bdff9ddd8e3db7cff597623b999798a60ceb7776",
+        "optimizer_step": 31,
+        "phase": "confirmation",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-paired-mixture-replay",
+        "schema_version": 1,
+        "stream_fingerprint": "29298f403b1905e2b1db3f4f4ff5ac72eceed6ae3f60e26a7cf69cfb00499432",
+        "task": "dirichlet_null"
+      },
+      "verification": {
+        "actual_fingerprint": "798ce155fd25be698ae43112bdff9ddd8e3db7cff597623b999798a60ceb7776",
+        "expected_fingerprint": "798ce155fd25be698ae43112bdff9ddd8e3db7cff597623b999798a60ceb7776",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    }
+  ],
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-head-confirmation-stream-replay",
+  "schema_version": 1
+}

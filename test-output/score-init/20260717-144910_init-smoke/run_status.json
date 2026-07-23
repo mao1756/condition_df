@@ -1,0 +1,15 @@
+{
+  "attempt_count": 1,
+  "error": "test-output\\score-init\\20260717-144910_init-smoke\\cache\\preflight\\cache_index.json",
+  "outcome": "implementation_error",
+  "phase": "preflight",
+  "require_gate": "none",
+  "required_gate": "none",
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-dirichlet-score-learnability",
+  "schema_version": 1,
+  "scientific_fingerprint": "6ace97e1674e4bf34e8547b99a4a598a8bb45113e76b1d360c72d1d7eb8e7821",
+  "stage": "report",
+  "status": "failed",
+  "updated_at": "2026-07-17T14:49:15.807787+09:00"
+}

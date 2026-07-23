@@ -1,0 +1,56 @@
+{
+  "physical_training_performed": 0,
+  "records": {
+    "control_stability_decision.json": {
+      "sha256": "fdac63dc5475207a3b17b542f38f517d8d251e1599e585636e0c314d7b579f89",
+      "size": 321
+    },
+    "forensics/forensic_replay.json": {
+      "sha256": "566b0f23fa2e875eb37f153ae19af5444e505884dbfb6b94baa95810bb075d04",
+      "size": 6562
+    },
+    "forensics/forensic_risk_replay.csv": {
+      "sha256": "e73b6fc41d1f8ad7f772b592223c14a47b188bf4f5326be216498508be46f255",
+      "size": 1786
+    },
+    "parent_forensic_replay.json": {
+      "sha256": "566b0f23fa2e875eb37f153ae19af5444e505884dbfb6b94baa95810bb075d04",
+      "size": 6562
+    },
+    "parent_provenance.json": {
+      "sha256": "924bf1afa12b2354b6daaefc9e547792fd30956b8b359e3e20152fd4d4a53417",
+      "size": 39260
+    },
+    "run_manifest.json": {
+      "sha256": "9c2d953ecda2d5287efd6d2fec25c3009cdcc0caea46774ae5fa9e15622dcf39",
+      "size": 6074
+    },
+    "stability_confirmation_report.json": {
+      "sha256": "864f092fbe37b1211c045bc0294711180b5ae740a7dbad19a847a97ab1f5d132",
+      "size": 142197
+    },
+    "stability_preflight_gate.json": {
+      "sha256": "98cfb4a6276725ad2a9e1cfd5bdd163feab68d6bd450516716a8dcc5bb08d20b",
+      "size": 85473
+    },
+    "stein_identity_preflight.json": {
+      "sha256": "9be6dd7ced06028dbd9b620be929170456f88c5cdfcf739b5538c7622e54a9e4",
+      "size": 37607
+    },
+    "stein_identity_preflight_gate.json": {
+      "sha256": "aff0597cec2dd6e5fc4e1123df9ec1a22e13da709fb1b0fe6fc8c900bddbb8f2",
+      "size": 2362
+    },
+    "stream_plan.json": {
+      "sha256": "47ff89073c9f9356c0cf00095db81fe55e629d53764af17a863c0729e8df9cdf",
+      "size": 712
+    }
+  },
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-control-stability-confirmation-artifact-registry",
+  "schema_version": 1,
+  "terminal_files_excluded_to_avoid_self_reference": [
+    "artifact_registry.json",
+    "run_status.json"
+  ]
+}

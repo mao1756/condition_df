@@ -1,0 +1,23 @@
+{
+  "artifact_registry_sha256": "266c46cf8de9fd999a8c0ae47a1751b6885f80d60e1db70958dd02ae1dccceca",
+  "artifact_registry_size": 1932,
+  "attempt_count": 1,
+  "decision": "optimizer_stability_unresolved",
+  "outcome": "complete",
+  "phase": "preflight",
+  "physical_training_authorized": 0,
+  "physical_training_performed": 0,
+  "probe_bank_status": "not_evaluated",
+  "recommended_next_action": "investigate an explicit function-space trust or coercivity constraint",
+  "require_gate": "preflight",
+  "required_gate": "preflight",
+  "required_gate_pass": 1,
+  "sampling_authorized": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-control-stability-confirmation",
+  "schema_version": 1,
+  "skips": [],
+  "stage": "preflight",
+  "status": "complete",
+  "updated_at": "2026-07-18T22:36:07.996629+09:00"
+}

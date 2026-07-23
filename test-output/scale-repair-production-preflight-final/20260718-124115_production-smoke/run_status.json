@@ -1,0 +1,23 @@
+{
+  "artifact_registry_sha256": "4133c88ab6f9c19c27e97e2b268f0c8e3a6627d14f867f4fba3ea427bab09aea",
+  "artifact_registry_size": 5407,
+  "attempt_count": 1,
+  "decision": "controls_not_run",
+  "outcome": "complete",
+  "phase": "preflight",
+  "physical_training_authorized": 0,
+  "physical_training_performed": 0,
+  "probe_bank_status": "not_evaluated",
+  "recommended_next_action": "resume this run with --stage all",
+  "require_gate": "preflight",
+  "required_gate": "preflight",
+  "required_gate_pass": 1,
+  "sampling_authorized": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-control-scale-repair",
+  "schema_version": 1,
+  "skips": [],
+  "stage": "preflight",
+  "status": "complete",
+  "updated_at": "2026-07-18T12:41:23.666413+09:00"
+}

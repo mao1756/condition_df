@@ -1,0 +1,32 @@
+{
+  "batch_bin_counts": [
+    8,
+    8,
+    8,
+    8,
+    32
+  ],
+  "batch_size": 64,
+  "bin_counts": [
+    4,
+    4,
+    4,
+    4,
+    16
+  ],
+  "derivation_version": "d0-density-ratio-balanced-stream-v1",
+  "examples_per_class": 32,
+  "fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+  "grid_size": 28,
+  "horizon": 0.00042517006802721087,
+  "label": 3,
+  "model_version": "d0-boundary-smooth-potential-unet-v1",
+  "objective_version": "d0-balanced-raw-logit-bce-v1",
+  "physical_training_performed": 0,
+  "root_seed": 260821,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-stream-plan",
+  "schema_version": 1,
+  "teacher_epsilon": 0.5,
+  "teacher_version": "d0-bounded-four-anchor-mixture-v1"
+}

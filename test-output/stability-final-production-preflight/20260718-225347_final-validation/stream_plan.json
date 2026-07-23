@@ -1,0 +1,32 @@
+{
+  "batch_bin_counts": [
+    8,
+    8,
+    8,
+    8,
+    32
+  ],
+  "batch_size": 64,
+  "bin_counts": [
+    4,
+    4,
+    4,
+    4,
+    16
+  ],
+  "clusters_per_step": 2,
+  "derivation_version": "d0-stateless-cluster-stream-v1",
+  "fingerprint": "6330fce36d197c5f9e939f018d42f65eb6b125b0f11b0060096606b249170e3e",
+  "grid_size": 28,
+  "horizon": 0.00042517006802721087,
+  "label": 3,
+  "physical_training_performed": 0,
+  "probe_version": "d0-randomized-orthogonal-hadamard-v1",
+  "probes_per_bank": 4,
+  "root_seed": 260801,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-control-stream",
+  "schema_version": 1,
+  "teacher_epsilon": 0.5,
+  "teacher_version": "d0-bounded-four-anchor-mixture-v1"
+}

@@ -1,19 +1,24 @@
 from __future__ import annotations
 
-r"""Experiment 12 / D0: forward-from-data reverse innovation matching.
+r"""Experiment 12 / D0: forward-from-data reverse-kernel matching.
 
 This module is intentionally separate from ``experiment11_c0.py``.  It reuses
 only the shared finite-volume reference integrator and the U-Net architecture.
-The D0 cache starts from lambda-mixed data, stores raw Gaussian edge innovations
-before limiting, keys slices at the later noised state, and trains an
-unweighted masked MSE for the conditional block innovation mean.
+The D0 cache starts from lambda-mixed data and keys slices at the later noised
+state.  The strict ``doob-physical-residual`` mode regresses the projected,
+realized reverse transfer after subtracting the positive reverse reference
+drift.  Legacy raw-innovation and physical target spaces remain available as
+explicit alternatives.
 """
 
 import argparse
 import csv
 import json
 import math
+import os
+import tempfile
 import time
+import warnings
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
@@ -53,6 +58,28 @@ from mnist.eulerian_flux_mnist import (
     update_ema_state,
 )
 from mnist.weighted_point_cloud import normalize_images_to_measures
+
+
+_D0_REFERENCE_INTEGRATOR = "masked_reference_free_step_torch"
+_D0_REFERENCE_INTEGRATOR_VERSION = 1
+_D0_STRICT_PRIOR_PROVENANCE_FIELDS = frozenset(
+    {
+        "rate_schedule",
+        "grid_size",
+        "sample_steps",
+        "substeps",
+        "stride_substeps",
+        "horizon",
+        "lambda_mix",
+        "mass_floor",
+        "limiter_fraction",
+        "edge_alpha_mode",
+        "edge_alpha_value",
+        "cache_build_mode",
+        "reference_integrator",
+        "reference_integrator_version",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -205,6 +232,9 @@ class D0TrainingCache:
     trajectory_window_states: Tensor | None = None
     trajectory_window_valid: Tensor | None = None
     trajectory_window_depths: Tensor | None = None
+    floor_touched_pixels: int = 0
+    floor_proposed_pixels: int = 0
+    floor_touched_fraction: float = float("nan")
 
     @property
     def size(self) -> int:
@@ -243,6 +273,24 @@ class D0GenerationResult:
     sample_start_substep: int = -1
     reverse_blocks_requested: int = -1
     reverse_blocks_executed: int = 0
+    nonfinite_edges: int = 0
+    floor_touched_pixels: int = 0
+    floor_proposed_pixels: int = 0
+    floor_touched_fraction: float = 0.0
+    floor_correction_l1: float = 0.0
+    renorm_correction_l1: float = 0.0
+    max_simplex_mass_error: float = 0.0
+
+
+@dataclass(frozen=True)
+class DirectDoobReverseStepResult:
+    """One direct reverse-reference substep in physical edge coordinates."""
+
+    states: Tensor
+    free_delta: Tensor
+    learned_delta: Tensor
+    noise_delta: Tensor
+    diagnostics: dict[str, float | Tensor]
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +498,7 @@ def _sample_cache_start_substeps(
 
 def _project_d0_edge_field(field: Tensor, dynamics_config: DirectFluxMNISTConfig, d0_config: Experiment12D0Config) -> Tensor:
     space = _normalize_d0_target_space(d0_config.d0_target_space)
-    if space in {"projected-edge", "physical-total", "physical-residual", "node-delta"}:
+    if space in {"projected-edge", "physical-total", "physical-residual", "doob-physical-residual", "node-delta"}:
         return project_edge_flux_torch(field, grid_size=int(dynamics_config.grid_size))
     if space in {"realized-physical", "realized-residual"}:
         return field
@@ -469,6 +517,14 @@ def _normalize_d0_target_space(value: str) -> str:
         return "realized-physical"
     if space in {"realized-residual", "pathwise-residual", "realized-physical-residual"}:
         return "realized-residual"
+    if space in {
+        "doob-physical-residual",
+        "doob-residual",
+        "direct-doob",
+        "direct-doob-residual",
+        "direct-physical-residual",
+    }:
+        return "doob-physical-residual"
     if space in {"node", "node-delta", "state-delta"}:
         return "node-delta"
     if space == "projected-edge":
@@ -477,11 +533,66 @@ def _normalize_d0_target_space(value: str) -> str:
         return "raw"
     if space in {"divergence", "node-divergence"}:
         return "divergence"
-    raise ValueError("d0_target_space must be raw, projected-edge, divergence, physical-total, physical-residual, realized-physical, realized-residual, or node-delta")
+    raise ValueError("d0_target_space must be raw, projected-edge, divergence, physical-total, physical-residual, realized-physical, realized-residual, doob-physical-residual, or node-delta")
 
 
 def _d0_is_physical_space(value: str) -> bool:
-    return _normalize_d0_target_space(value) in {"physical-total", "physical-residual", "realized-physical", "realized-residual", "node-delta"}
+    return _normalize_d0_target_space(value) in {"physical-total", "physical-residual", "realized-physical", "realized-residual", "doob-physical-residual", "node-delta"}
+
+
+def _d0_is_direct_doob_space(value: str) -> bool:
+    return _normalize_d0_target_space(value) == "doob-physical-residual"
+
+
+def _validate_direct_doob_config(d0_config: Experiment12D0Config) -> None:
+    """Reject settings that change the direct Doob residual contract.
+
+    This mode is deliberately narrow while its signs and reference-kernel
+    semantics are being validated: the cache must contain one exact realized
+    elementary transfer, and the loss must be pure residual regression.  The
+    checks are opt-in because all legacy D0 target spaces keep their historical
+    behavior.
+    """
+
+    if not _d0_is_direct_doob_space(d0_config.d0_target_space):
+        return
+    errors: list[str] = []
+    cache_mode = str(d0_config.cache_build_mode).strip().lower().replace("_", "-")
+    if cache_mode not in {"substep", "exact-substep", "exact"}:
+        errors.append("cache_build_mode must be substep")
+    if int(d0_config.teacher_stride_substeps) != 1:
+        errors.append("teacher_stride_substeps must be 1")
+    if _physical_sampler_noise_mode(d0_config.physical_sampler_noise_mode) != "reference":
+        errors.append("physical_sampler_noise_mode must be reference")
+    zero_weights = {
+        "eta_l2_weight": d0_config.eta_l2_weight,
+        "invalid_output_l2_weight": d0_config.invalid_output_l2_weight,
+        "curl_loss_weight": d0_config.curl_loss_weight,
+        "edge_laplacian_loss_weight": d0_config.edge_laplacian_loss_weight,
+        "state_delta_loss_weight": d0_config.state_delta_loss_weight,
+        "rollout_loss_weight": d0_config.rollout_loss_weight,
+        "trajectory_rollout_loss_weight": d0_config.trajectory_rollout_loss_weight,
+    }
+    for name, value in zero_weights.items():
+        if not math.isclose(float(value), 0.0, rel_tol=0.0, abs_tol=1e-15):
+            errors.append(f"{name} must be 0")
+    if not math.isclose(float(d0_config.control_output_clip), 0.0, rel_tol=0.0, abs_tol=1e-15):
+        errors.append("control_output_clip must be 0")
+    if not math.isfinite(float(d0_config.edge_innovation_loss_weight)) or float(d0_config.edge_innovation_loss_weight) <= 0.0:
+        errors.append("edge_innovation_loss_weight must be positive")
+    if _physical_target_normalization_mode(d0_config.physical_target_normalization) == "per-slice-rms":
+        errors.append("physical_target_normalization cannot be per-slice-rms")
+    if not math.isfinite(float(d0_config.physical_target_scale)) or float(d0_config.physical_target_scale) < 0.0:
+        errors.append("physical_target_scale must be finite and non-negative")
+    if not math.isfinite(float(d0_config.physical_target_scale_floor)) or float(d0_config.physical_target_scale_floor) <= 0.0:
+        errors.append("physical_target_scale_floor must be finite and positive")
+    if _physical_loss_mask_mode(d0_config.physical_loss_mask) not in {"all", "finite"}:
+        errors.append("physical_loss_mask must be all or finite")
+    if errors:
+        raise ValueError(
+            "doob-physical-residual requires the strict direct-reverse theory settings: "
+            + "; ".join(errors)
+        )
 
 
 def _physical_sampler_noise_mode(value: str) -> str:
@@ -516,7 +627,11 @@ def _physical_target_scale_from_tensor(target: Tensor, d0_config: Experiment12D0
     floor = float(d0_config.physical_target_scale_floor)
     if float(d0_config.physical_target_scale) > 0.0:
         return torch.as_tensor(float(d0_config.physical_target_scale), dtype=target.dtype, device=target.device)
-    return torch.sqrt(target.detach().float().square().mean()).to(device=target.device, dtype=target.dtype).clamp_min(floor)
+    finite = target.detach().float().reshape(-1)
+    finite = finite[torch.isfinite(finite)]
+    if finite.numel() == 0:
+        return torch.as_tensor(floor, dtype=target.dtype, device=target.device)
+    return torch.sqrt(finite.square().mean()).to(device=target.device, dtype=target.dtype).clamp_min(floor)
 
 
 def _physical_edge_loss_mask(mask_f: Tensor, target: Tensor, d0_config: Experiment12D0Config) -> Tensor:
@@ -529,18 +644,63 @@ def _physical_edge_loss_mask(mask_f: Tensor, target: Tensor, d0_config: Experime
     return torch.ones_like(mask_f) * finite
 
 
-def _cache_physical_target_scale(cache: "D0TrainingCache", d0_config: Experiment12D0Config) -> float:
+def _cache_direct_doob_target_rms(
+    cache: "D0TrainingCache",
+    dynamics_config: DirectFluxMNISTConfig,
+    *,
+    chunk_size: int = 256,
+) -> float:
+    """RMS of the projected realized-minus-direct-free cache target."""
+
+    total_sq = 0.0
+    total_values = 0
+    rate_schedule = torch.as_tensor(cache.rate_schedule, dtype=torch.float32)
+    for start in range(0, int(cache.size), max(1, int(chunk_size))):
+        stop = min(int(cache.size), start + max(1, int(chunk_size)))
+        count = stop - start
+        batch = {
+            "states": cache.states[start:stop],
+            "starts": cache.starts[start:stop],
+            "stride_substeps": torch.full((count,), int(cache.stride_substeps), dtype=torch.long),
+            "reference_substeps": torch.full((count,), int(cache.reference_substeps), dtype=torch.long),
+            "dt_sub": torch.full((count,), float(cache.dt_sub), dtype=torch.float32),
+            "rate_schedule": rate_schedule,
+        }
+        baseline = _direct_reverse_free_block_baseline_from_batch(batch, dynamics_config)
+        residual = project_edge_flux_torch(
+            cache.physical_transfers[start:stop].to(dtype=baseline.dtype) - baseline,
+            grid_size=int(dynamics_config.grid_size),
+        )
+        finite = residual[torch.isfinite(residual)]
+        total_sq += float(finite.double().square().sum().item())
+        total_values += int(finite.numel())
+    return math.sqrt(total_sq / max(total_values, 1))
+
+
+def _cache_physical_target_scale(
+    cache: "D0TrainingCache",
+    d0_config: Experiment12D0Config,
+    dynamics_config: DirectFluxMNISTConfig,
+) -> float:
     mode = _physical_target_normalization_mode(d0_config.physical_target_normalization)
     if mode == "none":
         return 1.0
     if float(d0_config.physical_target_scale) > 0.0:
         return float(d0_config.physical_target_scale)
-    value = float(torch.sqrt(cache.physical_transfers.float().square().mean()).item()) if cache.size else 0.0
+    if _d0_is_direct_doob_space(d0_config.d0_target_space):
+        value = _cache_direct_doob_target_rms(cache, dynamics_config) if cache.size else 0.0
+    else:
+        value = float(torch.sqrt(cache.physical_transfers.float().square().mean()).item()) if cache.size else 0.0
     return max(value, float(d0_config.physical_target_scale_floor))
 
 
-def _with_cache_physical_scale(d0_config: Experiment12D0Config, cache: "D0TrainingCache") -> Experiment12D0Config:
-    scale = _cache_physical_target_scale(cache, d0_config)
+def _with_cache_physical_scale(
+    d0_config: Experiment12D0Config,
+    cache: "D0TrainingCache",
+    dynamics_config: DirectFluxMNISTConfig,
+) -> Experiment12D0Config:
+    scale = _cache_physical_target_scale(cache, d0_config, dynamics_config)
+    cache.physical_target_scale = float(scale)
     return replace(d0_config, physical_target_scale=float(scale))
 
 
@@ -627,11 +787,37 @@ def _validate_prior_bank_compatibility(
     sampler from silently mixing time grids, lambda conventions, or schedules.
     """
 
+    source_fields_raw = bank.get("_source_fields")
+    source_fields = (
+        {str(value) for value in np.asarray(source_fields_raw).reshape(-1)}
+        if source_fields_raw is not None
+        else {str(key) for key in bank if not str(key).startswith("_")}
+    )
+    missing_provenance = sorted(_D0_STRICT_PRIOR_PROVENANCE_FIELDS - source_fields)
+    if missing_provenance:
+        warnings.warn(
+            "Legacy D0 prior bank is missing provenance metadata and cannot fully "
+            "establish the forward reference law: "
+            + ", ".join(missing_provenance),
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        if _d0_is_direct_doob_space(d0_config.d0_target_space) and not bool(
+            d0_config.allow_prior_bank_mismatch
+        ):
+            raise ValueError(
+                "doob-physical-residual requires a fully self-describing D0 prior bank. "
+                f"Missing provenance fields in {prior_bank_path}: "
+                + ", ".join(missing_provenance)
+                + ". Rebuild the terminal bank with the current Experiment 12 writer or "
+                "bypass only for debugging with --allow-prior-bank-mismatch."
+            )
     if bool(d0_config.allow_prior_bank_mismatch):
         return
     mismatches: list[str] = []
     expected_steps = int(d0_config.sample_steps)
     expected_substeps = int(d0_config.reference_substeps)
+    expected_grid_size = int(dynamics_config.grid_size)
     expected_horizon = float(natural_horizon(dynamics_config))
     expected_stride = int(_actual_cache_stride_substeps(d0_config))
     expected_rate = _expected_rate_schedule(dynamics_config, d0_config)
@@ -639,6 +825,19 @@ def _validate_prior_bank_compatibility(
     sample_steps = int(bank.get("sample_steps", expected_steps))
     substeps = int(bank.get("substeps", expected_substeps))
     horizon = float(bank.get("horizon", expected_horizon))
+    if "grid_size" in bank:
+        bank_grid_size = int(bank["grid_size"])
+        if bank_grid_size != expected_grid_size:
+            mismatches.append(
+                f"grid_size bank={bank_grid_size} expected={expected_grid_size}"
+            )
+    terminal_states = np.asarray(bank.get("terminal_states"))
+    expected_width = expected_grid_size * expected_grid_size
+    if terminal_states.ndim != 2 or terminal_states.shape[1] != expected_width:
+        actual_shape = tuple(int(value) for value in terminal_states.shape)
+        mismatches.append(
+            f"terminal_states shape bank={actual_shape} expected_width={expected_width}"
+        )
     if sample_steps != expected_steps:
         mismatches.append(f"sample_steps bank={sample_steps} expected={expected_steps}")
     if substeps != expected_substeps:
@@ -657,10 +856,41 @@ def _validate_prior_bank_compatibility(
         mode = str(bank["edge_alpha_mode"])
         if mode != str(dynamics_config.edge_alpha_mode):
             mismatches.append(f"edge_alpha_mode bank={mode} expected={dynamics_config.edge_alpha_mode}")
+    if "edge_alpha_value" in bank:
+        bank_alpha = float(bank["edge_alpha_value"])
+        expected_alpha = float(edge_alpha_value(dynamics_config))
+        if not math.isclose(bank_alpha, expected_alpha, rel_tol=1e-6, abs_tol=1e-12):
+            mismatches.append(f"edge_alpha_value bank={bank_alpha:.12g} expected={expected_alpha:.12g}")
     if "alpha_eff" in bank:
         bank_alpha_eff = float(bank["alpha_eff"])
         if not math.isclose(bank_alpha_eff, float(dynamics_config.alpha_eff), rel_tol=1e-6, abs_tol=1e-12):
             mismatches.append(f"alpha_eff bank={bank_alpha_eff:.12g} expected={float(dynamics_config.alpha_eff):.12g}")
+    for name, expected in (
+        ("mass_floor", float(dynamics_config.mass_floor)),
+        ("limiter_fraction", float(dynamics_config.limiter_fraction)),
+    ):
+        if name in bank:
+            actual = float(bank[name])
+            if not math.isclose(actual, expected, rel_tol=1e-6, abs_tol=1e-15):
+                mismatches.append(f"{name} bank={actual:.12g} expected={expected:.12g}")
+    if "cache_build_mode" in bank:
+        bank_mode = str(bank["cache_build_mode"]).strip().lower().replace("_", "-")
+        expected_mode = str(d0_config.cache_build_mode).strip().lower().replace("_", "-")
+        if bank_mode != expected_mode:
+            mismatches.append(f"cache_build_mode bank={bank_mode} expected={expected_mode}")
+    if "reference_integrator" in bank:
+        integrator = str(bank["reference_integrator"])
+        if integrator != _D0_REFERENCE_INTEGRATOR:
+            mismatches.append(
+                f"reference_integrator bank={integrator} expected={_D0_REFERENCE_INTEGRATOR}"
+            )
+    if "reference_integrator_version" in bank:
+        version = int(bank["reference_integrator_version"])
+        if version != _D0_REFERENCE_INTEGRATOR_VERSION:
+            mismatches.append(
+                "reference_integrator_version "
+                f"bank={version} expected={_D0_REFERENCE_INTEGRATOR_VERSION}"
+            )
     rate = np.asarray(bank.get("rate_schedule", expected_rate), dtype=np.float64).reshape(-1)
     if rate.shape != expected_rate.shape:
         mismatches.append(f"rate_schedule length bank={rate.shape[0]} expected={expected_rate.shape[0]}")
@@ -872,6 +1102,9 @@ def _build_d0_training_cache_substep_exact(
     total_limited_noise_energy = 0.0
     total_floor_correction_l1 = 0.0
     total_renorm_correction_l1 = 0.0
+    total_floor_touched_pixels = 0
+    total_floor_proposed_pixels = 0
+    collect_reference_diagnostics = _d0_is_direct_doob_space(d0_config.d0_target_space)
 
     cache_paths = int(d0_config.cache_paths)
     batch_size = int(d0_config.cache_batch_size)
@@ -937,7 +1170,7 @@ def _build_d0_training_cache_substep_exact(
                 return_innovations=True,
                 return_substep_states=True,
                 return_realized_transfers=True,
-                collect_diagnostics=False,
+                collect_diagnostics=collect_reference_diagnostics,
             )
             if (
                 result.raw_innovations is None
@@ -950,6 +1183,12 @@ def _build_d0_training_cache_substep_exact(
             valid = result.valid_edge_mask
             realized = result.realized_edge_transfers
             sub_states = result.substep_states
+            # Even when the legacy fast path disables scalar diagnostics, the
+            # returned validity tensor gives the exact raw edge-step limiter
+            # count without changing cache semantics.  Strict direct-Doob mode
+            # enables the full counters above for its refinement gate.
+            total_masked_edges += int((~valid).count_nonzero().detach().cpu())
+            total_proposed_edges += int(valid.numel())
             for q in range(reference_substeps):
                 g = outer_k * reference_substeps + q
                 before_q = states_before_outer if q == 0 else sub_states[q - 1]
@@ -981,14 +1220,15 @@ def _build_d0_training_cache_substep_exact(
                     later_tau[rows, cols] = max(float(horizon) - float(g + 1) * float(dt_sub), 0.0)
                     filled[rows, cols] = True
             states = result.states
-            total_masked_edges += int(result.masked_edges)
-            total_proposed_edges += int(result.proposed_edges)
             total_mobility_weight += float(result.mobility_weight_sum)
             total_limited_mobility_weight += float(result.limited_mobility_weight_sum)
             total_noise_energy += float(result.noise_energy_sum)
             total_limited_noise_energy += float(result.limited_noise_energy_sum)
             total_floor_correction_l1 += float(result.floor_correction_l1)
             total_renorm_correction_l1 += float(result.renorm_correction_l1)
+            if collect_reference_diagnostics:
+                total_floor_touched_pixels += int(result.floor_touched_pixels)
+                total_floor_proposed_pixels += int(bsz * n * n * reference_substeps)
         if not bool(filled.all() and start_filled.all()):
             raise RuntimeError("internal D0 cache bug: some start/later-state slices were not filled")
         if trajectory_filled is not None and not bool(trajectory_filled.all()):
@@ -1028,8 +1268,18 @@ def _build_d0_training_cache_substep_exact(
     physical_transfer_out = torch.cat(all_physical_transfers, dim=0).float()
     masks_out = torch.cat(all_masks, dim=0).bool()
     raw_limited = 0.0 if total_proposed_edges == 0 else float(total_masked_edges) / float(total_proposed_edges)
-    mobility_limited = 0.0 if total_mobility_weight <= 0.0 else total_limited_mobility_weight / total_mobility_weight
-    noise_limited = 0.0 if total_noise_energy <= 0.0 else total_limited_noise_energy / total_noise_energy
+    # Strict direct-Doob cache construction pays for the synchronization-heavy
+    # diagnostics because intervention refinement is a theory gate.  Legacy
+    # cache modes retain the faster path and report unavailable counters as NaN.
+    mobility_limited = float("nan") if total_mobility_weight <= 0.0 else total_limited_mobility_weight / total_mobility_weight
+    noise_limited = float("nan") if total_noise_energy <= 0.0 else total_limited_noise_energy / total_noise_energy
+    floor_correction_l1 = float(total_floor_correction_l1) if collect_reference_diagnostics else float("nan")
+    renorm_correction_l1 = float(total_renorm_correction_l1) if collect_reference_diagnostics else float("nan")
+    floor_touched_fraction = (
+        float(total_floor_touched_pixels) / float(total_floor_proposed_pixels)
+        if collect_reference_diagnostics and total_floor_proposed_pixels > 0
+        else float("nan")
+    )
     return D0TrainingCache(
         states=states_out,
         tau=tau_out,
@@ -1058,13 +1308,16 @@ def _build_d0_training_cache_substep_exact(
         valid_innovation_fraction=float(masks_out.float().mean().item()),
         valid_innovation_mobility_fraction=float(1.0 - mobility_limited),
         valid_innovation_noise_energy_fraction=float(1.0 - noise_limited),
-        floor_correction_l1=float(total_floor_correction_l1),
-        renorm_correction_l1=float(total_renorm_correction_l1),
+        floor_correction_l1=floor_correction_l1,
+        renorm_correction_l1=renorm_correction_l1,
         cache_build_mode="substep",
         requested_stride_substeps=int(stride),
         trajectory_window_states=torch.cat(all_trajectory_window_states, dim=0).float() if all_trajectory_window_states else None,
         trajectory_window_valid=torch.cat(all_trajectory_window_valid, dim=0).bool() if all_trajectory_window_valid else None,
         trajectory_window_depths=torch.as_tensor(trajectory_depths, dtype=torch.long) if trajectory_depths else None,
+        floor_touched_pixels=int(total_floor_touched_pixels),
+        floor_proposed_pixels=int(total_floor_proposed_pixels),
+        floor_touched_fraction=float(floor_touched_fraction),
     )
 
 
@@ -1141,8 +1394,6 @@ def _build_d0_training_cache_outer_fast(
 
     total_masked_edges = 0
     total_proposed_edges = 0
-    total_floor_correction_l1 = 0.0
-    total_renorm_correction_l1 = 0.0
     valid_sum = 0.0
     valid_count = 0.0
 
@@ -1207,6 +1458,8 @@ def _build_d0_training_cache_outer_fast(
             )
             if result.raw_innovations is None or result.valid_edge_mask is None:
                 raise RuntimeError("reference integrator did not return innovations/masks")
+            total_masked_edges += int((~result.valid_edge_mask).count_nonzero().detach().cpu())
+            total_proposed_edges += int(result.valid_edge_mask.numel())
             raw_sum = result.raw_innovations.sum(dim=0)
             valid_all = result.valid_edge_mask.all(dim=0)
             active = (outer_starts <= outer_k) & (outer_k < outer_starts + int(outer_stride))
@@ -1221,10 +1474,6 @@ def _build_d0_training_cache_outer_fast(
                 later_tau[rows, cols] = max(float(horizon) - float(outer_k + 1) * float(dt_outer), 0.0)
                 filled[rows, cols] = True
             states = result.states
-            total_masked_edges += int(result.masked_edges)
-            total_proposed_edges += int(result.proposed_edges)
-            total_floor_correction_l1 += float(result.floor_correction_l1)
-            total_renorm_correction_l1 += float(result.renorm_correction_l1)
         if not bool(filled.all() and start_filled.all()):
             raise RuntimeError("internal D0 cache bug: some start/later-state slices were not filled")
         accum = accum / math.sqrt(float(block_substeps))
@@ -1267,10 +1516,12 @@ def _build_d0_training_cache_outer_fast(
     physical_transfer_out = torch.cat(all_physical_transfers, dim=0).float()
     masks_out = torch.cat(all_masks, dim=0).bool()
     raw_limited = 0.0 if total_proposed_edges == 0 else float(total_masked_edges) / float(total_proposed_edges)
-    # Fast mode intentionally avoids per-edge mobility/noise-energy host syncs.
-    # Use the raw limiter fraction as a conservative stand-in in cache summaries.
-    mobility_limited = float(raw_limited)
-    noise_limited = float(raw_limited)
+    # Fast mode intentionally avoids the synchronization-heavy weighted
+    # diagnostics.  Do not mislabel the raw edge count as a weighted fraction.
+    mobility_limited = float("nan")
+    noise_limited = float("nan")
+    floor_correction_l1 = float("nan")
+    renorm_correction_l1 = float("nan")
     return D0TrainingCache(
         states=states_out,
         tau=tau_out,
@@ -1299,10 +1550,11 @@ def _build_d0_training_cache_outer_fast(
         valid_innovation_fraction=float(masks_out.float().mean().item()),
         valid_innovation_mobility_fraction=float(1.0 - mobility_limited),
         valid_innovation_noise_energy_fraction=float(1.0 - noise_limited),
-        floor_correction_l1=float(total_floor_correction_l1),
-        renorm_correction_l1=float(total_renorm_correction_l1),
+        floor_correction_l1=floor_correction_l1,
+        renorm_correction_l1=renorm_correction_l1,
         cache_build_mode="outer",
         requested_stride_substeps=int(requested_stride),
+        floor_touched_fraction=float("nan"),
     )
 
 
@@ -1316,6 +1568,7 @@ def build_d0_training_cache(
     rng: np.random.Generator,
     show_progress: bool = True,
 ) -> D0TrainingCache:
+    _validate_direct_doob_config(d0_config)
     mode = str(getattr(d0_config, "cache_build_mode", "outer")).strip().lower().replace("_", "-")
     if mode in {"substep", "exact-substep", "exact"}:
         return _build_d0_training_cache_substep_exact(
@@ -1400,7 +1653,7 @@ def _physical_edge_target_from_batch(batch: dict[str, Tensor], dynamics_config: 
     """
 
     space = _normalize_d0_target_space(d0_config.d0_target_space)
-    if space in {"realized-physical", "realized-residual"}:
+    if space in {"realized-physical", "realized-residual", "doob-physical-residual"}:
         if "physical_transfers" not in batch:
             raise ValueError("realized physical D0 targets require physical_transfers in the cache batch")
         return batch["physical_transfers"].to(dtype=batch["states"].dtype)
@@ -1413,18 +1666,12 @@ def _node_delta_from_edge(edge: Tensor) -> Tensor:
 
 
 
-def _reverse_free_block_baseline_from_batch(
+def _reference_free_block_baseline_from_batch(
     batch: dict[str, Tensor],
     dynamics_config: DirectFluxMNISTConfig,
+    *,
+    sign: float,
 ) -> Tensor:
-    """Approximate the block reverse-free physical transfer for cached slices.
-
-    This is the physical edge transfer obtained by applying only the analytic
-    reverse free drift over the cached block, with coefficients evaluated at
-    the later cached state.  It is intentionally a first-order approximation;
-    the sampler uses the same convention for physical-residual mode.
-    """
-
     if not {"starts", "stride_substeps", "reference_substeps", "dt_sub", "rate_schedule"}.issubset(batch):
         return torch.zeros((batch["states"].shape[0], 2, dynamics_config.grid_size, dynamics_config.grid_size), device=batch["states"].device, dtype=batch["states"].dtype)
     states = batch["states"]
@@ -1444,9 +1691,44 @@ def _reverse_free_block_baseline_from_batch(
         outer = torch.div(q, reference_values.clamp_min(1), rounding_mode="floor").clamp(0, rate_schedule.numel() - 1)
         rate = rate_schedule.index_select(0, outer).view(-1, 1, 1, 1)
         dt = dt_values.view(-1, 1, 1, 1)
-        contrib = -rate * free_flux * dt
+        contrib = float(sign) * rate * free_flux * dt
         out = out + torch.where(active.view(-1, 1, 1, 1), contrib, torch.zeros_like(contrib))
     return out
+
+
+def _reverse_free_block_baseline_from_batch(
+    batch: dict[str, Tensor],
+    dynamics_config: DirectFluxMNISTConfig,
+) -> Tensor:
+    """Legacy subtract-forward free baseline (negative physical transfer).
+
+    Existing ``physical-residual`` and ``realized-residual`` runs use this
+    convention.  Keep it separate from the direct Doob sampler so checkpoints
+    retain their original meaning.
+    """
+
+    return _reference_free_block_baseline_from_batch(batch, dynamics_config, sign=-1.0)
+
+
+def _direct_reverse_free_block_baseline_from_batch(
+    batch: dict[str, Tensor],
+    dynamics_config: DirectFluxMNISTConfig,
+) -> Tensor:
+    """First-order direct reverse reference transfer ``+b_ref dt``.
+
+    Coefficients are evaluated at the cached later state.  The strict direct
+    Doob mode restricts this approximation to a single exact substep.
+    """
+
+    required = {"states", "starts", "stride_substeps", "reference_substeps", "dt_sub", "rate_schedule"}
+    missing = sorted(required.difference(batch))
+    if missing:
+        raise ValueError(
+            "direct Doob reference baseline requires interval metadata: "
+            + ", ".join(missing)
+        )
+
+    return _reference_free_block_baseline_from_batch(batch, dynamics_config, sign=1.0)
 
 
 def _physical_total_prediction_from_raw(
@@ -1459,6 +1741,8 @@ def _physical_total_prediction_from_raw(
     pred_edge = pred_raw if space in {"realized-physical", "realized-residual"} else project_edge_flux_torch(pred_raw, grid_size=int(dynamics_config.grid_size))
     if space in {"physical-residual", "realized-residual"}:
         return _reverse_free_block_baseline_from_batch(batch, dynamics_config) + pred_edge
+    if space == "doob-physical-residual":
+        return _direct_reverse_free_block_baseline_from_batch(batch, dynamics_config) + pred_edge
     return pred_edge
 
 def _trajectory_rollout_supervised_loss(
@@ -1525,6 +1809,16 @@ def _trajectory_rollout_supervised_loss(
                 "rate_schedule": batch["rate_schedule"],
             }
             pred_edge = pred_edge + _reverse_free_block_baseline_from_batch(pseudo_batch, dynamics_config)
+        elif space == "doob-physical-residual":
+            pseudo_batch = {
+                "states": states,
+                "starts": (starts - int(depth - 1) * stride).clamp_min(0),
+                "stride_substeps": batch["stride_substeps"][:max_rows],
+                "reference_substeps": batch["reference_substeps"][:max_rows],
+                "dt_sub": batch["dt_sub"][:max_rows],
+                "rate_schedule": batch["rate_schedule"],
+            }
+            pred_edge = pred_edge + _direct_reverse_free_block_baseline_from_batch(pseudo_batch, dynamics_config)
         node_delta = _node_delta_from_edge(pred_edge)
         states = (states + node_delta).clamp_min(float(dynamics_config.mass_floor))
         states = states / states.sum(dim=1, keepdim=True).clamp_min(float(dynamics_config.mass_floor))
@@ -1574,6 +1868,7 @@ def d0_unweighted_innovation_loss(
     divergences.  Optional state/rollout terms can be mixed in for stability.
     """
 
+    _validate_direct_doob_config(d0_config)
     pred_raw = model(batch["tau"], batch["states"], batch["labels"], None)
     if float(d0_config.control_output_clip) > 0.0:
         pred_raw = pred_raw.clamp(-float(d0_config.control_output_clip), float(d0_config.control_output_clip))
@@ -1581,9 +1876,12 @@ def d0_unweighted_innovation_loss(
     mask = batch["masks"] & (harmonic_mobility_channels(batch["states"], dynamics_config) > float(d0_config.theta_mask_min))
     mask_f = mask.to(dtype=pred_raw.dtype)
     space = _normalize_d0_target_space(d0_config.d0_target_space)
+    physical_spaces = {"physical-total", "physical-residual", "realized-physical", "realized-residual", "doob-physical-residual"}
+    legacy_residual = space in {"physical-residual", "realized-residual"}
+    direct_doob_residual = space == "doob-physical-residual"
 
     need_state_target = (
-        space in {"physical-total", "physical-residual", "realized-physical", "realized-residual", "node-delta"}
+        space in physical_spaces | {"node-delta"}
         or float(d0_config.state_delta_loss_weight) > 0.0
         or float(d0_config.rollout_loss_weight) > 0.0
     )
@@ -1593,16 +1891,27 @@ def d0_unweighted_innovation_loss(
     else:
         target_physical_total = torch.zeros_like(pred_raw)
         target_node_delta = torch.zeros_like(batch["states"])
-    reverse_free_baseline = _reverse_free_block_baseline_from_batch(batch, dynamics_config) if space in {"physical-residual", "realized-residual"} else torch.zeros_like(pred_raw)
+    if legacy_residual:
+        reverse_free_baseline = _reverse_free_block_baseline_from_batch(batch, dynamics_config)
+    elif direct_doob_residual:
+        reverse_free_baseline = _direct_reverse_free_block_baseline_from_batch(batch, dynamics_config)
+    else:
+        reverse_free_baseline = torch.zeros_like(pred_raw)
     target_physical_residual = target_physical_total - reverse_free_baseline
     pred_projected = project_edge_flux_torch(pred_raw, grid_size=int(dynamics_config.grid_size))
     pred_primary_edge = pred_raw if space in {"realized-physical", "realized-residual"} else pred_projected
-    pred_physical_total = pred_primary_edge + reverse_free_baseline if space in {"physical-residual", "realized-residual"} else pred_primary_edge
+    pred_physical_total = pred_primary_edge + reverse_free_baseline if (legacy_residual or direct_doob_residual) else pred_primary_edge
     physical_scale_for_loss = torch.ones((), dtype=pred_raw.dtype, device=pred_raw.device)
     physical_edge_mask_f = mask_f
 
-    if space in {"physical-total", "physical-residual", "realized-physical", "realized-residual"}:
-        target_primary = target_physical_residual if space in {"physical-residual", "realized-residual"} else target_physical_total
+    if space in physical_spaces:
+        target_primary = target_physical_residual if (legacy_residual or direct_doob_residual) else target_physical_total
+        if direct_doob_residual:
+            # Only the incidence-relevant component is identifiable from state
+            # reversal.  The cached realized transfer can contain cycle flux,
+            # while the direct Doob residual is represented in the projected
+            # edge subspace.
+            target_primary = project_edge_flux_torch(target_primary, grid_size=int(dynamics_config.grid_size))
         physical_scale_for_loss = _physical_training_scale_tensor(target_primary, d0_config)
         target_primary_scaled = target_primary / physical_scale_for_loss
         physical_edge_mask_f = _physical_edge_loss_mask(mask_f, target_primary, d0_config)
@@ -1614,7 +1923,7 @@ def d0_unweighted_innovation_loss(
         residual_rms = torch.sqrt(((pred_primary_edge - target_primary_scaled).square() * physical_edge_mask_f).sum() / physical_edge_mask_f.sum().clamp_min(1.0))
         edge_loss_main = per_slice.mean()
         edge_zero_loss = zero.mean()
-        if space in {"physical-residual", "realized-residual"}:
+        if legacy_residual or direct_doob_residual:
             pred_physical_total = reverse_free_baseline + physical_scale_for_loss * pred_primary_edge
         else:
             pred_physical_total = physical_scale_for_loss * pred_primary_edge
@@ -1637,7 +1946,7 @@ def d0_unweighted_innovation_loss(
             d0_config,
         )
 
-    pred_node_delta = _node_delta_from_edge(pred_physical_total if space in {"physical-total", "physical-residual", "realized-physical", "realized-residual", "node-delta"} else pred_projected)
+    pred_node_delta = _node_delta_from_edge(pred_physical_total if space in physical_spaces | {"node-delta"} else pred_projected)
     state_delta_per = (pred_node_delta - target_node_delta).square().mean(dim=1)
     state_delta_loss = state_delta_per.mean()
     state_delta_zero = target_node_delta.square().mean(dim=1).mean()
@@ -1645,9 +1954,13 @@ def d0_unweighted_innovation_loss(
     state_delta_rms = torch.sqrt(state_delta_loss)
     state_delta_target_rms = torch.sqrt(state_delta_zero)
 
-    regularizer_mask_f = physical_edge_mask_f if space in {"physical-total", "physical-residual", "realized-physical", "realized-residual"} else mask_f
-    pred_l2 = (pred_raw.square() * regularizer_mask_f).sum() / regularizer_mask_f.sum().clamp_min(1.0)
-    if space in {"physical-total", "physical-residual", "realized-physical", "realized-residual"} and _physical_loss_mask_mode(d0_config.physical_loss_mask) != "innovation-valid":
+    regularizer_mask_f = physical_edge_mask_f if space in physical_spaces else mask_f
+    regularizer_denom = regularizer_mask_f.sum(dim=(1, 2, 3)).clamp_min(1.0)
+    pred_l2 = (
+        (pred_raw.square() * regularizer_mask_f).sum(dim=(1, 2, 3))
+        / regularizer_denom
+    ).mean()
+    if space in physical_spaces and _physical_loss_mask_mode(d0_config.physical_loss_mask) != "innovation-valid":
         invalid_l2 = pred_raw.new_tensor(0.0)
     else:
         invalid_mask_f = (~mask).to(dtype=pred_raw.dtype)
@@ -1684,7 +1997,7 @@ def d0_unweighted_innovation_loss(
             if float(d0_config.control_output_clip) > 0.0:
                 pred_step = pred_step.clamp(-float(d0_config.control_output_clip), float(d0_config.control_output_clip))
             pred_step = project_edge_flux_torch(pred_step, grid_size=int(dynamics_config.grid_size))
-            if _normalize_d0_target_space(d0_config.d0_target_space) in {"physical-total", "physical-residual", "realized-physical", "realized-residual"}:
+            if _normalize_d0_target_space(d0_config.d0_target_space) in physical_spaces:
                 pred_step = _physical_training_scale_tensor(target_physical_total[:max_rows], d0_config) * pred_step
             # D0.4: this remains a one-block stability heuristic.  It follows
             # the selected physical semantics when enabled, but it is not a
@@ -1699,6 +2012,16 @@ def d0_unweighted_innovation_loss(
                     "rate_schedule": batch.get("rate_schedule", torch.ones(1, device=state_roll.device, dtype=state_roll.dtype)),
                 }
                 pred_step = pred_step + _reverse_free_block_baseline_from_batch(pseudo_batch, dynamics_config)
+            elif _normalize_d0_target_space(d0_config.d0_target_space) == "doob-physical-residual":
+                pseudo_batch = {
+                    "states": state_roll,
+                    "starts": batch.get("starts", torch.zeros_like(label_roll))[:max_rows],
+                    "stride_substeps": batch.get("stride_substeps", torch.ones_like(label_roll))[:max_rows],
+                    "reference_substeps": batch.get("reference_substeps", torch.ones_like(label_roll))[:max_rows],
+                    "dt_sub": batch.get("dt_sub", torch.ones_like(tau_roll))[:max_rows],
+                    "rate_schedule": batch.get("rate_schedule", torch.ones(1, device=state_roll.device, dtype=state_roll.dtype)),
+                }
+                pred_step = pred_step + _direct_reverse_free_block_baseline_from_batch(pseudo_batch, dynamics_config)
             node_step = _node_delta_from_edge(pred_step)
             # Euler-with-renormalization surrogate; avoids non-differentiable limiter in the loss.
             state_roll = (state_roll + node_step).clamp_min(float(dynamics_config.mass_floor))
@@ -1739,9 +2062,9 @@ def d0_unweighted_innovation_loss(
         "physical_target_scale": float(torch.as_tensor(physical_scale_for_loss).detach().float().mean().cpu()),
         "physical_target_normalization": str(d0_config.physical_target_normalization),
         "physical_loss_mask": str(d0_config.physical_loss_mask),
-        "physical_prediction_rms": float(torch.sqrt((pred_physical_total.square() * physical_edge_mask_f).sum() / physical_edge_mask_f.sum().clamp_min(1.0)).detach().cpu()) if space in {"physical-total", "physical-residual", "realized-physical", "realized-residual"} else float("nan"),
-        "physical_target_rms": float(torch.sqrt((target_physical_total.square() * physical_edge_mask_f).sum() / physical_edge_mask_f.sum().clamp_min(1.0)).detach().cpu()) if space in {"physical-total", "physical-residual", "realized-physical", "realized-residual"} else float("nan"),
-        "physical_residual_rms": float(torch.sqrt(((pred_physical_total - target_physical_total).square() * physical_edge_mask_f).sum() / physical_edge_mask_f.sum().clamp_min(1.0)).detach().cpu()) if space in {"physical-total", "physical-residual", "realized-physical", "realized-residual"} else float("nan"),
+        "physical_prediction_rms": float(torch.sqrt((pred_physical_total.square() * physical_edge_mask_f).sum() / physical_edge_mask_f.sum().clamp_min(1.0)).detach().cpu()) if space in physical_spaces else float("nan"),
+        "physical_target_rms": float(torch.sqrt((target_physical_total.square() * physical_edge_mask_f).sum() / physical_edge_mask_f.sum().clamp_min(1.0)).detach().cpu()) if space in physical_spaces else float("nan"),
+        "physical_residual_rms": float(torch.sqrt(((pred_physical_total - target_physical_total).square() * physical_edge_mask_f).sum() / physical_edge_mask_f.sum().clamp_min(1.0)).detach().cpu()) if space in physical_spaces else float("nan"),
         "state_delta_loss": float(state_delta_loss.detach().cpu()),
         "state_delta_zero": float(state_delta_zero.detach().cpu()),
         "state_delta_gain": float(state_delta_gain),
@@ -1762,7 +2085,7 @@ def d0_unweighted_innovation_loss(
         "batch_ess_fraction": 1.0,
         "d0_target_space": str(d0_config.d0_target_space),
         "d0_target_space_normalized": str(space),
-        "physical_target_source": "realized" if space in {"realized-physical", "realized-residual"} else ("poisson" if space in {"physical-total", "physical-residual", "node-delta"} else "brownian"),
+        "physical_target_source": "realized-doob-residual" if direct_doob_residual else ("realized" if space in {"realized-physical", "realized-residual"} else ("poisson" if space in {"physical-total", "physical-residual", "node-delta"} else "brownian")),
         "trajectory_rollout_loss_weight": float(d0_config.trajectory_rollout_loss_weight),
     }
     diag.update(trajectory_rollout_diag)
@@ -1790,7 +2113,10 @@ def _apply_oriented_edge_transfer(
     config: DirectFluxMNISTConfig,
     *,
     limiter_fraction: float | None = None,
-) -> tuple[Tensor, dict[str, float]]:
+    noise_energy_weights: Tensor | None = None,
+    mobility_channels: Tensor | None = None,
+    diagnostics_device: bool = False,
+) -> tuple[Tensor, dict[str, float | Tensor]]:
     """Apply forward-style conservative edge transfers with P0.8 budgets."""
 
     if states.ndim != 2 or delta_channels.ndim != 4 or delta_channels.shape[1] != 2:
@@ -1798,19 +2124,44 @@ def _apply_oriented_edge_transfer(
     n = int(config.grid_size)
     if states.shape[1] != n * n or delta_channels.shape[2:] != (n, n):
         raise ValueError("states and edge channels have incompatible grid sizes")
+    if noise_energy_weights is not None and noise_energy_weights.shape != delta_channels.shape:
+        raise ValueError("noise_energy_weights must have the same shape as delta_channels")
+    if mobility_channels is not None and mobility_channels.shape != delta_channels.shape:
+        raise ValueError("mobility_channels must have the same shape as delta_channels")
     stiff_c = float(config.limiter_fraction if limiter_fraction is None else limiter_fraction)
     base = states
     out_delta = torch.zeros_like(base)
     remaining = stiff_c * (base - float(config.mass_floor)).clamp_min(0.0)
     flat_delta = torch.cat([delta_channels[:, 0].reshape(states.shape[0], -1), delta_channels[:, 1].reshape(states.shape[0], -1)], dim=1)
+    flat_noise_energy = None
+    if noise_energy_weights is not None:
+        flat_noise_energy = torch.cat(
+            [
+                noise_energy_weights[:, 0].reshape(states.shape[0], -1),
+                noise_energy_weights[:, 1].reshape(states.shape[0], -1),
+            ],
+            dim=1,
+        )
     proposed = 0
-    limited_count = 0
-    mobility_weight_sum = 0.0
-    limited_mobility_weight_sum = 0.0
+    zero64 = states.new_zeros((), dtype=torch.float64)
+    limited_count = zero64.clone()
+    nonfinite_count = zero64.clone()
+    mobility_weight_sum = zero64.clone()
+    limited_mobility_weight_sum = zero64.clone()
+    noise_energy_sum = zero64.clone()
+    limited_noise_energy_sum = zero64.clone()
+    # Harmonic mobility is state-dependent, but it is common to every edge
+    # class in this elementary step.  Compute it once rather than once per
+    # channel extraction.
+    theta_channels = (
+        harmonic_mobility_channels(states, config)
+        if mobility_channels is None
+        else mobility_channels.to(device=states.device, dtype=states.dtype)
+    )
     theta_flat = torch.cat(
         [
-            harmonic_mobility_channels(states, config)[:, 0].reshape(states.shape[0], -1),
-            harmonic_mobility_channels(states, config)[:, 1].reshape(states.shape[0], -1),
+            theta_channels[:, 0].reshape(states.shape[0], -1),
+            theta_channels[:, 1].reshape(states.shape[0], -1),
         ],
         dim=1,
     )
@@ -1819,24 +2170,149 @@ def _apply_oriented_edge_transfer(
         heads = edge_class.heads
         idx = edge_class.flux_indices
         raw = flat_delta[:, idx]
+        nonfinite = ~torch.isfinite(raw)
         flux, limited = _budget_limiter(raw, remaining[:, tails], remaining[:, heads])
         remaining[:, tails] = (remaining[:, tails] - flux.clamp_min(0.0)).clamp_min(0.0)
         remaining[:, heads] = (remaining[:, heads] - (-flux).clamp_min(0.0)).clamp_min(0.0)
         out_delta[:, tails] = out_delta[:, tails] - flux
         out_delta[:, heads] = out_delta[:, heads] + flux
         proposed += int(limited.numel())
-        limited_count += int(limited.count_nonzero().detach().cpu())
+        limited_count.add_(limited.count_nonzero().to(torch.float64))
+        nonfinite_count.add_(nonfinite.count_nonzero().to(torch.float64))
         weights = theta_flat[:, idx].detach().clamp_min(0.0)
-        mobility_weight_sum += float(weights.sum().detach().cpu())
-        limited_mobility_weight_sum += float(weights.masked_select(limited).sum().detach().cpu())
-    out = (base + out_delta).clamp_min(0.0)
-    out = out / out.sum(dim=1, keepdim=True).clamp_min(float(config.mass_floor))
-    return out, {
-        "limited_edges": float(limited_count),
-        "proposed_edges": float(proposed),
-        "mobility_weight_sum": float(mobility_weight_sum),
-        "limited_mobility_weight_sum": float(limited_mobility_weight_sum),
+        mobility_weight_sum.add_(weights.sum().to(torch.float64))
+        limited_mobility_weight_sum.add_(weights.masked_select(limited).sum().to(torch.float64))
+        if flat_noise_energy is not None:
+            noise_weights = flat_noise_energy[:, idx].detach()
+            noise_weights = torch.where(
+                torch.isfinite(noise_weights),
+                noise_weights.clamp_min(0.0),
+                torch.zeros_like(noise_weights),
+            )
+            noise_energy_sum.add_(noise_weights.sum().to(torch.float64))
+            limited_noise_energy_sum.add_(noise_weights.masked_select(limited).sum().to(torch.float64))
+    before_floor = base + out_delta
+    floored = before_floor.clamp_min(0.0)
+    floor_touched_pixels = (before_floor < 0.0).count_nonzero().to(torch.float64)
+    floor_correction_l1 = (floored - before_floor).abs().sum().to(torch.float64)
+    before_renorm = floored
+    out = before_renorm / before_renorm.sum(dim=1, keepdim=True).clamp_min(float(config.mass_floor))
+    renorm_correction_l1 = (out - before_renorm).abs().sum().to(torch.float64)
+    max_simplex_mass_error = (
+        (out.sum(dim=1) - 1.0).abs().max().to(torch.float64)
+        if out.shape[0]
+        else zero64.clone()
+    )
+    proposed_tensor = states.new_tensor(float(proposed), dtype=torch.float64)
+    floor_proposed_tensor = states.new_tensor(float(before_floor.numel()), dtype=torch.float64)
+    limiter_fraction_value = torch.where(
+        proposed_tensor > 0.0,
+        limited_count / proposed_tensor.clamp_min(1.0),
+        zero64,
+    )
+    mobility_weighted_limiter_fraction = torch.where(
+        mobility_weight_sum > 0.0,
+        limited_mobility_weight_sum / mobility_weight_sum.clamp_min(torch.finfo(torch.float64).tiny),
+        zero64,
+    )
+    noise_energy_weighted_limiter_fraction = torch.where(
+        noise_energy_sum > 0.0,
+        limited_noise_energy_sum / noise_energy_sum.clamp_min(torch.finfo(torch.float64).tiny),
+        zero64,
+    )
+    tensor_diagnostics = {
+        "limited_edges": limited_count,
+        "proposed_edges": proposed_tensor,
+        "nonfinite_edges": nonfinite_count,
+        "mobility_weight_sum": mobility_weight_sum,
+        "limited_mobility_weight_sum": limited_mobility_weight_sum,
+        "limiter_fraction": limiter_fraction_value,
+        "mobility_weighted_limiter_fraction": mobility_weighted_limiter_fraction,
+        "noise_energy_sum": noise_energy_sum,
+        "limited_noise_energy_sum": limited_noise_energy_sum,
+        "noise_energy_weighted_limiter_fraction": noise_energy_weighted_limiter_fraction,
+        "floor_touched_pixels": floor_touched_pixels,
+        "floor_proposed_pixels": floor_proposed_tensor,
+        "floor_correction_l1": floor_correction_l1,
+        "renorm_correction_l1": renorm_correction_l1,
+        "max_simplex_mass_error": max_simplex_mass_error,
     }
+    if diagnostics_device:
+        return out, tensor_diagnostics
+    keys = tuple(tensor_diagnostics)
+    values = torch.stack([tensor_diagnostics[key] for key in keys]).detach().cpu().tolist()
+    return out, {key: float(value) for key, value in zip(keys, values)}
+
+
+def _direct_doob_reverse_substep(
+    states: Tensor,
+    learned_delta: Tensor,
+    *,
+    rate: float,
+    dt: float,
+    dynamics_config: DirectFluxMNISTConfig,
+    standard_normal: Tensor | None = None,
+    deterministic: bool = False,
+    diagnostics_device: bool = False,
+) -> DirectDoobReverseStepResult:
+    """Advance the direct Doob sampler by one reference substep.
+
+    The known reversible reference drift, learned physical residual transfer,
+    and fresh reference noise are combined before the directional limiter.  This
+    is the production kernel used by ``doob-physical-residual`` generation and
+    the reusable seam for zero-residual reference diagnostics.
+    """
+
+    rate_value = float(rate)
+    dt_value = float(dt)
+    if not math.isfinite(rate_value) or rate_value < 0.0:
+        raise ValueError("rate must be finite and non-negative")
+    if not math.isfinite(dt_value) or dt_value < 0.0:
+        raise ValueError("dt must be finite and non-negative")
+    n = int(dynamics_config.grid_size)
+    expected_shape = (states.shape[0], 2, n, n)
+    if learned_delta.shape != expected_shape:
+        raise ValueError(f"learned_delta must have shape {expected_shape}")
+    free_delta = rate_value * free_drift_flux_torch(states, dynamics_config) * dt_value
+    mobility_channels = None
+    if diagnostics_device:
+        # The long-running gate needs both the Brownian scale and mobility-
+        # weighted limiter totals.  Share one mobility evaluation between them.
+        mobility_channels = harmonic_mobility_channels(states, dynamics_config)
+        n2 = float(n * n)
+        reference_noise_std = torch.sqrt(
+            (2.0 * mobility_channels * n2 * dt_value).clamp_min(0.0)
+        )
+    else:
+        # Preserve the historical helper seam for ordinary production callers
+        # and tests that inject reference-noise coefficients.
+        reference_noise_std = edge_noise_std_channels(states, dt_value, dynamics_config)
+    noise_std = math.sqrt(max(rate_value, 0.0)) * reference_noise_std
+    if deterministic:
+        fresh = torch.zeros_like(noise_std)
+    elif standard_normal is None:
+        fresh = torch.randn_like(noise_std)
+    else:
+        if standard_normal.shape != noise_std.shape:
+            raise ValueError("standard_normal must have the same shape as the edge-noise channels")
+        fresh = standard_normal.to(device=noise_std.device, dtype=noise_std.dtype)
+    noise_delta = noise_std * fresh
+    reverse_delta = free_delta + learned_delta + noise_delta
+    next_states, diagnostics = _apply_oriented_edge_transfer(
+        states,
+        reverse_delta,
+        dynamics_config,
+        noise_energy_weights=noise_std.detach().square(),
+        mobility_channels=mobility_channels,
+        diagnostics_device=bool(diagnostics_device),
+    )
+    return DirectDoobReverseStepResult(
+        states=next_states,
+        free_delta=free_delta,
+        learned_delta=learned_delta,
+        noise_delta=noise_delta,
+        diagnostics=diagnostics,
+    )
 
 
 def _maybe_np_scalar(bank: np.lib.npyio.NpzFile, key: str) -> float | int | str | None:
@@ -1861,6 +2337,7 @@ def _load_prior_bank(
     if not p.exists():
         raise FileNotFoundError(f"Phase-0 prior bank not found: {p}")
     bank = np.load(p, allow_pickle=True)
+    source_fields = np.asarray(bank.files, dtype=np.str_)
     states = np.asarray(bank["terminal_states"], dtype=np.float32)
     labels = np.asarray(bank["labels"], dtype=np.int64).reshape(-1)
     if states.ndim == 3:
@@ -1878,8 +2355,28 @@ def _load_prior_bank(
         "horizon": float(horizon),
         "sample_steps": int(sample_steps),
         "substeps": int(substeps),
+        "_source_fields": source_fields,
     }
-    for key in ("lambda_mix", "stride_substeps", "requested_stride_substeps", "cache_build_mode", "edge_alpha_mode", "alpha_eff", "start_substep", "physical_target_scale"):
+    for key in (
+        "grid_size",
+        "lambda_mix",
+        "stride_substeps",
+        "requested_stride_substeps",
+        "cache_build_mode",
+        "edge_alpha_mode",
+        "edge_alpha_value",
+        "alpha_eff",
+        "mass_floor",
+        "limiter_fraction",
+        "reference_integrator",
+        "reference_integrator_version",
+        "time_change_mode",
+        "tau_eff",
+        "rate_ramp",
+        "rate_ramp_ratio",
+        "start_substep",
+        "physical_target_scale",
+    ):
         value = _maybe_np_scalar(bank, key)
         if value is not None:
             out[key] = value
@@ -1908,6 +2405,7 @@ def simulate_d0_reverse_generation(
 ) -> D0GenerationResult:
     """Generate samples by reversing the Phase-0 forward noising law."""
 
+    _validate_direct_doob_config(d0_config)
     model.eval()
     rng = np.random.default_rng(int(seed))
     labels_np = np.asarray(labels.detach().cpu() if isinstance(labels, Tensor) else labels, dtype=np.int64).reshape(-1)
@@ -1952,7 +2450,7 @@ def simulate_d0_reverse_generation(
     stride = max(1, int(bank.get("stride_substeps", _actual_cache_stride_substeps(d0_config))))
     strength = float(d0_config.control_strength if control_strength is None else control_strength)
     target_space = _normalize_d0_target_space(d0_config.d0_target_space)
-    physical_sampling = target_space in {"physical-total", "physical-residual", "realized-physical", "realized-residual", "node-delta"}
+    physical_sampling = target_space in {"physical-total", "physical-residual", "realized-physical", "realized-residual", "doob-physical-residual", "node-delta"}
     physical_noise_mode = _physical_sampler_noise_mode(d0_config.physical_sampler_noise_mode)
     bank_scale = float(bank.get("physical_target_scale", 1.0))
     physical_scale_value = float(d0_config.physical_target_scale) if float(d0_config.physical_target_scale) > 0.0 else bank_scale
@@ -1963,6 +2461,14 @@ def simulate_d0_reverse_generation(
     total_proposed = 0.0
     total_mobility = 0.0
     total_limited_mobility = 0.0
+    total_noise_energy = 0.0
+    total_limited_noise_energy = 0.0
+    total_nonfinite_edges = 0.0
+    total_floor_touched_pixels = 0.0
+    total_floor_proposed_pixels = 0.0
+    total_floor_correction_l1 = 0.0
+    total_renorm_correction_l1 = 0.0
+    max_simplex_mass_error = 0.0
     learned_sq = 0.0
     learned_raw_sq = 0.0
     learned_projected_sq = 0.0
@@ -2004,33 +2510,66 @@ def simulate_d0_reverse_generation(
             q = int(q_start) - local
             outer_k = min(max(q // reference_substeps, 0), rate_schedule.size - 1)
             rate = float(rate_schedule[outer_k])
-            free_delta = rate * free_drift_flux_torch(states, dynamics_config) * dt_sub
-            noise_std = math.sqrt(max(rate, 0.0)) * edge_noise_std_channels(states, dt_sub, dynamics_config)
-            fresh = torch.zeros_like(m_step) if bool(deterministic) else torch.randn_like(m_step)
-            if physical_sampling and physical_noise_mode == "none":
-                noise_delta = torch.zeros_like(noise_std)
-            else:
-                noise_delta = noise_std * fresh
-            if physical_sampling:
+            if physical_sampling and target_space == "doob-physical-residual":
                 learned_delta = strength * float(physical_scale_value) * m_block / float(block_len)
-                if target_space in {"physical-residual", "realized-residual"}:
-                    reverse_delta = -free_delta + learned_delta - noise_delta
-                    sampler_mode = "realized-residual" if target_space == "realized-residual" else "physical-residual"
-                else:
-                    reverse_delta = learned_delta - noise_delta
-                    sampler_mode = "realized-physical" if target_space == "realized-physical" else "physical-total"
-                states, limited = _apply_oriented_edge_transfer(states, reverse_delta, dynamics_config)
+                # Preserve the production sampler's historical random draw:
+                # one randn_like(m_step) per stochastic elementary substep.
+                fresh = torch.zeros_like(m_step) if bool(deterministic) else torch.randn_like(m_step)
+                direct_step = _direct_doob_reverse_substep(
+                    states,
+                    learned_delta,
+                    rate=rate,
+                    dt=dt_sub,
+                    dynamics_config=dynamics_config,
+                    standard_normal=fresh,
+                    deterministic=bool(deterministic),
+                )
+                states = direct_step.states
+                free_delta = direct_step.free_delta
+                learned_delta = direct_step.learned_delta
+                noise_delta = direct_step.noise_delta
+                limited = direct_step.diagnostics
+                sampler_mode = "doob-physical-residual"
                 learned_sq += float(learned_delta.detach().square().mean().cpu())
             else:
-                xi_hat = fresh + m_step
-                forward_delta = free_delta + noise_std * xi_hat
-                states, limited = _apply_oriented_edge_transfer(states, -forward_delta, dynamics_config)
-                sampler_mode = "brownian-innovation"
-                learned_sq += float((noise_std * m_step).detach().square().mean().cpu())
+                free_delta = rate * free_drift_flux_torch(states, dynamics_config) * dt_sub
+                noise_std = math.sqrt(max(rate, 0.0)) * edge_noise_std_channels(states, dt_sub, dynamics_config)
+                fresh = torch.zeros_like(m_step) if bool(deterministic) else torch.randn_like(m_step)
+                if physical_sampling and physical_noise_mode == "none":
+                    noise_delta = torch.zeros_like(noise_std)
+                else:
+                    noise_delta = noise_std * fresh
+                if physical_sampling:
+                    learned_delta = strength * float(physical_scale_value) * m_block / float(block_len)
+                    if target_space in {"physical-residual", "realized-residual"}:
+                        reverse_delta = -free_delta + learned_delta - noise_delta
+                        sampler_mode = "realized-residual" if target_space == "realized-residual" else "physical-residual"
+                    else:
+                        reverse_delta = learned_delta - noise_delta
+                        sampler_mode = "realized-physical" if target_space == "realized-physical" else "physical-total"
+                    states, limited = _apply_oriented_edge_transfer(states, reverse_delta, dynamics_config)
+                    learned_sq += float(learned_delta.detach().square().mean().cpu())
+                else:
+                    xi_hat = fresh + m_step
+                    forward_delta = free_delta + noise_std * xi_hat
+                    states, limited = _apply_oriented_edge_transfer(states, -forward_delta, dynamics_config)
+                    sampler_mode = "brownian-innovation"
+                    learned_sq += float((noise_std * m_step).detach().square().mean().cpu())
             total_limited += float(limited["limited_edges"])
             total_proposed += float(limited["proposed_edges"])
             total_mobility += float(limited["mobility_weight_sum"])
             total_limited_mobility += float(limited["limited_mobility_weight_sum"])
+            total_noise_energy += float(limited.get("noise_energy_sum", 0.0))
+            total_limited_noise_energy += float(limited.get("limited_noise_energy_sum", 0.0))
+            total_nonfinite_edges += float(limited.get("nonfinite_edges", 0.0))
+            total_floor_touched_pixels += float(limited.get("floor_touched_pixels", 0.0))
+            total_floor_proposed_pixels += float(limited.get("floor_proposed_pixels", 0.0))
+            total_floor_correction_l1 += float(limited.get("floor_correction_l1", 0.0))
+            total_renorm_correction_l1 += float(limited.get("renorm_correction_l1", 0.0))
+            max_simplex_mass_error = max(
+                max_simplex_mass_error,
+                float(limited.get("max_simplex_mass_error", 0.0)),
+            )
             free_sq += float(free_delta.detach().square().mean().cpu())
             noise_sq += float(noise_delta.detach().square().mean().cpu())
             step_count += 1
@@ -2055,7 +2594,9 @@ def simulate_d0_reverse_generation(
         trajectory=None if not save_trajectory else np.stack(traj, axis=0).astype(np.float32),
         limiter_fraction=0.0 if total_proposed <= 0.0 else float(total_limited / total_proposed),
         mobility_weighted_limiter_fraction=0.0 if total_mobility <= 0.0 else float(total_limited_mobility / total_mobility),
-        noise_energy_weighted_limiter_fraction=float("nan"),
+        noise_energy_weighted_limiter_fraction=(
+            0.0 if total_noise_energy <= 0.0 else float(total_limited_noise_energy / total_noise_energy)
+        ),
         learned_step_rms=float(learned_rms),
         free_step_rms=float(free_rms),
         noise_step_rms=float(noise_rms),
@@ -2080,6 +2621,17 @@ def simulate_d0_reverse_generation(
         sample_start_substep=int(start_substep),
         reverse_blocks_requested=int(requested_blocks),
         reverse_blocks_executed=int(len(q_values)),
+        nonfinite_edges=int(total_nonfinite_edges),
+        floor_touched_pixels=int(total_floor_touched_pixels),
+        floor_proposed_pixels=int(total_floor_proposed_pixels),
+        floor_touched_fraction=(
+            0.0
+            if total_floor_proposed_pixels <= 0.0
+            else float(total_floor_touched_pixels / total_floor_proposed_pixels)
+        ),
+        floor_correction_l1=float(total_floor_correction_l1),
+        renorm_correction_l1=float(total_renorm_correction_l1),
+        max_simplex_mass_error=float(max_simplex_mass_error),
     )
 
 
@@ -2088,8 +2640,85 @@ def simulate_d0_reverse_generation(
 # ---------------------------------------------------------------------------
 
 
-def cache_summary(cache: D0TrainingCache) -> dict[str, float | int | str]:
+def cache_summary(
+    cache: D0TrainingCache,
+    dynamics_config: DirectFluxMNISTConfig | None = None,
+    d0_config: Experiment12D0Config | None = None,
+) -> dict[str, float | int | str]:
+    """Summarize a cache using the actual configured training target.
+
+    Legacy callers that omit the configs retain the historical raw-innovation
+    summary.  Direct-Doob callers report the finite projected
+    ``(realized reverse - positive reference drift) / c_U`` target instead of
+    silently relabeling raw forward innovations as the training target.
+    """
+
     valid_mask_fraction = float(cache.masks.float().mean().item()) if cache.size else 0.0
+    raw_innovation_rms = float(torch.sqrt(cache.innovations.float().square().mean()).item()) if cache.size else 0.0
+    direct_doob = bool(
+        dynamics_config is not None
+        and d0_config is not None
+        and _d0_is_direct_doob_space(d0_config.d0_target_space)
+    )
+    target_rms = raw_innovation_rms
+    target_finite_fraction = valid_mask_fraction
+    target_source = "raw-innovation"
+    direct_scale = 1.0
+    direct_bin_sq = [0.0] * 5
+    direct_bin_finite = [0] * 5
+    direct_bin_total = [0] * 5
+    if direct_doob and cache.size:
+        assert dynamics_config is not None and d0_config is not None
+        normalization = _physical_target_normalization_mode(d0_config.physical_target_normalization)
+        direct_scale = 1.0 if normalization == "none" else max(
+            float(cache.physical_target_scale),
+            float(d0_config.physical_target_scale_floor),
+        )
+        total_sq = 0.0
+        total_finite = 0
+        total_values = 0
+        rate_schedule = torch.as_tensor(cache.rate_schedule, dtype=torch.float32)
+        h = max(float(cache.horizon), 1e-30)
+        for start in range(0, int(cache.size), 256):
+            stop = min(int(cache.size), start + 256)
+            count = stop - start
+            batch = {
+                "states": cache.states[start:stop],
+                "starts": cache.starts[start:stop],
+                "stride_substeps": torch.full((count,), int(cache.stride_substeps), dtype=torch.long),
+                "reference_substeps": torch.full((count,), int(cache.reference_substeps), dtype=torch.long),
+                "dt_sub": torch.full((count,), float(cache.dt_sub), dtype=torch.float32),
+                "rate_schedule": rate_schedule,
+            }
+            baseline = _direct_reverse_free_block_baseline_from_batch(batch, dynamics_config)
+            target = project_edge_flux_torch(
+                cache.physical_transfers[start:stop].to(dtype=baseline.dtype) - baseline,
+                grid_size=int(dynamics_config.grid_size),
+            ) / float(direct_scale)
+            finite = torch.isfinite(target)
+            finite_values = target[finite]
+            total_sq += float(finite_values.double().square().sum().item())
+            total_finite += int(finite_values.numel())
+            total_values += int(target.numel())
+            tau_frac_chunk = (cache.tau[start:stop].float() / h).clamp(0.0, 1.0)
+            for idx in range(5):
+                lo = float(idx) / 5.0
+                hi = float(idx + 1) / 5.0
+                rows = (tau_frac_chunk >= lo) & (tau_frac_chunk <= hi if idx == 4 else tau_frac_chunk < hi)
+                if bool(rows.any()):
+                    values_bin = target[rows]
+                    finite_bin = torch.isfinite(values_bin)
+                    direct_bin_sq[idx] += float(values_bin[finite_bin].double().square().sum().item())
+                    direct_bin_finite[idx] += int(finite_bin.count_nonzero().item())
+                    direct_bin_total[idx] += int(values_bin.numel())
+        target_rms = math.sqrt(total_sq / total_finite) if total_finite else float("nan")
+        target_finite_fraction = float(total_finite) / float(total_values) if total_values else float("nan")
+        target_source = "projected-realized-minus-positive-free-scaled"
+    floor_path_substeps = (
+        float(cache.floor_proposed_pixels) / float(cache.states.shape[1])
+        if cache.size and cache.floor_proposed_pixels > 0
+        else 0.0
+    )
     summary: dict[str, float | int | str] = {
         "cache_size": int(cache.size),
         "cache_paths": int(cache.terminal_states.shape[0]),
@@ -2104,7 +2733,11 @@ def cache_summary(cache: D0TrainingCache) -> dict[str, float | int | str]:
         "cache_tau_min": float(cache.tau.min().item()) if cache.size else float("nan"),
         "cache_tau_mean": float(cache.tau.mean().item()) if cache.size else float("nan"),
         "cache_tau_max": float(cache.tau.max().item()) if cache.size else float("nan"),
-        "cache_target_rms": float(torch.sqrt(cache.innovations.square().mean()).item()) if cache.size else 0.0,
+        "cache_target_rms": float(target_rms),
+        "cache_target_source": target_source,
+        "cache_target_finite_fraction": float(target_finite_fraction),
+        "cache_raw_innovation_rms": float(raw_innovation_rms),
+        "cache_direct_residual_rms_unscaled": float(target_rms * direct_scale) if direct_doob else float("nan"),
         "cache_physical_transfer_rms": float(torch.sqrt(cache.physical_transfers.square().mean()).item()) if cache.size else 0.0,
         "cache_state_delta_rms": float(torch.sqrt((cache.earlier_states - cache.states).square().mean()).item()) if cache.size else 0.0,
         "cache_physical_target_scale": float(cache.physical_target_scale),
@@ -2120,6 +2753,19 @@ def cache_summary(cache: D0TrainingCache) -> dict[str, float | int | str]:
         "cache_valid_innovation_noise_energy_fraction": float(cache.valid_innovation_noise_energy_fraction),
         "cache_floor_correction_l1": float(cache.floor_correction_l1),
         "cache_renorm_correction_l1": float(cache.renorm_correction_l1),
+        "cache_floor_touched_pixels": int(cache.floor_touched_pixels),
+        "cache_floor_proposed_pixels": int(cache.floor_proposed_pixels),
+        "cache_floor_touched_fraction": float(cache.floor_touched_fraction),
+        "cache_floor_correction_l1_per_path_substep": (
+            float(cache.floor_correction_l1) / floor_path_substeps
+            if floor_path_substeps > 0.0
+            else float("nan")
+        ),
+        "cache_renorm_correction_l1_per_path_substep": (
+            float(cache.renorm_correction_l1) / floor_path_substeps
+            if floor_path_substeps > 0.0
+            else float("nan")
+        ),
         "cache_effective_time_integral": float(effective_time_integral(cache.rate_schedule, horizon=cache.horizon)),
     }
     if cache.trajectory_window_states is not None and cache.trajectory_window_valid is not None and cache.trajectory_window_depths is not None:
@@ -2149,16 +2795,42 @@ def cache_summary(cache: D0TrainingCache) -> dict[str, float | int | str]:
                 vals = innov[sel]
                 m = mask[sel]
                 summary[f"{key}_valid_mask_fraction"] = float(m.float().mean().item())
-                summary[f"{key}_target_rms"] = float(torch.sqrt((vals[m].float().square().mean()).clamp_min(0.0)).item()) if bool(m.any()) else float("nan")
+                raw_bin_rms = float(torch.sqrt((vals[m].float().square().mean()).clamp_min(0.0)).item()) if bool(m.any()) else float("nan")
+                summary[f"{key}_raw_innovation_rms"] = raw_bin_rms
+                if direct_doob:
+                    finite_count = direct_bin_finite[idx]
+                    summary[f"{key}_target_finite_fraction"] = (
+                        float(finite_count) / float(direct_bin_total[idx])
+                        if direct_bin_total[idx]
+                        else float("nan")
+                    )
+                    summary[f"{key}_target_rms"] = (
+                        math.sqrt(direct_bin_sq[idx] / float(finite_count))
+                        if finite_count
+                        else float("nan")
+                    )
+                else:
+                    summary[f"{key}_target_finite_fraction"] = float(m.float().mean().item())
+                    summary[f"{key}_target_rms"] = raw_bin_rms
             else:
                 summary[f"{key}_valid_mask_fraction"] = float("nan")
+                summary[f"{key}_raw_innovation_rms"] = float("nan")
+                summary[f"{key}_target_finite_fraction"] = float("nan")
                 summary[f"{key}_target_rms"] = float("nan")
     return summary
 
 
 def save_d0_cache_npz(cache: D0TrainingCache, path: Path) -> None:
+    """Atomically persist a complete D0 cache.
+
+    Schema version 2 adds every numerical-health counter needed by the strict
+    one-image gate.  The loader below still accepts the older partial cache
+    files for report-only legacy workflows.
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, np.ndarray] = {
+        "schema_version": np.asarray([2], dtype=np.int64),
         "states": cache.states.numpy().astype(np.float32),
         "tau": cache.tau.numpy().astype(np.float32),
         "labels": cache.labels.numpy().astype(np.int64),
@@ -2182,12 +2854,357 @@ def save_d0_cache_npz(cache: D0TrainingCache, path: Path) -> None:
         "reference_substeps": np.asarray([cache.reference_substeps], dtype=np.int64),
         "lambda_mix": np.asarray([cache.lambda_mix], dtype=np.float64),
         "cache_build_mode": np.asarray([cache.cache_build_mode]),
+        "teacher_mode": np.asarray([cache.teacher_mode]),
+        "raw_limited_fraction": np.asarray([cache.raw_limited_fraction], dtype=np.float64),
+        "mobility_weighted_limited_fraction": np.asarray(
+            [cache.mobility_weighted_limited_fraction], dtype=np.float64
+        ),
+        "noise_energy_weighted_limited_fraction": np.asarray(
+            [cache.noise_energy_weighted_limited_fraction], dtype=np.float64
+        ),
+        "valid_innovation_fraction": np.asarray(
+            [cache.valid_innovation_fraction], dtype=np.float64
+        ),
+        "valid_innovation_mobility_fraction": np.asarray(
+            [cache.valid_innovation_mobility_fraction], dtype=np.float64
+        ),
+        "valid_innovation_noise_energy_fraction": np.asarray(
+            [cache.valid_innovation_noise_energy_fraction], dtype=np.float64
+        ),
+        "floor_correction_l1": np.asarray([cache.floor_correction_l1], dtype=np.float64),
+        "renorm_correction_l1": np.asarray([cache.renorm_correction_l1], dtype=np.float64),
+        "floor_touched_pixels": np.asarray([cache.floor_touched_pixels], dtype=np.int64),
+        "floor_proposed_pixels": np.asarray([cache.floor_proposed_pixels], dtype=np.int64),
+        "floor_touched_fraction": np.asarray([cache.floor_touched_fraction], dtype=np.float64),
     }
     if cache.trajectory_window_states is not None and cache.trajectory_window_valid is not None and cache.trajectory_window_depths is not None:
         payload["trajectory_window_states"] = cache.trajectory_window_states.numpy().astype(np.float32)
         payload["trajectory_window_valid"] = cache.trajectory_window_valid.numpy().astype(np.bool_)
         payload["trajectory_window_depths"] = cache.trajectory_window_depths.numpy().astype(np.int64)
-    np.savez_compressed(path, **payload)
+    temp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w+b", suffix=".npz", prefix=f".{path.name}.", dir=path.parent, delete=False
+        ) as handle:
+            temp_name = handle.name
+            np.savez_compressed(handle, **payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if temp_name is not None and os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def load_d0_cache_npz(path: str | Path, *, require_complete: bool = False) -> D0TrainingCache:
+    """Load a D0 cache written by :func:`save_d0_cache_npz`.
+
+    ``require_complete`` is used by exact training resume.  Legacy partial
+    cache files remain readable for diagnostics, with unavailable counters set
+    to ``NaN`` and an explicit warning.
+    """
+
+    cache_path = Path(path)
+    with np.load(cache_path, allow_pickle=False) as data:
+        schema = int(np.asarray(data["schema_version"]).reshape(-1)[0]) if "schema_version" in data else 1
+        complete_fields = {
+            "raw_limited_fraction",
+            "mobility_weighted_limited_fraction",
+            "noise_energy_weighted_limited_fraction",
+            "valid_innovation_fraction",
+            "valid_innovation_mobility_fraction",
+            "valid_innovation_noise_energy_fraction",
+            "floor_correction_l1",
+            "renorm_correction_l1",
+            "floor_touched_pixels",
+            "floor_proposed_pixels",
+            "floor_touched_fraction",
+        }
+        missing = sorted(complete_fields.difference(data.files))
+        if require_complete and (schema < 2 or missing):
+            raise ValueError(
+                f"D0 cache {cache_path} is not complete enough for exact resume; "
+                + ("missing: " + ", ".join(missing) if missing else f"schema_version={schema}")
+            )
+        if schema < 2 or missing:
+            warnings.warn(
+                f"Loading legacy partial D0 cache {cache_path}; unavailable diagnostics "
+                "are reported as NaN and strict resume is disabled.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        def scalar(name: str, default: float | int | str) -> float | int | str:
+            if name not in data:
+                return default
+            value = np.asarray(data[name]).reshape(-1)[0]
+            return value.item() if isinstance(value, np.generic) else value
+
+        trajectory_states = (
+            torch.from_numpy(np.asarray(data["trajectory_window_states"], dtype=np.float32).copy())
+            if "trajectory_window_states" in data
+            else None
+        )
+        trajectory_valid = (
+            torch.from_numpy(np.asarray(data["trajectory_window_valid"], dtype=np.bool_).copy())
+            if "trajectory_window_valid" in data
+            else None
+        )
+        trajectory_depths = (
+            torch.from_numpy(np.asarray(data["trajectory_window_depths"], dtype=np.int64).copy())
+            if "trajectory_window_depths" in data
+            else None
+        )
+        return D0TrainingCache(
+            states=torch.from_numpy(np.asarray(data["states"], dtype=np.float32).copy()),
+            tau=torch.from_numpy(np.asarray(data["tau"], dtype=np.float32).copy()),
+            labels=torch.from_numpy(np.asarray(data["labels"], dtype=np.int64).copy()),
+            innovations=torch.from_numpy(np.asarray(data["innovations"], dtype=np.float32).copy()),
+            masks=torch.from_numpy(np.asarray(data["masks"], dtype=np.bool_).copy()),
+            starts=torch.from_numpy(np.asarray(data["starts"], dtype=np.int64).copy()),
+            path_indices=torch.from_numpy(np.asarray(data["path_indices"], dtype=np.int64).copy()),
+            start_images=torch.from_numpy(np.asarray(data["start_images"], dtype=np.float32).copy()),
+            earlier_states=torch.from_numpy(np.asarray(data["earlier_states"], dtype=np.float32).copy()),
+            physical_transfers=torch.from_numpy(
+                np.asarray(data["physical_transfers"], dtype=np.float32).copy()
+            ),
+            physical_target_scale=float(scalar("physical_target_scale", 1.0)),
+            terminal_states=np.asarray(data["terminal_states"], dtype=np.float32).copy(),
+            source_indices=np.asarray(data["source_indices"], dtype=np.int64).copy(),
+            requested_labels=np.asarray(data["requested_labels"], dtype=np.int64).copy(),
+            rate_schedule=np.asarray(data["rate_schedule"], dtype=np.float64).copy(),
+            horizon=float(scalar("horizon", 0.0)),
+            dt_sub=float(scalar("dt_sub", 0.0)),
+            stride_substeps=int(scalar("stride_substeps", 1)),
+            sample_steps=int(scalar("sample_steps", 0)),
+            reference_substeps=int(scalar("reference_substeps", 1)),
+            lambda_mix=float(scalar("lambda_mix", 0.0)),
+            raw_limited_fraction=float(scalar("raw_limited_fraction", float("nan"))),
+            mobility_weighted_limited_fraction=float(
+                scalar("mobility_weighted_limited_fraction", float("nan"))
+            ),
+            noise_energy_weighted_limited_fraction=float(
+                scalar("noise_energy_weighted_limited_fraction", float("nan"))
+            ),
+            valid_innovation_fraction=float(
+                scalar("valid_innovation_fraction", float("nan"))
+            ),
+            valid_innovation_mobility_fraction=float(
+                scalar("valid_innovation_mobility_fraction", float("nan"))
+            ),
+            valid_innovation_noise_energy_fraction=float(
+                scalar("valid_innovation_noise_energy_fraction", float("nan"))
+            ),
+            floor_correction_l1=float(scalar("floor_correction_l1", float("nan"))),
+            renorm_correction_l1=float(scalar("renorm_correction_l1", float("nan"))),
+            teacher_mode=str(scalar("teacher_mode", "d0-forward")),
+            cache_build_mode=str(scalar("cache_build_mode", "outer")),
+            requested_stride_substeps=int(
+                scalar("requested_stride_substeps", scalar("stride_substeps", 1))
+            ),
+            trajectory_window_states=trajectory_states,
+            trajectory_window_valid=trajectory_valid,
+            trajectory_window_depths=trajectory_depths,
+            floor_touched_pixels=int(scalar("floor_touched_pixels", 0)),
+            floor_proposed_pixels=int(scalar("floor_proposed_pixels", 0)),
+            floor_touched_fraction=float(scalar("floor_touched_fraction", float("nan"))),
+        )
+
+
+@torch.no_grad()
+def d0_direct_doob_oracle_diagnostic(
+    cache: D0TrainingCache,
+    dynamics_config: DirectFluxMNISTConfig,
+    *,
+    max_slices: int = 16,
+    device: torch.device | None = None,
+) -> dict[str, float | int | str]:
+    """Replay the direct target decomposition with the real transfer update."""
+
+    if cache.size == 0:
+        return {"oracle_slices": 0, "oracle_status": "empty_cache", "oracle_semantics": "direct-doob"}
+    if int(cache.stride_substeps) != 1:
+        return {
+            "oracle_slices": 0,
+            "oracle_status": "requires_stride_1",
+            "oracle_semantics": "direct-doob",
+        }
+    dev = device if device is not None else torch.device("cpu")
+    count = min(int(max_slices), int(cache.size))
+    idx = torch.arange(count, dtype=torch.long)
+    later = cache.states.index_select(0, idx).to(dev)
+    earlier = cache.earlier_states.index_select(0, idx).to(dev)
+    realized = cache.physical_transfers.index_select(0, idx).to(dev)
+    batch = {
+        "states": later,
+        "starts": cache.starts.index_select(0, idx).to(dev),
+        "stride_substeps": torch.ones(count, dtype=torch.long, device=dev),
+        "reference_substeps": torch.full((count,), int(cache.reference_substeps), dtype=torch.long, device=dev),
+        "dt_sub": torch.full((count,), float(cache.dt_sub), dtype=later.dtype, device=dev),
+        "rate_schedule": torch.as_tensor(cache.rate_schedule, dtype=later.dtype, device=dev),
+    }
+    positive_free = _direct_reverse_free_block_baseline_from_batch(batch, dynamics_config)
+    residual = project_edge_flux_torch(realized - positive_free, grid_size=int(dynamics_config.grid_size))
+    direct_total = positive_free + residual
+    replayed, limited = _apply_oriented_edge_transfer(later, direct_total, dynamics_config)
+    baseline_only, baseline_limited = _apply_oriented_edge_transfer(later, positive_free, dynamics_config)
+
+    def state_stats(prefix: str, states: Tensor, limiter: dict[str, float]) -> dict[str, float]:
+        diff = states - earlier
+        a = states - states.mean(dim=1, keepdim=True)
+        b = earlier - earlier.mean(dim=1, keepdim=True)
+        corr = (a * b).sum(dim=1) / (a.square().sum(dim=1).sqrt() * b.square().sum(dim=1).sqrt()).clamp_min(1e-30)
+        proposed = float(limiter["proposed_edges"])
+        return {
+            f"oracle_{prefix}_l1": float(diff.abs().sum(dim=1).mean().detach().cpu()),
+            f"oracle_{prefix}_rms": float(torch.sqrt(diff.square().mean()).detach().cpu()),
+            f"oracle_{prefix}_corr": float(corr.mean().detach().cpu()),
+            f"oracle_{prefix}_limiter_fraction": 0.0 if proposed <= 0.0 else float(limiter["limited_edges"]) / proposed,
+        }
+
+    return {
+        "oracle_slices": int(count),
+        "oracle_stride_substeps": 1,
+        "oracle_mode": "direct_realized_minus_positive_free",
+        "oracle_semantics": "direct-doob",
+        "oracle_residual_rms": float(torch.sqrt(residual.square().mean()).detach().cpu()),
+        "oracle_positive_free_rms": float(torch.sqrt(positive_free.square().mean()).detach().cpu()),
+        **state_stats("direct", replayed, limited),
+        **state_stats("positive_free_only", baseline_only, baseline_limited),
+    }
+
+
+def d0_cache_batch_from_indices(
+    cache: D0TrainingCache,
+    indices: Sequence[int] | np.ndarray | Tensor,
+    *,
+    device: torch.device,
+) -> dict[str, Tensor]:
+    """Materialize exact cache rows without sampling or reordering them.
+
+    The production one-image gate uses this seam for path-isolated validation
+    and exact resume.  Ordinary Experiment 12 callers continue to use
+    :func:`sample_d0_cache_batch` unchanged.
+    """
+
+    idx = torch.as_tensor(indices, dtype=torch.long).reshape(-1)
+    if idx.numel() == 0:
+        raise ValueError("D0 cache indices must not be empty")
+    if bool(((idx < 0) | (idx >= int(cache.size))).any()):
+        raise IndexError("D0 cache indices are outside the cache")
+    count = int(idx.numel())
+    batch: dict[str, Tensor] = {
+        "states": cache.states.index_select(0, idx).to(device),
+        "tau": cache.tau.index_select(0, idx).to(device),
+        "labels": cache.labels.index_select(0, idx).to(device),
+        "innovations": cache.innovations.index_select(0, idx).to(device),
+        "masks": cache.masks.index_select(0, idx).to(device),
+        "earlier_states": cache.earlier_states.index_select(0, idx).to(device),
+        "physical_transfers": cache.physical_transfers.index_select(0, idx).to(device),
+        "starts": cache.starts.index_select(0, idx).to(device),
+        "path_indices": cache.path_indices.index_select(0, idx).to(device),
+        "stride_substeps": torch.full(
+            (count,), int(cache.stride_substeps), dtype=torch.long, device=device
+        ),
+        "reference_substeps": torch.full(
+            (count,), int(cache.reference_substeps), dtype=torch.long, device=device
+        ),
+        "dt_sub": torch.full(
+            (count,), float(cache.dt_sub), dtype=torch.float32, device=device
+        ),
+        "rate_schedule": torch.as_tensor(
+            cache.rate_schedule, dtype=torch.float32, device=device
+        ),
+        "cache_indices": idx.to(device),
+    }
+    if (
+        cache.trajectory_window_states is not None
+        and cache.trajectory_window_valid is not None
+        and cache.trajectory_window_depths is not None
+    ):
+        batch.update(
+            {
+                "trajectory_window_states": cache.trajectory_window_states.index_select(
+                    0, idx
+                ).to(device),
+                "trajectory_window_valid": cache.trajectory_window_valid.index_select(
+                    0, idx
+                ).to(device),
+                "trajectory_window_depths": cache.trajectory_window_depths.to(device),
+            }
+        )
+    return batch
+
+
+@torch.no_grad()
+def d0_direct_residual_predictions(
+    model: torch.nn.Module,
+    cache: D0TrainingCache,
+    dynamics_config: DirectFluxMNISTConfig,
+    d0_config: Experiment12D0Config,
+    *,
+    indices: Sequence[int] | np.ndarray | Tensor,
+    device: torch.device,
+    batch_size: int = 256,
+) -> dict[str, Tensor]:
+    """Return held-out predictions and the exact scaled direct-Doob target.
+
+    Results are returned on the CPU in the requested row order.  This helper is
+    intentionally restricted to the strict direct-Doob objective so validation
+    cannot silently drift to a legacy target or mask convention.
+    """
+
+    _validate_direct_doob_config(d0_config)
+    if not _d0_is_direct_doob_space(d0_config.d0_target_space):
+        raise ValueError("direct residual validation requires doob-physical-residual")
+    rows = torch.as_tensor(indices, dtype=torch.long).reshape(-1)
+    if rows.numel() == 0:
+        raise ValueError("direct residual validation indices must not be empty")
+    outputs: dict[str, list[Tensor]] = {
+        "prediction": [],
+        "target": [],
+        "mask": [],
+        "tau": [],
+        "path_indices": [],
+        "cache_indices": [],
+    }
+    was_training = bool(model.training)
+    model.eval()
+    try:
+        chunk_size = max(1, int(batch_size))
+        for start in range(0, int(rows.numel()), chunk_size):
+            idx = rows[start : start + chunk_size]
+            batch = d0_cache_batch_from_indices(cache, idx, device=device)
+            pred_raw = model(batch["tau"], batch["states"], batch["labels"], None)
+            pred = project_edge_flux_torch(
+                pred_raw, grid_size=int(dynamics_config.grid_size)
+            )
+            target_total = _physical_edge_target_from_batch(
+                batch, dynamics_config, d0_config
+            )
+            baseline = _direct_reverse_free_block_baseline_from_batch(
+                batch, dynamics_config
+            )
+            target = project_edge_flux_torch(
+                target_total - baseline, grid_size=int(dynamics_config.grid_size)
+            )
+            scale = _physical_training_scale_tensor(target, d0_config)
+            target_scaled = target / scale
+            mask = _physical_edge_loss_mask(
+                batch["masks"].to(dtype=pred.dtype), target, d0_config
+            ).bool()
+            for key, value in (
+                ("prediction", pred),
+                ("target", target_scaled),
+                ("mask", mask),
+                ("tau", batch["tau"]),
+                ("path_indices", batch["path_indices"]),
+                ("cache_indices", batch["cache_indices"]),
+            ):
+                outputs[key].append(value.detach().cpu())
+    finally:
+        model.train(was_training)
+    return {key: torch.cat(parts, dim=0) for key, parts in outputs.items()}
 
 
 @torch.no_grad()
@@ -2366,7 +3383,7 @@ def d0_learned_block_reverse_diagnostic(
         pred_raw = pred_raw.clamp(-float(d0_config.control_output_clip), float(d0_config.control_output_clip))
     pred_projected = project_edge_flux_torch(pred_raw, grid_size=int(dynamics_config.grid_size))
     target_space = _normalize_d0_target_space(d0_config.d0_target_space)
-    physical_sampling = target_space in {"physical-total", "physical-residual", "realized-physical", "realized-residual", "node-delta"}
+    physical_sampling = target_space in {"physical-total", "physical-residual", "realized-physical", "realized-residual", "doob-physical-residual", "node-delta"}
     pred = pred_raw if target_space in {"realized-physical", "realized-residual"} else (pred_projected if (physical_sampling or bool(d0_config.sample_project_learned_mean)) else pred_raw)
     if physical_sampling:
         phys_scale = 1.0 if _physical_target_normalization_mode(d0_config.physical_target_normalization) == "none" else float(d0_config.physical_target_scale or cache.physical_target_scale)
@@ -2391,7 +3408,9 @@ def d0_learned_block_reverse_diagnostic(
                 free_delta = rate * free_drift_flux_torch(chunk, dynamics_config) * dt_sub
                 if physical_sampling:
                     learned = edge_step.index_select(0, rows)
-                    if target_space in {"physical-residual", "realized-residual"} or bool(force_free_baseline):
+                    if target_space == "doob-physical-residual":
+                        reverse_delta = free_delta + learned
+                    elif target_space in {"physical-residual", "realized-residual"} or bool(force_free_baseline):
                         reverse_delta = -free_delta + learned
                     else:
                         reverse_delta = learned
@@ -2484,11 +3503,14 @@ def d0_learned_rollout_diagnostic(
     labels = cache.labels.index_select(0, idx).to(device)
     start_ref = cache.start_images.index_select(0, idx).to(device)
     tau_base = cache.tau.index_select(0, idx).to(device)
-    starts_base = cache.starts.index_select(0, idx)
+    # Cache tensors live on CPU, but all rollout indexing after this point must
+    # follow the model/state device.  Keeping starts_base on CPU makes
+    # outer_rows/row_idx CPU tensors and crashes CUDA index_select below.
+    starts_base = cache.starts.index_select(0, idx).to(device=device)
     stride = max(1, int(cache.stride_substeps))
     dt_sub = float(cache.dt_sub)
     target_space = _normalize_d0_target_space(d0_config.d0_target_space)
-    physical_sampling = target_space in {"physical-total", "physical-residual", "realized-physical", "realized-residual", "node-delta"}
+    physical_sampling = target_space in {"physical-total", "physical-residual", "realized-physical", "realized-residual", "doob-physical-residual", "node-delta"}
     rate_schedule = np.asarray(cache.rate_schedule, dtype=np.float64).reshape(-1)
     total_limited = 0.0
     total_proposed = 0.0
@@ -2521,17 +3543,27 @@ def d0_learned_rollout_diagnostic(
             phys_scale = 1.0 if _physical_target_normalization_mode(d0_config.physical_target_normalization) == "none" else float(d0_config.physical_target_scale or cache.physical_target_scale)
             pred_block = float(phys_scale) * pred_block
         for local in range(stride):
-            q_rows = (starts_base - int((depth - 1) * stride + local)).clamp_min(0)
+            # A cached slice with start ``k`` and stride ``r`` is keyed at the
+            # later state S[k+r].  Undo q=k+r-1,...,k before moving into the
+            # preceding block.  Starting at k silently selects the wrong rate
+            # whenever the schedule is nonconstant.
+            q_rows = (
+                starts_base
+                + int(stride - 1)
+                - int((depth - 1) * stride + local)
+            ).clamp_min(0)
             outer_rows = torch.div(q_rows, max(1, int(cache.reference_substeps)), rounding_mode="floor").clamp(0, rate_schedule.size - 1)
             next_states = states.clone()
             for outer_value in torch.unique(outer_rows):
-                row_idx = torch.nonzero(outer_rows == outer_value, as_tuple=True)[0]
+                row_idx = torch.nonzero(outer_rows == outer_value, as_tuple=True)[0].to(device=states.device)
                 rate = float(rate_schedule[int(outer_value.item())])
                 chunk = states.index_select(0, row_idx)
                 free_delta = rate * free_drift_flux_torch(chunk, dynamics_config) * dt_sub
                 pred_chunk = pred_block.index_select(0, row_idx)
                 if physical_sampling:
-                    if target_space in {"physical-residual", "realized-residual"}:
+                    if target_space == "doob-physical-residual":
+                        reverse_delta = free_delta + pred_chunk / float(stride)
+                    elif target_space in {"physical-residual", "realized-residual"}:
                         reverse_delta = -free_delta + pred_chunk / float(stride)
                     else:
                         reverse_delta = pred_chunk / float(stride)
@@ -2561,6 +3593,7 @@ def train_experiment12_d0(
 ) -> dict[str, object]:
     """Train the standalone D0 innovation predictor."""
 
+    _validate_direct_doob_config(d0_config)
     _disable_mkldnn_for_cpu_if_needed(device)
     rng = np.random.default_rng(int(d0_config.seed))
     torch.manual_seed(int(d0_config.seed))
@@ -2578,12 +3611,14 @@ def train_experiment12_d0(
         rng=rng,
         show_progress=show_progress,
     )
-    d0_config = _with_cache_physical_scale(d0_config, cache)
+    d0_config = _with_cache_physical_scale(d0_config, cache, dynamics_config)
     save_d0_cache_npz(cache, run_dir / "experiment12_d0_cache_initial.npz")
-    summary = cache_summary(cache)
+    current_cache_summary = cache_summary(cache, dynamics_config, d0_config)
+    summary = dict(current_cache_summary)
     oracle_summary: dict[str, float | int | str] = {}
     if bool(d0_config.oracle_reverse_diagnostic):
-        oracle_summary = d0_oracle_reverse_diagnostic(
+        oracle_fn = d0_direct_doob_oracle_diagnostic if _d0_is_direct_doob_space(d0_config.d0_target_space) else d0_oracle_reverse_diagnostic
+        oracle_summary = oracle_fn(
             cache,
             dynamics_config,
             max_slices=int(d0_config.oracle_reverse_slices),
@@ -2626,7 +3661,8 @@ def train_experiment12_d0(
                 rng=rng,
                 show_progress=show_progress,
             )
-            d0_config = _with_cache_physical_scale(d0_config, cache)
+            d0_config = _with_cache_physical_scale(d0_config, cache, dynamics_config)
+            current_cache_summary = cache_summary(cache, dynamics_config, d0_config)
             last_refresh = time.perf_counter()
         batch = sample_d0_cache_batch(cache, int(d0_config.batch_size), device=device, rng=rng, allowed_indices=debug_indices)
         optimizer.zero_grad(set_to_none=True)
@@ -2639,10 +3675,28 @@ def train_experiment12_d0(
         scaler.step(optimizer)
         scaler.update()
         update_ema_state(ema_state, model, float(d0_config.ema_decay))
-        row: dict[str, float | int] = {"step": int(step), **diag, **cache_summary(cache), "seconds_since_cache_refresh": float(time.perf_counter() - last_refresh)}
+        row: dict[str, float | int] = {"step": int(step), **diag, **current_cache_summary, "seconds_since_cache_refresh": float(time.perf_counter() - last_refresh)}
         history.append(row)
         if hasattr(bar, "set_postfix"):
             bar.set_postfix(loss=float(diag["loss"]), gain=float(diag["innovation_gain"]), mask=float(diag["mask_fraction"]))
+
+    # Optional post-training diagnostics must never be the first point at which
+    # the trained weights/history are persisted.  Save a usable checkpoint now;
+    # the same files are rewritten below after diagnostics add their summaries.
+    write_csv_rows(run_dir / "experiment12_d0_train_metrics.csv", history)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "ema_state_dict": ema_state,
+            "dynamics_config": asdict(dynamics_config),
+            "d0_config": asdict(d0_config),
+            "history": history,
+            "cache_summary": current_cache_summary,
+            "checkpoint_stage": "pre_posttrain_diagnostics",
+        },
+        run_dir / "experiment12_d0_model.pt",
+    )
+
     if bool(d0_config.learned_block_diagnostic):
         learned_block_summary = d0_learned_block_reverse_diagnostic(
             model,
@@ -2715,11 +3769,45 @@ def train_experiment12_d0(
             "dynamics_config": asdict(dynamics_config),
             "d0_config": asdict(d0_config),
             "history": history,
-            "cache_summary": cache_summary(cache),
+            "cache_summary": current_cache_summary,
         },
         run_dir / "experiment12_d0_model.pt",
     )
-    return {"model": model, "ema_state": ema_state, "cache": cache, "history": history, "cache_summary": cache_summary(cache), "d0_config": d0_config}
+    return {"model": model, "ema_state": ema_state, "cache": cache, "history": history, "cache_summary": current_cache_summary, "d0_config": d0_config}
+
+
+# ---------------------------------------------------------------------------
+# Production one-image reusable seams
+# ---------------------------------------------------------------------------
+
+
+def save_d0_one_image_training_checkpoint(path: str | Path, **kwargs):
+    """Lazily dispatch to the exact one-image checkpoint writer.
+
+    Lazy imports avoid a module cycle because the production artifact helpers
+    intentionally reuse :class:`D0TrainingCache` from this legacy-compatible
+    module.
+    """
+
+    from mnist.d0_one_image_gate import save_training_checkpoint
+
+    return save_training_checkpoint(path, **kwargs)
+
+
+def load_d0_one_image_training_checkpoint(path: str | Path, **kwargs):
+    """Lazily load a strict one-image checkpoint or report-only legacy file."""
+
+    from mnist.d0_one_image_gate import load_training_checkpoint
+
+    return load_training_checkpoint(path, **kwargs)
+
+
+def run_paired_d0_one_image_sampling(model: torch.nn.Module, **kwargs):
+    """Run the restartable paired strength-zero/one production sampler."""
+
+    from mnist.d0_one_image_sampler import run_paired_d0_sampling
+
+    return run_paired_d0_sampling(model, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -2940,7 +4028,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cache-terminal-endpoint-prob", type=float, default=0.10)
     parser.add_argument("--cache-endpoint-window-fraction", type=float, default=0.10)
     parser.add_argument("--eta-l2-weight", type=float, default=1e-4)
-    parser.add_argument("--d0-target-space", choices=("raw", "projected-edge", "divergence", "physical-edge", "physical-total", "physical-residual", "realized-physical", "realized-residual", "node-delta"), default="projected-edge")
+    parser.add_argument("--d0-target-space", choices=("raw", "projected-edge", "divergence", "physical-edge", "physical-total", "physical-residual", "realized-physical", "realized-residual", "doob-physical-residual", "node-delta"), default="projected-edge")
     parser.add_argument("--physical-target-normalization", choices=("none", "global-rms", "per-slice-rms"), default="global-rms")
     parser.add_argument("--physical-target-scale", type=float, default=0.0, help="Override physical target scale used by normalized physical/realized modes. 0 means infer from cache.")
     parser.add_argument("--physical-target-scale-floor", type=float, default=1e-6)
@@ -3010,6 +4098,45 @@ def _resolved_cache_subset_mode(d0_config: Experiment12D0Config) -> str:
     return mode
 
 
+def _prior_bank_reference_metadata(
+    cache: D0TrainingCache,
+    dynamics_config: DirectFluxMNISTConfig,
+    d0_config: Experiment12D0Config,
+) -> dict[str, np.ndarray]:
+    """Return a self-describing record of the forward law behind a terminal bank."""
+
+    return {
+        "rate_schedule": cache.rate_schedule.astype(np.float64),
+        "grid_size": np.asarray([int(dynamics_config.grid_size)], dtype=np.int64),
+        "sample_steps": np.asarray([cache.sample_steps], dtype=np.int64),
+        "substeps": np.asarray([cache.reference_substeps], dtype=np.int64),
+        "stride_substeps": np.asarray([cache.stride_substeps], dtype=np.int64),
+        "requested_stride_substeps": np.asarray(
+            [cache.requested_stride_substeps or cache.stride_substeps], dtype=np.int64
+        ),
+        "horizon": np.asarray([cache.horizon], dtype=np.float64),
+        "lambda_mix": np.asarray([cache.lambda_mix], dtype=np.float64),
+        "mass_floor": np.asarray([float(dynamics_config.mass_floor)], dtype=np.float64),
+        "limiter_fraction": np.asarray(
+            [float(dynamics_config.limiter_fraction)], dtype=np.float64
+        ),
+        "edge_alpha_mode": np.asarray([str(dynamics_config.edge_alpha_mode)]),
+        "edge_alpha_value": np.asarray(
+            [float(edge_alpha_value(dynamics_config))], dtype=np.float64
+        ),
+        "alpha_eff": np.asarray([float(dynamics_config.alpha_eff)], dtype=np.float64),
+        "cache_build_mode": np.asarray([cache.cache_build_mode]),
+        "reference_integrator": np.asarray([_D0_REFERENCE_INTEGRATOR]),
+        "reference_integrator_version": np.asarray(
+            [_D0_REFERENCE_INTEGRATOR_VERSION], dtype=np.int64
+        ),
+        "time_change_mode": np.asarray([str(d0_config.time_change_mode)]),
+        "tau_eff": np.asarray([float(d0_config.tau_eff)], dtype=np.float64),
+        "rate_ramp": np.asarray([str(d0_config.rate_ramp)]),
+        "rate_ramp_ratio": np.asarray([float(d0_config.rate_ramp_ratio)], dtype=np.float64),
+    }
+
+
 def _save_training_prior_bank(
     path: Path,
     cache: D0TrainingCache,
@@ -3027,16 +4154,6 @@ def _save_training_prior_bank(
         path,
         terminal_states=cache.terminal_states[paths].reshape(paths.size, -1),
         labels=cache.requested_labels[paths].astype(np.int64),
-        rate_schedule=cache.rate_schedule.astype(np.float64),
-        sample_steps=np.asarray([cache.sample_steps], dtype=np.int64),
-        substeps=np.asarray([cache.reference_substeps], dtype=np.int64),
-        stride_substeps=np.asarray([cache.stride_substeps], dtype=np.int64),
-        requested_stride_substeps=np.asarray([cache.requested_stride_substeps or cache.stride_substeps], dtype=np.int64),
-        horizon=np.asarray([cache.horizon], dtype=np.float64),
-        lambda_mix=np.asarray([cache.lambda_mix], dtype=np.float64),
-        edge_alpha_mode=np.asarray([str(dynamics_config.edge_alpha_mode)]),
-        alpha_eff=np.asarray([float(dynamics_config.alpha_eff)], dtype=np.float64),
-        cache_build_mode=np.asarray([cache.cache_build_mode]),
         cache_subset=np.asarray([str(subset_name)]),
         start_image=cache.start_images[:1].numpy().astype(np.float32),
         overfit_start_image=cache.start_images[:1].numpy().astype(np.float32),
@@ -3044,6 +4161,7 @@ def _save_training_prior_bank(
         physical_target_scale=np.asarray([float(d0_config.physical_target_scale)], dtype=np.float64),
         physical_target_normalization=np.asarray([str(d0_config.physical_target_normalization)]),
         physical_loss_mask=np.asarray([str(d0_config.physical_loss_mask)]),
+        **_prior_bank_reference_metadata(cache, dynamics_config, d0_config),
     )
 
 
@@ -3202,19 +4320,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                     cache_prior,
                     terminal_states=cache.states.index_select(0, torch.as_tensor(order, dtype=torch.long)).numpy(),
                     labels=cache.labels.index_select(0, torch.as_tensor(order, dtype=torch.long)).numpy().astype(np.int64),
-                    rate_schedule=cache.rate_schedule.astype(np.float64),
-                    sample_steps=np.asarray([cache.sample_steps], dtype=np.int64),
-                    substeps=np.asarray([cache.reference_substeps], dtype=np.int64),
-                    stride_substeps=np.asarray([cache.stride_substeps], dtype=np.int64),
-                    requested_stride_substeps=np.asarray([cache.requested_stride_substeps or cache.stride_substeps], dtype=np.int64),
-                    horizon=np.asarray([cache.horizon], dtype=np.float64),
-                    lambda_mix=np.asarray([cache.lambda_mix], dtype=np.float64),
-                    edge_alpha_mode=np.asarray([str(dynamics_config.edge_alpha_mode)]),
-                    alpha_eff=np.asarray([float(dynamics_config.alpha_eff)], dtype=np.float64),
-                    cache_build_mode=np.asarray([cache.cache_build_mode]),
                     start_substep=np.asarray([start_substep], dtype=np.int64),
                     sample_start_source=np.asarray(["cache-states"]),
                     start_image=cache.start_images[:1].numpy().astype(np.float32),
+                    **_prior_bank_reference_metadata(cache, dynamics_config, d0_config),
                 )
                 for rollout_blocks in rollout_options:
                     for sample_mode, deterministic_flag, strength in _sampling_jobs(d0_config):

@@ -1,0 +1,68 @@
+{
+  "physical_training_performed": 0,
+  "records": {
+    "adamw_ema_conjugacy.json": {
+      "sha256": "b94bc6c6fceae5e6f1a13c5a2a399d9337c9be6b4013534fa3889e5958c97ad2",
+      "size": 2605
+    },
+    "head_equivalence.json": {
+      "sha256": "590291412814b0de8b24fe3898bc2c8e85ac7e505c8097ca12dc8e1650a56247",
+      "size": 996
+    },
+    "model_size_forensics.json": {
+      "sha256": "180be662de7906c346d7c56bc22e41726c0ccf7bea80194c48dc10d252174647",
+      "size": 563
+    },
+    "normalized_head_control_gate.json": {
+      "sha256": "6b085556018911ac52f2eb9a8d21a353caaecb20ff1573fb7f6008066d908567",
+      "size": 101277
+    },
+    "normalized_head_decision.json": {
+      "sha256": "06b1722551b5bd04fca8478e6de11de65b8e8dfa6b834a03f7dbc0a2ec792f39",
+      "size": 354
+    },
+    "normalized_head_preflight.json": {
+      "sha256": "5c45a87ed7e7750834c3508046a7704ff0dfc25ae88df945bd816e66a1c94a5f",
+      "size": 5989
+    },
+    "normalized_head_preflight_gate.json": {
+      "sha256": "b0ed43b881d9b532e0dbbeb9eea03a91ae6cc81612701e2c66e5c31120559509",
+      "size": 4291
+    },
+    "normalized_head_stream_plans.json": {
+      "sha256": "b351b4a00bf82b7d23ba0294e18410095272f2016ffd37da2fb2fcfb879e9a27",
+      "size": 2018
+    },
+    "paired_ratio_stream_replay.json": {
+      "sha256": "d5cb0aa89ecd455ce54e3e6ed6e7f9de74b6745b36022cc86f0396b29f9b7be2",
+      "size": 19270
+    },
+    "paired_ratio_structural_law_certificate.json": {
+      "sha256": "2b1a9c26c5198de97c7915f81ffcd487c7cad84e94df24de345b34a4b8707086",
+      "size": 703
+    },
+    "parent_head_gradient_forensics.csv": {
+      "sha256": "c612744d8f679c5596d8590b811a4d1026b0735e6b7548db18264e79fc82865d",
+      "size": 2886
+    },
+    "parent_head_layerwise_gradients.csv": {
+      "sha256": "563f9e5af04e7f28290572c6dc1134211541136f7b91780db407c7b04f5e89e5",
+      "size": 51946
+    },
+    "parent_provenance.json": {
+      "sha256": "0aba0c56501106a3ac4dbdf3c47e02ed6be7000bf1e8952a5466dbda6b42494a",
+      "size": 81433
+    },
+    "run_manifest.json": {
+      "sha256": "4e7caf83e4173f1f537c582d180b5e1951c753200391e2b40f2e32f74ea463d3",
+      "size": 8806
+    }
+  },
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-head-confirmation-artifact-registry",
+  "schema_version": 1,
+  "terminal_files_excluded_to_avoid_self_reference": [
+    "artifact_registry.json",
+    "run_status.json"
+  ]
+}

@@ -1,0 +1,579 @@
+{
+  "evaluation_status": "evaluated",
+  "passed": 1,
+  "physical_training_performed": 0,
+  "records": [
+    {
+      "record": {
+        "batch": {
+          "anchor_ids_sha256": "932c0e570b9dcbca1b0a7b83e313c6ccdad09cdcf544401fddbfaab9e013c787",
+          "class_bin_counts": {
+            "0": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ],
+            "1": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ]
+          },
+          "class_counts": [
+            32,
+            32
+          ],
+          "class_targets_sha256": "7c60f11956cc0922841cb942f2cb3f1b1bdbc032fd41e0658e6b5293971c558d",
+          "derivation_version": "d0-density-ratio-balanced-stream-v1",
+          "fingerprint": "2a392486562b97fbbdc4d42ade991230e24ec2bb7e24bd67a28ce1a5c3a7bc07",
+          "path_ids_sha256": "715bd6d9fcbfbf8d0d4c01d645a0bfad752c230f3a76385a038c30186056922f",
+          "phase": "pilot",
+          "physical_training_performed": 0,
+          "pixels": 784,
+          "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+          "rows": 64,
+          "sampling_performed": 0,
+          "schema": "experiment12-d0-score-density-ratio-batch",
+          "schema_version": 1,
+          "seeds": {
+            "null-pool": 3946763176120300536,
+            "null-swaps": 3085312814359904940,
+            "path-id": 1863748762652105080,
+            "positive-states": 8008139821307376857,
+            "reference-states": 6461499816182307313,
+            "row-permutation": 7117040168993274846
+          },
+          "state_sha256": "58ffc5e529adee39ffa06dc9447132487d96bc506997ed941a64a0e5b57c4261",
+          "step": 1,
+          "strata_sha256": "56c9c946a9e6e396690c7fa14e89011481654c5070e8f9adbfdf6b3c3949fcc3",
+          "task": "bounded_teacher",
+          "tau_fraction_sha256": "8b29a7c78e056314120c21b440a06dc4c2d8969a8a52130c9686b28fae7d780a"
+        },
+        "derivation_version": "d0-density-ratio-balanced-stream-v1",
+        "fingerprint": "3c1e0897c6e731d3e4521981e116220edab74880fcfab44dd940f555abc91981",
+        "phase": "pilot",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-replay",
+        "schema_version": 1,
+        "step": 1,
+        "task": "bounded_teacher"
+      },
+      "verification": {
+        "actual_fingerprint": "3c1e0897c6e731d3e4521981e116220edab74880fcfab44dd940f555abc91981",
+        "expected_fingerprint": "3c1e0897c6e731d3e4521981e116220edab74880fcfab44dd940f555abc91981",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "batch": {
+          "anchor_ids_sha256": "6274f50e9e39a52d99b57e301fa95dc9a6f89c16ce1f0eb4d33b7fbcc52597ae",
+          "class_bin_counts": {
+            "0": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ],
+            "1": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ]
+          },
+          "class_counts": [
+            32,
+            32
+          ],
+          "class_targets_sha256": "85116f978539c81fd840fc92af2c8ac5c2f16173296da8a213317efa3f0f4dbe",
+          "derivation_version": "d0-density-ratio-balanced-stream-v1",
+          "fingerprint": "b37957451ed4d0a88b573a6d3e17b3a9254fbffd895c12ed0db5ac68a886ebc3",
+          "path_ids_sha256": "2249de98fa48364b23935de89e2ad543c3c340ee2c1ce16e24cbf1f5b129c2c6",
+          "phase": "pilot",
+          "physical_training_performed": 0,
+          "pixels": 784,
+          "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+          "rows": 64,
+          "sampling_performed": 0,
+          "schema": "experiment12-d0-score-density-ratio-batch",
+          "schema_version": 1,
+          "seeds": {
+            "null-pool": 6893030793560731974,
+            "null-swaps": 4211492568694808285,
+            "path-id": 3118390047983589485,
+            "positive-states": 202757768460480634,
+            "reference-states": 4924787143736556166,
+            "row-permutation": 337578567597824141
+          },
+          "state_sha256": "0a7666707f9bcc67176d5e3bd197b7dd6ee8f088650108e9447a947fcac149a4",
+          "step": 17,
+          "strata_sha256": "14ed1e7c7d4a9272cf6a2472fbf13552f7f62dfe176ea5c81f4d2fd4f493ca98",
+          "task": "bounded_teacher",
+          "tau_fraction_sha256": "7a0859f65d2415096d88ba259d91df3a48819fb5354fb908dde9143da0ae3ab3"
+        },
+        "derivation_version": "d0-density-ratio-balanced-stream-v1",
+        "fingerprint": "43fce4fd0e593fbe950c4d986174ccd837456ae21bc058ae0f12c736cf9c6bc9",
+        "phase": "pilot",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-replay",
+        "schema_version": 1,
+        "step": 17,
+        "task": "bounded_teacher"
+      },
+      "verification": {
+        "actual_fingerprint": "43fce4fd0e593fbe950c4d986174ccd837456ae21bc058ae0f12c736cf9c6bc9",
+        "expected_fingerprint": "43fce4fd0e593fbe950c4d986174ccd837456ae21bc058ae0f12c736cf9c6bc9",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "batch": {
+          "anchor_ids_sha256": "7cb374352f6d176f5958b07d16f2b5b6905feae122d3ae4da807b61cb573d4c9",
+          "class_bin_counts": {
+            "0": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ],
+            "1": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ]
+          },
+          "class_counts": [
+            32,
+            32
+          ],
+          "class_targets_sha256": "faedded3354c82665c2d137e36a25fa294cd35293b10bfc04e6c3caf2521e008",
+          "derivation_version": "d0-density-ratio-balanced-stream-v1",
+          "fingerprint": "cdf76d00be08fba0f9c17e448e64712c8d591d0a333327d808924706b80dee38",
+          "path_ids_sha256": "c29e2c8a3e225374ce3e1e5f08383d2ab2bbdafe01aebcdeaa94ba5477948795",
+          "phase": "pilot",
+          "physical_training_performed": 0,
+          "pixels": 784,
+          "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+          "rows": 64,
+          "sampling_performed": 0,
+          "schema": "experiment12-d0-score-density-ratio-batch",
+          "schema_version": 1,
+          "seeds": {
+            "null-pool": 476453767383358751,
+            "null-swaps": 2696517427465584119,
+            "path-id": 4103806976045686617,
+            "positive-states": 1683960544879747796,
+            "reference-states": 7380227117253269209,
+            "row-permutation": 4572494554467200626
+          },
+          "state_sha256": "f63793a09a0033576a2b587105d044caf1ab17cde56f474c4da8ac80db2a038c",
+          "step": 1,
+          "strata_sha256": "39d32f2dfa1b46ebf02d9cdb3d8f0f093a3213865e98fb7ff864bac584d6d9fb",
+          "task": "dirichlet_null",
+          "tau_fraction_sha256": "35c3a8a2acbe56bff87d88438f8603edce53c5a21283c3b5d909f297559a891d"
+        },
+        "derivation_version": "d0-density-ratio-balanced-stream-v1",
+        "fingerprint": "990f4eedb94a7dedd24f7355ebabdb62d75d1f2b79f810531d17c3c107ed0897",
+        "phase": "pilot",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-replay",
+        "schema_version": 1,
+        "step": 1,
+        "task": "dirichlet_null"
+      },
+      "verification": {
+        "actual_fingerprint": "990f4eedb94a7dedd24f7355ebabdb62d75d1f2b79f810531d17c3c107ed0897",
+        "expected_fingerprint": "990f4eedb94a7dedd24f7355ebabdb62d75d1f2b79f810531d17c3c107ed0897",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "batch": {
+          "anchor_ids_sha256": "e2d5c94a8a54b5a1ea27d4fd51f7e3b72fc0c51fe2db0f9c51bb3cca1f85d223",
+          "class_bin_counts": {
+            "0": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ],
+            "1": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ]
+          },
+          "class_counts": [
+            32,
+            32
+          ],
+          "class_targets_sha256": "eb8859dddde7625808b0903fc9db2cbbda41951605f05ec07b348dd5cb399263",
+          "derivation_version": "d0-density-ratio-balanced-stream-v1",
+          "fingerprint": "80aaf9577a4c1791efa2f36111eeb34f3f3a477d08adaed054c08b90e459e6a9",
+          "path_ids_sha256": "468b0f4ee9517fe79500139e798f7e2e55c4b9392f488231786690f478087007",
+          "phase": "pilot",
+          "physical_training_performed": 0,
+          "pixels": 784,
+          "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+          "rows": 64,
+          "sampling_performed": 0,
+          "schema": "experiment12-d0-score-density-ratio-batch",
+          "schema_version": 1,
+          "seeds": {
+            "null-pool": 3709675181269223721,
+            "null-swaps": 794852486085156345,
+            "path-id": 2029463929206188223,
+            "positive-states": 5573543175147917942,
+            "reference-states": 1831847469686182757,
+            "row-permutation": 2061842250818522709
+          },
+          "state_sha256": "26a367b03d11b42fa4d70e0cf2a29f520d73392a0c9396754301f2245df98ec7",
+          "step": 17,
+          "strata_sha256": "076cf34e0d76a26f4db811f4caa1754ad6ad343482d2c14f5e3d9638f06b4690",
+          "task": "dirichlet_null",
+          "tau_fraction_sha256": "13be3803b7da8414166bd924550a00e1bf674b8330447bafc7216c67e8b53283"
+        },
+        "derivation_version": "d0-density-ratio-balanced-stream-v1",
+        "fingerprint": "543c74ecaf30077423597a133f5b3d73eb4703b74e93adebae36e798a3ba89e5",
+        "phase": "pilot",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-replay",
+        "schema_version": 1,
+        "step": 17,
+        "task": "dirichlet_null"
+      },
+      "verification": {
+        "actual_fingerprint": "543c74ecaf30077423597a133f5b3d73eb4703b74e93adebae36e798a3ba89e5",
+        "expected_fingerprint": "543c74ecaf30077423597a133f5b3d73eb4703b74e93adebae36e798a3ba89e5",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "batch": {
+          "anchor_ids_sha256": "47d2542e9bedb2ea07260bd4d17e62b588a026722e721f216d2b09023f87291a",
+          "class_bin_counts": {
+            "0": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ],
+            "1": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ]
+          },
+          "class_counts": [
+            32,
+            32
+          ],
+          "class_targets_sha256": "bde55ac75e575cd915fe51b09ad2db4966b2eb93a7afe6a4610cd83356bf7a53",
+          "derivation_version": "d0-density-ratio-balanced-stream-v1",
+          "fingerprint": "725d2be9033bd677eab629d657d4c9f1b53c4c3806ca97ea313aa125934dbcd7",
+          "path_ids_sha256": "e8fa134db03db4a2b521c5a0e6feeecb279ccdaa98af2eaeb20ad75d7e5e0d53",
+          "phase": "confirm",
+          "physical_training_performed": 0,
+          "pixels": 784,
+          "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+          "rows": 64,
+          "sampling_performed": 0,
+          "schema": "experiment12-d0-score-density-ratio-batch",
+          "schema_version": 1,
+          "seeds": {
+            "null-pool": 3315014530770116382,
+            "null-swaps": 6526780559033624350,
+            "path-id": 8566829785785034522,
+            "positive-states": 4874179145296765156,
+            "reference-states": 7663552573587294157,
+            "row-permutation": 4937629065343358659
+          },
+          "state_sha256": "eef17e36c75cba80adccd58cb7a8ccf3f672bd5776d7085492901266884573cf",
+          "step": 1,
+          "strata_sha256": "057fb683c53099cb539f68ac56aa2d9f5abdd2af849a526c5a493b675db375d1",
+          "task": "bounded_teacher",
+          "tau_fraction_sha256": "17b43a6f1622a94e4ecba62e774785a5a98271537a6a0b6718a8c7a08de0d149"
+        },
+        "derivation_version": "d0-density-ratio-balanced-stream-v1",
+        "fingerprint": "b5c93c80b3a9870a2e52b0eebe908bd80775f4a093a998f48e2dad949af0ad05",
+        "phase": "confirm",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-replay",
+        "schema_version": 1,
+        "step": 1,
+        "task": "bounded_teacher"
+      },
+      "verification": {
+        "actual_fingerprint": "b5c93c80b3a9870a2e52b0eebe908bd80775f4a093a998f48e2dad949af0ad05",
+        "expected_fingerprint": "b5c93c80b3a9870a2e52b0eebe908bd80775f4a093a998f48e2dad949af0ad05",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "batch": {
+          "anchor_ids_sha256": "e6502d01d8f977da238ac8b4aeec2732888d9b100cc358f126d8a69ce24bdb7f",
+          "class_bin_counts": {
+            "0": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ],
+            "1": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ]
+          },
+          "class_counts": [
+            32,
+            32
+          ],
+          "class_targets_sha256": "9d5638ea9af03efa0b6efc949984daaa399fbd084f0fed92ec4a4cd021637a1e",
+          "derivation_version": "d0-density-ratio-balanced-stream-v1",
+          "fingerprint": "570ada3409d62955817dcb96c2224808543ba89d12f1eba62e4d0952f085fe9f",
+          "path_ids_sha256": "64bf2857d1547a3809d9f474c0235cf786a07c07ee04fb8a6a66ec05fcaa852c",
+          "phase": "confirm",
+          "physical_training_performed": 0,
+          "pixels": 784,
+          "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+          "rows": 64,
+          "sampling_performed": 0,
+          "schema": "experiment12-d0-score-density-ratio-batch",
+          "schema_version": 1,
+          "seeds": {
+            "null-pool": 7681700524311291954,
+            "null-swaps": 989348753223641886,
+            "path-id": 5292552225378038509,
+            "positive-states": 4867741125258070360,
+            "reference-states": 1759173446644123080,
+            "row-permutation": 2521133105047586266
+          },
+          "state_sha256": "86d1e1cc27b07ea81a11d002dc9fa689105fab08ab18d43e5fbe2f2a822b7d9a",
+          "step": 17,
+          "strata_sha256": "b5192568275e52b394ec09471ea510f7f6d5cf83d9d14c1c13bea66ed3b5e24a",
+          "task": "bounded_teacher",
+          "tau_fraction_sha256": "899b74f3984a4f1df74bfd8c4128f5eb24bc417bb00f43df02ecd44e88f76746"
+        },
+        "derivation_version": "d0-density-ratio-balanced-stream-v1",
+        "fingerprint": "512917df37e002e0c7805424b6a850cd99d6783d739495134bbb11273e42b179",
+        "phase": "confirm",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-replay",
+        "schema_version": 1,
+        "step": 17,
+        "task": "bounded_teacher"
+      },
+      "verification": {
+        "actual_fingerprint": "512917df37e002e0c7805424b6a850cd99d6783d739495134bbb11273e42b179",
+        "expected_fingerprint": "512917df37e002e0c7805424b6a850cd99d6783d739495134bbb11273e42b179",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "batch": {
+          "anchor_ids_sha256": "3969757db5c39f93e273b838c5929aad00cd4ce795847d933b14e0ab7636f7dd",
+          "class_bin_counts": {
+            "0": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ],
+            "1": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ]
+          },
+          "class_counts": [
+            32,
+            32
+          ],
+          "class_targets_sha256": "e002104aa1a5b60a3a30c6cf6ecb5dfb6eaf87dbfa0daefbfde20bcb8c667a11",
+          "derivation_version": "d0-density-ratio-balanced-stream-v1",
+          "fingerprint": "812cd97477cd7fc4765a46e507358caab7f206d63433790eb68fc335680a4417",
+          "path_ids_sha256": "e6bf96e4e5d0f95e504446fde4cabc1194c018fe74a6aec9c3255d58b6ccc860",
+          "phase": "confirm",
+          "physical_training_performed": 0,
+          "pixels": 784,
+          "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+          "rows": 64,
+          "sampling_performed": 0,
+          "schema": "experiment12-d0-score-density-ratio-batch",
+          "schema_version": 1,
+          "seeds": {
+            "null-pool": 1321339550955682589,
+            "null-swaps": 4977599508280465956,
+            "path-id": 71516667932657043,
+            "positive-states": 7105627646675501652,
+            "reference-states": 1312596630488222187,
+            "row-permutation": 8263245727875136912
+          },
+          "state_sha256": "9d02cee2dfbdcca874d888f16362336b8fb2e25a0da4e073e1e0023a3ff53e34",
+          "step": 1,
+          "strata_sha256": "a274476f9065c2f7865ac09252723cb99dfbc7f7711f92a02d6abf646f02058a",
+          "task": "dirichlet_null",
+          "tau_fraction_sha256": "fdbea78589ff357810d7ce6b2604d51ec812c0aa5113a2bea13370575cc62ca6"
+        },
+        "derivation_version": "d0-density-ratio-balanced-stream-v1",
+        "fingerprint": "b603c94d8983bcd22edc381670d2e35be438464c1c4c87b1be88d71586699a40",
+        "phase": "confirm",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-replay",
+        "schema_version": 1,
+        "step": 1,
+        "task": "dirichlet_null"
+      },
+      "verification": {
+        "actual_fingerprint": "b603c94d8983bcd22edc381670d2e35be438464c1c4c87b1be88d71586699a40",
+        "expected_fingerprint": "b603c94d8983bcd22edc381670d2e35be438464c1c4c87b1be88d71586699a40",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    },
+    {
+      "record": {
+        "batch": {
+          "anchor_ids_sha256": "0f6d919c5a969553ba8a3e27fa3080799301e1db73ba4186a475a588d77e5e0c",
+          "class_bin_counts": {
+            "0": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ],
+            "1": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ]
+          },
+          "class_counts": [
+            32,
+            32
+          ],
+          "class_targets_sha256": "4886e74073bcee5ac47f53b0cd66b7815c96682c53af1ef786cefd844bbd6472",
+          "derivation_version": "d0-density-ratio-balanced-stream-v1",
+          "fingerprint": "37306472f8f2e7fbdce59547ecebbfc779a9e78750b52a8872df8e3a5d761c7b",
+          "path_ids_sha256": "90a8c48db4af89eb782a030ad0a6f27180feed284e7f0814d1e231a80fdbd3cc",
+          "phase": "confirm",
+          "physical_training_performed": 0,
+          "pixels": 784,
+          "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+          "rows": 64,
+          "sampling_performed": 0,
+          "schema": "experiment12-d0-score-density-ratio-batch",
+          "schema_version": 1,
+          "seeds": {
+            "null-pool": 387696633396998035,
+            "null-swaps": 435996489278561906,
+            "path-id": 677164718432670217,
+            "positive-states": 863926523173375916,
+            "reference-states": 2244133871304179963,
+            "row-permutation": 2924868806232929089
+          },
+          "state_sha256": "1ce0fb5a2590df113389a625ad9ce7d96c8f65272a52429b053913ec48b65b99",
+          "step": 17,
+          "strata_sha256": "19fd2d0b19f988375e846f9f6599764fe94af7bc4c00470a2007b130eb5f8b62",
+          "task": "dirichlet_null",
+          "tau_fraction_sha256": "15ebe985d0453e07f188f7f91dfccc1830c1ef97057065cd9f72254dc89413fb"
+        },
+        "derivation_version": "d0-density-ratio-balanced-stream-v1",
+        "fingerprint": "d139a48edc45615e2a83d84cf7fe6ce82a0d38468ec62a4aecfb08dbc00df64e",
+        "phase": "confirm",
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-replay",
+        "schema_version": 1,
+        "step": 17,
+        "task": "dirichlet_null"
+      },
+      "verification": {
+        "actual_fingerprint": "d139a48edc45615e2a83d84cf7fe6ce82a0d38468ec62a4aecfb08dbc00df64e",
+        "expected_fingerprint": "d139a48edc45615e2a83d84cf7fe6ce82a0d38468ec62a4aecfb08dbc00df64e",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+        "reason": null,
+        "sampling_performed": 0
+      }
+    }
+  ],
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-controls-stream-replay-preflight",
+  "schema_version": 1,
+  "stream_plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57"
+}

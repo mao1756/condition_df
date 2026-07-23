@@ -1,0 +1,199 @@
+{
+  "claim_scope": "streamed boundary-admissible synthetic implicit-score controls only",
+  "created_at": "2026-07-18T22:53:49.859148+09:00",
+  "parent_provenance_sha256": "e293ac35266d394a8a0326755da8b0e1a611cbbeb0011741041fb6751d3237b2",
+  "physical_training_performed": 0,
+  "run_dir": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\stability-final-production-preflight\\20260718-225347_final-validation",
+  "runtime": {
+    "cuda": "12.8",
+    "device": "cuda",
+    "device_count": 1,
+    "device_name": "NVIDIA GeForce RTX 5060 Laptop GPU",
+    "device_type": "cuda",
+    "exact_backend": {
+      "cublas_workspace_config": ":4096:8",
+      "cuda_compute_capability": [
+        12,
+        0
+      ],
+      "cuda_device_index": 0,
+      "cuda_device_name": "NVIDIA GeForce RTX 5060 Laptop GPU",
+      "cuda_device_uuid": "7d90d3bf-29ce-6d20-4735-4d5a7e097c13",
+      "cuda_matmul_allow_bf16_reduced_precision_reduction": false,
+      "cuda_matmul_allow_fp16_accumulation": false,
+      "cuda_matmul_allow_fp16_reduced_precision_reduction": false,
+      "cuda_matmul_allow_tf32": false,
+      "cuda_total_memory": 8546484224,
+      "cudnn_allow_tf32": false,
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": true,
+      "cudnn_runtime_version": 91900,
+      "deterministic_algorithms": true,
+      "deterministic_debug_mode": 2,
+      "float32_matmul_precision": "highest",
+      "mkldnn_enabled": false,
+      "nvidia_driver_versions": [
+        "591.91"
+      ],
+      "torch_num_interop_threads": 16,
+      "torch_num_threads": 16
+    },
+    "numpy": "2.4.4",
+    "python": "3.14.4 (tags/v3.14.4:23116f9, Apr  7 2026, 14:10:54) [MSC v.1944 64 bit (AMD64)]",
+    "torch": "2.11.0+cu128"
+  },
+  "runtime_fingerprint": "fb59746cc0da9515591c0a442e0152b5448db9747eb5a6526df81884df1fc475",
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-control-stability-confirmation",
+  "schema_version": 1,
+  "scientific_config": {
+    "algorithm": "experiment12-d0-score-control-stability-confirmation",
+    "algorithm_version": 1,
+    "bootstrap": {
+      "confidence": 0.9,
+      "reps": 10000
+    },
+    "claim_scope": "streamed boundary-admissible synthetic implicit-score controls only",
+    "confirmation": {
+      "audit_paths": 32,
+      "dense_validation_steps": [
+        0,
+        25,
+        50,
+        100,
+        150,
+        250
+      ],
+      "model_seeds": [
+        260811,
+        260812,
+        260813
+      ],
+      "selection_paths": 32,
+      "steps": 4000,
+      "validation_every": 250
+    },
+    "kernel": {
+      "alpha_eff": 1.0,
+      "edge_alpha_mode": "alpha_eff",
+      "grid_size": 28,
+      "lambda_mix": 0.35,
+      "limiter_fraction": 1.0,
+      "mass_floor": 1e-07,
+      "reference_substeps": 256,
+      "sample_steps": 512,
+      "tau_eff": 5e-05
+    },
+    "model_schema": "d0-boundary-smooth-potential-unet-v1",
+    "model_schema_version": 1,
+    "optimization": {
+      "adaptive_loss_scaling": 0,
+      "clip_warmup_steps": 500,
+      "ema_decay": 0.99,
+      "grad_clip": 1.0,
+      "implicit_loss_scale": 0.00266397028560976,
+      "loss_scale_source": "verified parent implicit calibration",
+      "weight_decay": 0.0001
+    },
+    "parent_artifact_registry_sha256": null,
+    "parent_scientific_fingerprint": "8177f10df842576f7a53009b9678de6590b70a4d0721a3080a97e18157f17744",
+    "physical_training_performed": 0,
+    "pilot": {
+      "audit_paths": 0,
+      "learning_rates": [
+        0.0001,
+        3e-05,
+        1e-05,
+        3e-06
+      ],
+      "selection_paths": 16,
+      "steps": 1000,
+      "validation_steps": [
+        0,
+        25,
+        50,
+        100,
+        150,
+        250,
+        500,
+        750,
+        1000
+      ]
+    },
+    "root_seed": 260801,
+    "sampling_performed": 0,
+    "stein": {
+      "amplitudes": [
+        0.0,
+        0.25,
+        0.5,
+        1.0,
+        2.0
+      ],
+      "confidence": 0.99,
+      "paths": 128
+    },
+    "stream": {
+      "anchor_bin_counts": [
+        4,
+        4,
+        4,
+        4,
+        16
+      ],
+      "anchors_per_cluster": 32,
+      "batch_size": 64,
+      "clusters_per_step": 2,
+      "stateless_seed_tuple": [
+        "root_seed",
+        "phase",
+        "law",
+        "step",
+        "bank"
+      ],
+      "training_probe_banks": 2,
+      "training_probes_per_bank": 4
+    },
+    "stream_schema": "experiment12-d0-score-control-stream",
+    "thresholds": {
+      "confirmation_null_seeds": 3,
+      "confirmation_teacher_seeds": 3,
+      "maximum_clip_fraction": 0.1,
+      "minimum_passing_teacher_seeds": 2,
+      "pilot_final_window_steps": 200,
+      "pilot_learning_rates": [
+        0.0001,
+        3e-05,
+        1e-05,
+        3e-06
+      ],
+      "pilot_stability_start_step": 101,
+      "pilot_steps": 1000,
+      "stein_bootstrap_confidence": 0.99,
+      "stein_paths": 128,
+      "stein_teacher_amplitudes": [
+        0.0,
+        0.25,
+        0.5,
+        1.0,
+        2.0
+      ]
+    }
+  },
+  "scientific_fingerprint": "f13caa52d780ea971a94a6e598e73808eb29bedccf2cf395097d6eac0c2dbc93",
+  "source_fingerprint": "ed37afe95a4266cef14297efa34f8cd698c84ce13957800f4c86092314cef652",
+  "source_paths": [
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\diag_d0_score_control_stability_confirmation.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_control_stability.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_control_stability_gate.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_control_stability_provenance.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\diag_d0_score_boundary_controls.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_boundary_controls.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_boundary_control_gate.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_control_scale_repair_gate.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_optimizer_scale.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_dirichlet_score.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_one_image_gate.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\eulerian_flux_mnist.py"
+  ]
+}

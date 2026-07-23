@@ -339,11 +339,22 @@ def validate_anchor_plan(plan: D0StratifiedAnchorPlan) -> None:
         raise D0MultiscaleCompatibilityError("anchor endpoints are outside the admissible range")
     if np.any(strata < 0) or np.any(strata >= edges.size - 1):
         raise D0MultiscaleCompatibilityError("anchor stratum index is outside tau edges")
-    fractions = 1.0 - ends.astype(np.float64) / float(plan.total_substeps)
-    assigned = np.searchsorted(edges, fractions, side="right") - 1
-    assigned = np.clip(assigned, 0, edges.size - 2)
-    if not np.array_equal(assigned, strata):
-        raise D0MultiscaleCompatibilityError("anchor endpoints do not match recorded tau strata")
+    # Validate against the same inclusive integer bounds used by the planner.
+    # Reconstructing tau/T in floating point can move an exact boundary such as
+    # 1 - 32/40 = 0.2 just below its recorded stratum.
+    for index in range(edges.size - 1):
+        lo, hi = _stratum_end_bounds(
+            total_substeps=int(plan.total_substeps),
+            minimum_end_substep=int(plan.max_stride),
+            tau_lo=float(edges[index]),
+            tau_hi=float(edges[index + 1]),
+            last_bin=index == edges.size - 2,
+        )
+        selected = ends[strata == index]
+        if selected.size and (np.any(selected < lo) or np.any(selected > hi)):
+            raise D0MultiscaleCompatibilityError(
+                "anchor endpoints do not match recorded tau strata"
+            )
     observed_counts = np.stack(
         [np.bincount(row, minlength=edges.size - 1) for row in strata], axis=0
     )
@@ -666,11 +677,21 @@ def validate_multiscale_cache(cache: D0MultiscaleCache) -> None:
         raise D0MultiscaleCompatibilityError("cache tau values are inconsistent with anchor endpoints")
     edges = _validate_tau_edges(cache.tau_fraction_edges)
     strata = _as_numpy(cache.anchor_strata, dtype=np.dtype(np.int64))
-    fractions = _as_numpy(cache.tau, dtype=np.dtype(np.float64)) / float(cache.horizon)
-    assigned = np.searchsorted(edges, fractions, side="right") - 1
-    assigned = np.clip(assigned, 0, edges.size - 2)
-    if not np.array_equal(strata, assigned):
-        raise D0MultiscaleCompatibilityError("cache anchor strata are inconsistent with tau")
+    if np.any(strata < 0) or np.any(strata >= edges.size - 1):
+        raise D0MultiscaleCompatibilityError("cache anchor strata are outside tau edges")
+    for index in range(edges.size - 1):
+        lo, hi = _stratum_end_bounds(
+            total_substeps=total,
+            minimum_end_substep=int(strides.max()),
+            tau_lo=float(edges[index]),
+            tau_hi=float(edges[index + 1]),
+            last_bin=index == edges.size - 2,
+        )
+        selected = ends[strata == index]
+        if selected.size and (np.any(selected < lo) or np.any(selected > hi)):
+            raise D0MultiscaleCompatibilityError(
+                "cache anchor strata are inconsistent with tau"
+            )
     for name in ("terminal_states", "source_indices", "requested_labels"):
         if int(np.asarray(getattr(cache, name)).shape[0]) != p_count:
             raise D0MultiscaleCompatibilityError(f"path-level array {name} has the wrong length")

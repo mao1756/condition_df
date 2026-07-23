@@ -1,0 +1,27 @@
+{
+  "artifact_registry_sha256": "0f1e3973502b836e06ddde1e671e8f1fd743d97182965fe74b42e0531599345c",
+  "artifact_registry_size": 2401,
+  "attempt_count": 1,
+  "decision": "normalized_head_coordinate_invalid",
+  "outcome": "gate_failed",
+  "phase": "preflight",
+  "physical_training_authorized": 0,
+  "physical_training_performed": 0,
+  "recommended_next_action": "repair functional, gradient, AdamW, or EMA coordinate equivalence",
+  "require_gate": "preflight",
+  "required_gate": "preflight",
+  "required_gate_pass": 0,
+  "sampling_authorized": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-head-confirmation",
+  "schema_version": 1,
+  "skips": [
+    {
+      "reason": "paired preflight failed",
+      "stage": "pilot_and_confirmation"
+    }
+  ],
+  "stage": "preflight",
+  "status": "complete",
+  "updated_at": "2026-07-20T11:13:23.117916+09:00"
+}

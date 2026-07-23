@@ -1,0 +1,183 @@
+{
+  "checkpoint_records": [
+    {
+      "law": "bounded_teacher",
+      "model_seed": 260785,
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\tasks\\implicit-teacher\\seed-260785\\checkpoints\\step-00000250.pt",
+      "sha256": "70bb971451d5bce0f97e2e7c067273b528bcbc3cf802b3e5047ea30105d47c03",
+      "step": 250,
+      "task_kind": "implicit_teacher"
+    },
+    {
+      "law": "bounded_teacher",
+      "model_seed": 260785,
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\tasks\\implicit-teacher\\seed-260785\\checkpoints\\step-00004000.pt",
+      "sha256": "2692ddacfcb5ab5ecb78be842e670978744d9aef7dd45ae75752614d7aecdb89",
+      "step": 4000,
+      "task_kind": "implicit_teacher"
+    },
+    {
+      "law": "dirichlet_null",
+      "model_seed": 260785,
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\tasks\\null\\seed-260785\\checkpoints\\step-00000250.pt",
+      "sha256": "b790ca439fb495a0cd3e879b7720a7e01dbfb11f50ab1b3e7fdd4af61c5abb4f",
+      "step": 250,
+      "task_kind": "null"
+    },
+    {
+      "law": "dirichlet_null",
+      "model_seed": 260785,
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\tasks\\null\\seed-260785\\checkpoints\\step-00004000.pt",
+      "sha256": "e59e2ad97141e1349543bc223a2de6347578d43c13f64ca305e0fb67f6997bb4",
+      "step": 4000,
+      "task_kind": "null"
+    }
+  ],
+  "complete": 1,
+  "eligible_for_gate": 0,
+  "finite": 1,
+  "physical_training_performed": 0,
+  "probe_count_per_bank": 16,
+  "representative_steps": [
+    250,
+    4000
+  ],
+  "role": "advisory_only",
+  "rows": [
+    {
+      "fresh_mean_risk": 22.895342799834907,
+      "fresh_minus_train_risk": 267.441879584454,
+      "fresh_probe_disagreement": 1.0040455423295498,
+      "fresh_risk_bank_a": 22.393320028670132,
+      "fresh_risk_bank_b": 23.397365570999682,
+      "law": "bounded_teacher",
+      "parent_probe_disagreement": 1.7311949003487825,
+      "parent_train_mean_risk": -244.5465367846191,
+      "parent_train_risk_bank_a": -243.6809393344447,
+      "parent_train_risk_bank_b": -245.41213423479348,
+      "physical_training_performed": 0,
+      "sampling_performed": 0,
+      "step": 250,
+      "weights": "raw"
+    },
+    {
+      "fresh_mean_risk": 28.71240585297346,
+      "fresh_minus_train_risk": 125.30268821353093,
+      "fresh_probe_disagreement": 1.9220744594931602,
+      "fresh_risk_bank_a": 29.67344308272004,
+      "fresh_risk_bank_b": 27.75136862322688,
+      "law": "bounded_teacher",
+      "parent_probe_disagreement": 0.06467865128070116,
+      "parent_train_mean_risk": -96.59028236055747,
+      "parent_train_risk_bank_a": -96.62262168619782,
+      "parent_train_risk_bank_b": -96.55794303491712,
+      "physical_training_performed": 0,
+      "sampling_performed": 0,
+      "step": 250,
+      "weights": "ema"
+    },
+    {
+      "fresh_mean_risk": 158.19149897433817,
+      "fresh_minus_train_risk": 10175.224041804671,
+      "fresh_probe_disagreement": 6.925941932946444,
+      "fresh_risk_bank_a": 154.72852800786495,
+      "fresh_risk_bank_b": 161.6544699408114,
+      "law": "bounded_teacher",
+      "parent_probe_disagreement": 96.06481355428696,
+      "parent_train_mean_risk": -10017.032542830333,
+      "parent_train_risk_bank_a": -9969.00013605319,
+      "parent_train_risk_bank_b": -10065.064949607477,
+      "physical_training_performed": 0,
+      "sampling_performed": 0,
+      "step": 4000,
+      "weights": "raw"
+    },
+    {
+      "fresh_mean_risk": 110.46789846755564,
+      "fresh_minus_train_risk": 15857.892570184544,
+      "fresh_probe_disagreement": 1.2042068876326084,
+      "fresh_risk_bank_a": 109.86579502373934,
+      "fresh_risk_bank_b": 111.07000191137195,
+      "law": "bounded_teacher",
+      "parent_probe_disagreement": 61.59749159961939,
+      "parent_train_mean_risk": -15747.424671716988,
+      "parent_train_risk_bank_a": -15716.625925917178,
+      "parent_train_risk_bank_b": -15778.223417516798,
+      "physical_training_performed": 0,
+      "sampling_performed": 0,
+      "step": 4000,
+      "weights": "ema"
+    },
+    {
+      "fresh_mean_risk": 63.586139432154596,
+      "fresh_minus_train_risk": 273.33573503326625,
+      "fresh_probe_disagreement": 1.9591985139995813,
+      "fresh_risk_bank_a": 64.56573868915439,
+      "fresh_risk_bank_b": 62.606540175154805,
+      "law": "dirichlet_null",
+      "parent_probe_disagreement": 0.44558435678482056,
+      "parent_train_mean_risk": -209.74959560111165,
+      "parent_train_risk_bank_a": -209.97238777950406,
+      "parent_train_risk_bank_b": -209.52680342271924,
+      "physical_training_performed": 0,
+      "sampling_performed": 0,
+      "step": 250,
+      "weights": "raw"
+    },
+    {
+      "fresh_mean_risk": 26.597633324097842,
+      "fresh_minus_train_risk": 103.29220197338145,
+      "fresh_probe_disagreement": 0.49559516459703445,
+      "fresh_risk_bank_a": 26.349835741799325,
+      "fresh_risk_bank_b": 26.84543090639636,
+      "law": "dirichlet_null",
+      "parent_probe_disagreement": 0.3333149130921811,
+      "parent_train_mean_risk": -76.69456864928361,
+      "parent_train_risk_bank_a": -76.52791119273752,
+      "parent_train_risk_bank_b": -76.8612261058297,
+      "physical_training_performed": 0,
+      "sampling_performed": 0,
+      "step": 250,
+      "weights": "ema"
+    },
+    {
+      "fresh_mean_risk": 199.15819661319256,
+      "fresh_minus_train_risk": 13998.950414992869,
+      "fresh_probe_disagreement": 2.392000913619995,
+      "fresh_risk_bank_a": 200.35419707000256,
+      "fresh_risk_bank_b": 197.96219615638256,
+      "law": "dirichlet_null",
+      "parent_probe_disagreement": 271.40594946593046,
+      "parent_train_mean_risk": -13799.792218379676,
+      "parent_train_risk_bank_a": -13935.495193112642,
+      "parent_train_risk_bank_b": -13664.089243646711,
+      "physical_training_performed": 0,
+      "sampling_performed": 0,
+      "step": 4000,
+      "weights": "raw"
+    },
+    {
+      "fresh_mean_risk": 116.83560647256672,
+      "fresh_minus_train_risk": 22159.99829377234,
+      "fresh_probe_disagreement": 3.7557042948901653,
+      "fresh_risk_bank_a": 114.95775432512164,
+      "fresh_risk_bank_b": 118.7134586200118,
+      "law": "dirichlet_null",
+      "parent_probe_disagreement": 321.19301199540496,
+      "parent_train_mean_risk": -22043.162687299773,
+      "parent_train_risk_bank_a": -22203.759193297476,
+      "parent_train_risk_bank_b": -21882.56618130207,
+      "physical_training_performed": 0,
+      "sampling_performed": 0,
+      "step": 4000,
+      "weights": "ema"
+    }
+  ],
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-control-stability-confirmation-parent-forensic-replay",
+  "schema_version": 1,
+  "weights": [
+    "raw",
+    "ema"
+  ]
+}

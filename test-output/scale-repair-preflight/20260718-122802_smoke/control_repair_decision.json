@@ -1,0 +1,8 @@
+{
+  "decision": "controls_not_run",
+  "physical_training_authorized": 0,
+  "probe_bank_status": "not_evaluated",
+  "recommended_next_action": "resume this run with --stage all",
+  "sampling_authorized": 0,
+  "sampling_performed": 0
+}

@@ -1,0 +1,172 @@
+{
+  "claim_scope": "equal-prior Bayes-logit identity, null exchangeability, and isolated state panels",
+  "evaluation_status": "evaluated",
+  "gate": "density_ratio_preflight",
+  "passed": 1,
+  "physical_training_performed": 0,
+  "provenance_pass": 1,
+  "sampling_performed": 0,
+  "subchecks": {
+    "analytic_teacher_derivatives": {
+      "operator": "<= each",
+      "passed": 1,
+      "threshold": 1e-08,
+      "value": [
+        0.0,
+        5.684341886080802e-14,
+        2.2737367544323206e-13
+      ]
+    },
+    "boundary_certificate": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "class_balance": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "complete": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "finite": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "independent_class_namespaces": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "null_exact_zero": {
+      "operator": "<= each",
+      "passed": 1,
+      "threshold": 1e-12,
+      "value": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "null_exchangeability": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "operator_preflight": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "oracle_bootstrap_confidence": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 0.99,
+      "value": 0.99
+    },
+    "panel_isolation": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "physical_training_performed": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 0,
+      "value": 0
+    },
+    "production_device_smoke": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "sampling_performed": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 0,
+      "value": 0
+    },
+    "stream_replay": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "teacher_bce_signal": {
+      "operator": "> 0 each",
+      "passed": 1,
+      "threshold": 0.0,
+      "value": [
+        0.007109603715200974,
+        0.0449554045495857
+      ]
+    },
+    "teacher_normalization": {
+      "operator": "contains",
+      "passed": 1,
+      "threshold": 1.0,
+      "value": [
+        0.9225940607952585,
+        1.0308488247937624
+      ]
+    },
+    "time_strata": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    }
+  },
+  "thresholds": {
+    "analytic_derivative_tolerance": 1e-08,
+    "analytic_null_tolerance": 1e-12,
+    "anchors_per_path": 32,
+    "audit_confidence": 0.9,
+    "audit_paths_per_panel": 32,
+    "confirm_confidence": 0.9,
+    "expected_audit_panels": [
+      "c",
+      "d"
+    ],
+    "expected_null_seeds": 3,
+    "expected_teacher_seeds": 3,
+    "expected_time_bins": 5,
+    "maximum_clip_fraction": 0.1,
+    "minimum_passing_teacher_seeds": 2,
+    "oracle_confidence": 0.99,
+    "pilot_learning_rates": [
+      0.0003,
+      0.0001,
+      3e-05,
+      1e-05
+    ],
+    "teacher": {
+      "bootstrap_confidence": 0.9,
+      "boundary_max_flux_ratio": 0.001,
+      "boundary_min_flux_slope": 0.9,
+      "expected_implicit_teacher_seeds": 3,
+      "expected_null_seeds": 3,
+      "expected_time_bins": 5,
+      "maximum_post_warmup_clip_fraction": 0.1,
+      "minimum_passing_implicit_teacher_seeds": 2,
+      "teacher_max_bin_relative_flux_l2": 0.2,
+      "teacher_max_overall_relative_flux_l2": 0.15,
+      "teacher_min_bin_flux_cosine": 0.95,
+      "teacher_min_overall_flux_cosine": 0.98,
+      "teacher_min_score_gain": 0.9
+    }
+  }
+}

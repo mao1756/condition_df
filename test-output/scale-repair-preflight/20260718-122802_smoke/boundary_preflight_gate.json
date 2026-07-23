@@ -1,0 +1,86 @@
+{
+  "claim_scope": "closed-simplex model/operator domain",
+  "gate": "boundary_preflight",
+  "passed": 1,
+  "sampling_performed": 0,
+  "subchecks": {
+    "aggregate_preflight": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "energy_finite": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "generator_finite": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "gradient_finite": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "hvp_finite": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "incident_flux_endpoint_ratio": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 0.001,
+      "value": 0.00010093641676844472
+    },
+    "incident_flux_slope": {
+      "operator": ">=",
+      "passed": 1,
+      "threshold": 0.9,
+      "value": 0.9991504773589839
+    },
+    "legacy_barrier_rejected": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "legacy_coefficient": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 0.02,
+      "value": 0.01262158818557124
+    },
+    "operator_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "orthogonal_probe_trace": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "potential_finite": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "production_workload_smoke": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    }
+  }
+}

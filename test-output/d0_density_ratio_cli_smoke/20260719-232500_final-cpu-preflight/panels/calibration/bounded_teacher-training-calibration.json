@@ -1,0 +1,51 @@
+{
+  "binding": {
+    "path_count": 1,
+    "phase": "calibration",
+    "physical_training_performed": 0,
+    "role": "training-calibration",
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-controls-panel-binding",
+    "schema_version": 1,
+    "scientific_fingerprint": "7d3104b57b657c671a40c22cc792764797ce1599657b5226e9de03e6f249a05f",
+    "start_step": 7000000,
+    "stream_plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+    "task": "bounded_teacher"
+  },
+  "identity": {
+    "anchor_ids_sha256": "ce409b8cbd367c50204135f3b79f76100bbfa6970dd2e2afc7b7277c2626bad8",
+    "class_counts": [
+      32,
+      32
+    ],
+    "class_targets_sha256": "201881b40ea9a2738e1ababe8fec498dad270d2ddbedcb8b4246c64ff6d945fd",
+    "fingerprint": "9ba569aeb8ea3b4f17a0d9e2b2296db03c83ddc97baaf1a3ae881d35b8d415b1",
+    "labels_sha256": "5f6de7215c7ec20f11e5dd55f5c9a12e382f80a8b482208c665c24e959a33736",
+    "panel_version": "d0-density-ratio-panel-v1",
+    "path_count": 1,
+    "path_ids_sha256": "49feb15b64da3d1f57d71a805dee3124eb04d16f50c323c378b21627ecdc7644",
+    "phase": "calibration",
+    "physical_training_performed": 0,
+    "pixels": 784,
+    "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+    "role": "training-calibration",
+    "rows": 64,
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-panel",
+    "schema_version": 1,
+    "state_sha256": "9f2b60553e251022762ce6b3088601139f9342becfad01b0b0739aa7fa4a2aec",
+    "strata_sha256": "a026b160b971472b774f57060c0d42c4948576344950c88b093f31370a46eb43",
+    "stream_fingerprints": [
+      "e895da91a5738f4c1c391e20f012124e3dfb2f6aec390e4cd963bfbeee77624c"
+    ],
+    "task": "bounded_teacher",
+    "tau_fraction_sha256": "8d23bcc4919fb739392ea57e216e962fd8694951f84d906c518468a1773d070c",
+    "unique_path_count": 1
+  },
+  "physical_training_performed": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-controls-panel-sidecar",
+  "schema_version": 1,
+  "sha256": "69de26adf41e803c4fee94893d53213d17c7263aa6e15bdeedadcc658259255c",
+  "size": 209357
+}

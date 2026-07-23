@@ -1,0 +1,92 @@
+{
+  "adamw_coordinate_max_relative_error": 1.0840730505789142e-15,
+  "adamw_group_epsilon_pass": 1,
+  "adamw_group_learning_rate_pass": 1,
+  "adamw_group_weight_decay_pass": 1,
+  "ema_coordinate_max_relative_error": 1.9050350866034852e-16,
+  "global_clipping_applied": 0,
+  "optimizer_record": {
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "coordinate_factor": 784,
+    "coordinate_version": "d0-spatial-sum-to-mean-head-coordinate-v1",
+    "grid_size": 28,
+    "groups": [
+      {
+        "eps": 1e-08,
+        "lr": 3e-05,
+        "name": "body",
+        "parameter_names": [
+          "enc1.net.0.weight",
+          "enc1.net.0.bias",
+          "enc1.net.1.weight",
+          "enc1.net.1.bias",
+          "enc1.net.3.weight",
+          "enc1.net.3.bias",
+          "enc1.net.4.weight",
+          "enc1.net.4.bias",
+          "down1.weight",
+          "down1.bias",
+          "enc2.net.0.weight",
+          "enc2.net.0.bias",
+          "enc2.net.1.weight",
+          "enc2.net.1.bias",
+          "enc2.net.3.weight",
+          "enc2.net.3.bias",
+          "enc2.net.4.weight",
+          "enc2.net.4.bias",
+          "down2.weight",
+          "down2.bias",
+          "mid.net.0.weight",
+          "mid.net.0.bias",
+          "mid.net.1.weight",
+          "mid.net.1.bias",
+          "mid.net.3.weight",
+          "mid.net.3.bias",
+          "mid.net.4.weight",
+          "mid.net.4.bias",
+          "up2.conv.weight",
+          "up2.conv.bias",
+          "dec2.net.0.weight",
+          "dec2.net.0.bias",
+          "dec2.net.1.weight",
+          "dec2.net.1.bias",
+          "dec2.net.3.weight",
+          "dec2.net.3.bias",
+          "dec2.net.4.weight",
+          "dec2.net.4.bias",
+          "up1.conv.weight",
+          "up1.conv.bias",
+          "dec1.net.0.weight",
+          "dec1.net.0.bias",
+          "dec1.net.1.weight",
+          "dec1.net.1.bias",
+          "dec1.net.3.weight",
+          "dec1.net.3.bias",
+          "dec1.net.4.weight",
+          "dec1.net.4.bias"
+        ],
+        "weight_decay": 0.0001
+      },
+      {
+        "eps": 1.2755102040816327e-11,
+        "lr": 0.02352,
+        "name": "normalized_head",
+        "parameter_names": [
+          "out.weight",
+          "out.bias"
+        ],
+        "weight_decay": 1.2755102040816328e-07
+      }
+    ],
+    "model_version": "d0-boundary-smooth-potential-unet-mean-head-v2",
+    "version": "d0-mean-head-coordinate-adamw-v1"
+  },
+  "physical_training_performed": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-head-confirmation-optimizer-conjugacy",
+  "schema_version": 1,
+  "steps": 4
+}

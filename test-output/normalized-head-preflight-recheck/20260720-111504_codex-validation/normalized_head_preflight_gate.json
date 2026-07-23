@@ -1,0 +1,191 @@
+{
+  "claim_scope": "exact spatial-sum/spatial-mean function and optimizer-coordinate equivalence",
+  "evaluation_status": "evaluated",
+  "gate": "normalized_head_coordinate_preflight",
+  "passed": 0,
+  "physical_training_performed": 0,
+  "sampling_performed": 0,
+  "subchecks": {
+    "adamw_coordinate_max_relative_error": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 2e-06,
+      "value": 1.0840730505789142e-15
+    },
+    "adamw_group_epsilon_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "adamw_group_learning_rate_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "adamw_group_weight_decay_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "backbone_gradient_relative_error": {
+      "operator": "<=",
+      "passed": 0,
+      "threshold": 2e-06,
+      "value": 1.0962763593926131e-05
+    },
+    "backbone_gradient_unchanged_pass": {
+      "operator": "==",
+      "passed": 0,
+      "threshold": 1,
+      "value": 0
+    },
+    "base_channels": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 32,
+      "value": 32
+    },
+    "boundary_operator_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "complete": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "cuda_bce_max_abs_error": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 2e-06,
+      "value": 0.0
+    },
+    "cuda_logit_max_abs_error": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 2e-06,
+      "value": 2.9802322387695312e-08
+    },
+    "edge_score_relative_error": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 2e-06,
+      "value": 1.0475623737306776e-06
+    },
+    "ema_coordinate_max_relative_error": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 2e-06,
+      "value": 1.9050350866034852e-16
+    },
+    "finite": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "finite_device_backward_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "float64_bce_max_abs_error": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 1e-09,
+      "value": 0.0
+    },
+    "float64_logit_max_abs_error": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 1e-09,
+      "value": 2.7755575615628914e-17
+    },
+    "flux_relative_error": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 2e-06,
+      "value": 7.977370295497324e-07
+    },
+    "grid_cells": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 784,
+      "value": 784
+    },
+    "head_gradient_one_over_n_pass": {
+      "operator": "==",
+      "passed": 0,
+      "threshold": 1,
+      "value": 0
+    },
+    "head_gradient_scale_relative_error": {
+      "operator": "<=",
+      "passed": 0,
+      "threshold": 2e-06,
+      "value": 1.6584429747363068e-05
+    },
+    "legacy_checkpoint_report_only_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "median_legacy_head_squared_gradient_share": {
+      "operator": ">=",
+      "passed": 1,
+      "threshold": 0.95,
+      "value": 0.9986514215673705
+    },
+    "paired_estimator_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "parent_forensic_finite": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "parent_provenance_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "physical_training_performed": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 0,
+      "value": 0
+    },
+    "sampling_performed": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 0,
+      "value": 0
+    },
+    "state_gradient_relative_error": {
+      "operator": "<=",
+      "passed": 1,
+      "threshold": 2e-06,
+      "value": 1.056197451598659e-06
+    },
+    "stream_replay_pass": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    }
+  },
+  "width_ablation_gate_eligible": 0
+}

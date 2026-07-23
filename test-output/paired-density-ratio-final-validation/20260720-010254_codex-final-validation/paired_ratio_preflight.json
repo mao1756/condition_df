@@ -1,0 +1,141 @@
+{
+  "accumulation_gradient_max_error": 0.0,
+  "actual_paired_accumulation_records": [
+    {
+      "accumulation_level": 8,
+      "diagnostics": {
+        "accumulation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "cluster_count": 256,
+        "expected_clusters": 256,
+        "expected_microbatches": 8,
+        "finite": 1,
+        "loss_scale": 1.0,
+        "microbatch_count": 8,
+        "physical_training_performed": 0,
+        "raw_gradient_norm": 0.0007611649777394273,
+        "sampling_performed": 0,
+        "scaled_gradient_norm": 0.0007611649777394273,
+        "scaled_objective": 0.6932880457335953,
+        "unscaled_objective": 0.6932880457335953,
+        "weight_sum": 1.0
+      },
+      "effective_clusters": 256,
+      "gradient_max_error": 0.0,
+      "stream_fingerprint": "393553d11ee43dddd74ab31824999dc83111b9fb5d35dd2dc3c9ff185cb292a2",
+      "task": "bounded_teacher"
+    },
+    {
+      "accumulation_level": 8,
+      "diagnostics": {
+        "accumulation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+        "cluster_count": 256,
+        "expected_clusters": 256,
+        "expected_microbatches": 8,
+        "finite": 1,
+        "loss_scale": 1.0,
+        "microbatch_count": 8,
+        "physical_training_performed": 0,
+        "raw_gradient_norm": 0.0007810119868233833,
+        "sampling_performed": 0,
+        "scaled_gradient_norm": 0.0007810119868233833,
+        "scaled_objective": 0.6932952586162124,
+        "unscaled_objective": 0.6932952586162124,
+        "weight_sum": 1.0
+      },
+      "effective_clusters": 256,
+      "gradient_max_error": 0.0,
+      "stream_fingerprint": "5365fd5adabca9bc9ff9bdfa94d31d21a778ca3734ee9e985373a13cd8ee8fc1",
+      "task": "dirichlet_null"
+    }
+  ],
+  "adaptive_loss_scaling": 0,
+  "boundary_operator_pass": 1,
+  "candidate_order_invariance_pass": 1,
+  "class_balance_pass": 1,
+  "common_forensic_panels_across_checkpoints_pass": 1,
+  "common_gamma_coupling_pass": 1,
+  "complete": 1,
+  "device_smoke_pass": 1,
+  "dirichlet_marginals_pass": 1,
+  "evaluation_status": "evaluated",
+  "exact_seed_namespaces_pass": 1,
+  "expanded_gradient_max_error": 5.551115123125783e-17,
+  "expanded_loss_max_error": 0.0,
+  "finite": 1,
+  "fresh_panel_isolation_pass": 1,
+  "loss_algebra_max_error": 0.0,
+  "mixture_coefficients_pass": 1,
+  "nested_accumulation_fingerprints": {
+    "2": [
+      "fb72b5f95ad3853504b1f63fec2e4f9fc0cf162a75a93d1189c0daad1fd7a791",
+      "bda50d400051f805ecd6ceac0cb8a0edd890a40f03e34f72ab785899e5ef7006"
+    ],
+    "4": [
+      "fb72b5f95ad3853504b1f63fec2e4f9fc0cf162a75a93d1189c0daad1fd7a791",
+      "bda50d400051f805ecd6ceac0cb8a0edd890a40f03e34f72ab785899e5ef7006",
+      "8bfdb69365d18f4c817c691ba836634d50569d92984e28e1ed993f49fd5cf703",
+      "1360ba362fee054528664d583ab469a50a12a2e7f89bf48cb0d587cd9d71f1f3"
+    ],
+    "8": [
+      "fb72b5f95ad3853504b1f63fec2e4f9fc0cf162a75a93d1189c0daad1fd7a791",
+      "bda50d400051f805ecd6ceac0cb8a0edd890a40f03e34f72ab785899e5ef7006",
+      "8bfdb69365d18f4c817c691ba836634d50569d92984e28e1ed993f49fd5cf703",
+      "1360ba362fee054528664d583ab469a50a12a2e7f89bf48cb0d587cd9d71f1f3",
+      "4864be9488ec1d95576efc06ed1ec4841bee8f434440f1707b372ba77266d301",
+      "1c55eafc624f13490fa6cdfb1d1f499862290bf3018fab52a3183a97434544a6",
+      "2d9fff2a7c35a220c7f711e08db90b398c61f9b9d73b47cba62922c5c570387f",
+      "8a1119dd2be5171d3a6cb4ef6ec17a6d56cbf6d333e942b89a80695fb21d1706"
+    ]
+  },
+  "nested_accumulation_prefix_pass": 1,
+  "null_pool_swap_structure_pass": 1,
+  "paired_stream_plan": {
+    "accumulation_levels": [
+      2,
+      4,
+      8
+    ],
+    "accumulation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+    "cluster_bin_counts": [
+      4,
+      4,
+      4,
+      4,
+      16
+    ],
+    "derivation_version": "d0-density-ratio-paired-mixture-stream-v1",
+    "effective_cluster_counts": [
+      64,
+      128,
+      256
+    ],
+    "fingerprint": "b19650872040affa7a8581f8c3bc5b8f949e9c5cf55c6ca3c82ca7afd9ae8fde",
+    "grid_size": 28,
+    "horizon": 0.00042517006802721087,
+    "label": 3,
+    "microbatch_clusters": 32,
+    "objective_version": "d0-density-ratio-paired-mixture-weighted-softplus-v1",
+    "physical_training_performed": 0,
+    "production_defaults_match": 1,
+    "production_root_seed": 260851,
+    "root_seed": 260851,
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-paired-mixture-stream-plan",
+    "schema_version": 1,
+    "stream_version": "d0-density-ratio-paired-mixture-stream-v1",
+    "teacher_epsilon": 0.5,
+    "teacher_version": "d0-bounded-four-anchor-mixture-v1"
+  },
+  "parent_loss_scale_reused": 1,
+  "parent_provenance_pass": 1,
+  "physical_training_performed": 0,
+  "preflight_confidence": 0.99,
+  "preflight_paths": 128,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-stability-confirmation-preflight-metrics",
+  "schema_version": 1,
+  "simultaneous_directional_gradient_intervals_contain_zero": 1,
+  "simultaneous_loss_interval_contains_zero": 1,
+  "stream_replay_pass": 1,
+  "time_strata_pass": 1
+}

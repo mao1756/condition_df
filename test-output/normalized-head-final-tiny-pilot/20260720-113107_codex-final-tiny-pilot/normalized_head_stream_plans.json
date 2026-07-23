@@ -1,0 +1,76 @@
+{
+  "evaluation_stream": {
+    "batch_bin_counts": [
+      8,
+      8,
+      8,
+      8,
+      32
+    ],
+    "batch_size": 64,
+    "bin_counts": [
+      4,
+      4,
+      4,
+      4,
+      16
+    ],
+    "derivation_version": "d0-density-ratio-balanced-stream-v1",
+    "examples_per_class": 32,
+    "fingerprint": "f65fb72566e99d15b17d6025c91fb9387c60ba6be4d497c4883aa6697dafcbbb",
+    "grid_size": 28,
+    "horizon": 0.00042517006802721087,
+    "label": 3,
+    "model_version": "d0-boundary-smooth-potential-unet-v1",
+    "objective_version": "d0-balanced-raw-logit-bce-v1",
+    "physical_training_performed": 0,
+    "root_seed": 260881,
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-stream-plan",
+    "schema_version": 1,
+    "teacher_epsilon": 0.5,
+    "teacher_version": "d0-bounded-four-anchor-mixture-v1"
+  },
+  "head_coordinate_version": "d0-spatial-sum-to-mean-head-coordinate-v1",
+  "model_schema": "d0-boundary-smooth-potential-unet-mean-head-v2",
+  "optimizer_coordinate_version": "d0-mean-head-coordinate-adamw-v1",
+  "paired_training_stream": {
+    "accumulation_levels": [
+      2,
+      4,
+      8
+    ],
+    "accumulation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+    "cluster_bin_counts": [
+      4,
+      4,
+      4,
+      4,
+      16
+    ],
+    "derivation_version": "d0-density-ratio-paired-mixture-stream-v1",
+    "effective_cluster_counts": [
+      64,
+      128,
+      256
+    ],
+    "fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+    "grid_size": 28,
+    "horizon": 0.00042517006802721087,
+    "label": 3,
+    "microbatch_clusters": 32,
+    "objective_version": "d0-density-ratio-paired-mixture-weighted-softplus-v1",
+    "physical_training_performed": 0,
+    "production_defaults_match": 0,
+    "production_root_seed": 260851,
+    "root_seed": 260881,
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-paired-mixture-stream-plan",
+    "schema_version": 1,
+    "stream_version": "d0-density-ratio-paired-mixture-stream-v1",
+    "teacher_epsilon": 0.5,
+    "teacher_version": "d0-bounded-four-anchor-mixture-v1"
+  },
+  "physical_training_performed": 0,
+  "sampling_performed": 0
+}

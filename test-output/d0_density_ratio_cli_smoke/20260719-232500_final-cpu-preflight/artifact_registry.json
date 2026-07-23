@@ -1,0 +1,72 @@
+{
+  "physical_training_performed": 0,
+  "records": {
+    "density_ratio_control_decision.json": {
+      "sha256": "c6eaffc071950c94eb4b7b79b6c2f702c9cf60a26f18e9aa0d1953e5e6bb46df",
+      "size": 265
+    },
+    "density_ratio_control_report.json": {
+      "sha256": "03869ca8731404a41515907666ea56c75f5ec076e7a7f5d430051ca19e8a780e",
+      "size": 68487
+    },
+    "density_ratio_loss_scale_calibration.json": {
+      "sha256": "0f590fe787c6d0d88f7dcbcde5e2aa70615911db04cbf1018518f35a2324af81",
+      "size": 2781
+    },
+    "density_ratio_preflight.json": {
+      "sha256": "70f3b674cd9d8c95aa24ff6e17d299c7fa1fcb6c3e5848dcd38c747ef97db726",
+      "size": 4375
+    },
+    "density_ratio_preflight_gate.json": {
+      "sha256": "9964028ab69658a0badf1ee9dc405a3abf58c6e0fc3694824d6da01ab55eba07",
+      "size": 3848
+    },
+    "density_ratio_stream_plan.json": {
+      "sha256": "1e080a8c7f677cc55d91c3916238ef40c38e16a45438cb3a992bb22e1e17e790",
+      "size": 761
+    },
+    "density_ratio_stream_replay_preflight.json": {
+      "sha256": "4079d96924d636bc82b1a36b76fc272f9a409024ca6b2fce45cd40ed167b62cb",
+      "size": 23193
+    },
+    "panels/calibration/bounded_teacher-training-calibration.json": {
+      "sha256": "62bfa7bb6396538122d49f913d63ccabf7903ff95f4fee4535839dcec7408bf0",
+      "size": 2165
+    },
+    "panels/calibration/bounded_teacher-training-calibration.pt": {
+      "sha256": "69de26adf41e803c4fee94893d53213d17c7263aa6e15bdeedadcc658259255c",
+      "size": 209357
+    },
+    "panels/preflight/bounded_teacher-oracle-bounded_teacher.json": {
+      "sha256": "22d841608618a671f6e9d5cdebba607d9373ec98c8a6e95387311b4763b98cc9",
+      "size": 2240
+    },
+    "panels/preflight/bounded_teacher-oracle-bounded_teacher.pt": {
+      "sha256": "3268b6ecd3deec2d385c49c76cd2f4577a8d105648b3017396ede5ea3018ba8e",
+      "size": 412969
+    },
+    "panels/preflight/dirichlet_null-oracle-dirichlet_null.json": {
+      "sha256": "00ff3e0bda67894049dfb4d5233e35ea292cbfb572d888ec4df9573edd889e53",
+      "size": 2236
+    },
+    "panels/preflight/dirichlet_null-oracle-dirichlet_null.pt": {
+      "sha256": "f1f9036c7878a67ec68ce8ef468217f814447277423746b0873ca3626cae8bdc",
+      "size": 412941
+    },
+    "parent_provenance.json": {
+      "sha256": "d72b92fbf6a0bbb3bfaca4e33273b18acfdb49b515943f04c789a7b98d7900b9",
+      "size": 52915
+    },
+    "run_manifest.json": {
+      "sha256": "5f53d70658e9708ff274a9fca349c179f988c2b054989afa80f8de5c796fc88a",
+      "size": 6930
+    }
+  },
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-controls-artifact-registry",
+  "schema_version": 1,
+  "terminal_files_excluded_to_avoid_self_reference": [
+    "artifact_registry.json",
+    "run_status.json"
+  ]
+}

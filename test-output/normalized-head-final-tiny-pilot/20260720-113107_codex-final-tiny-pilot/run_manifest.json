@@ -1,0 +1,240 @@
+{
+  "claim_scope": "normalized-head paired bounded synthetic density-ratio controls only",
+  "created_at": "2026-07-20T11:31:19.707426+09:00",
+  "parent_provenance_sha256": "bf67e631bf7f116f873924d9e1fc156dfc65ca2ac63cc7c1921d5038d76c4e86",
+  "physical_training_performed": 0,
+  "run_dir": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\normalized-head-final-tiny-pilot\\20260720-113107_codex-final-tiny-pilot",
+  "runtime": {
+    "backend": {
+      "cublas_workspace_config": ":4096:8",
+      "cuda_compute_capability": [
+        12,
+        0
+      ],
+      "cuda_device_index": 0,
+      "cuda_device_name": "NVIDIA GeForce RTX 5060 Laptop GPU",
+      "cuda_device_uuid": "7d90d3bf-29ce-6d20-4735-4d5a7e097c13",
+      "cuda_matmul_allow_bf16_reduced_precision_reduction": false,
+      "cuda_matmul_allow_fp16_accumulation": false,
+      "cuda_matmul_allow_fp16_reduced_precision_reduction": false,
+      "cuda_matmul_allow_tf32": false,
+      "cuda_total_memory": 8546484224,
+      "cudnn_allow_tf32": false,
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": true,
+      "cudnn_runtime_version": 91900,
+      "deterministic_algorithms": true,
+      "deterministic_debug_mode": 2,
+      "float32_matmul_precision": "highest",
+      "mkldnn_enabled": false,
+      "nvidia_driver_versions": [
+        "591.91"
+      ],
+      "torch_num_interop_threads": 16,
+      "torch_num_threads": 16
+    },
+    "cuda_device_name": "NVIDIA GeForce RTX 5060 Laptop GPU",
+    "cuda_version": "12.8",
+    "device": "cuda",
+    "torch_version": "2.11.0+cu128"
+  },
+  "runtime_fingerprint": "596381c888ff9eb877f3afafa033ceee5701cab7dd87ae6300ae8af7393b1c9b",
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-head-confirmation",
+  "schema_version": 1,
+  "scientific_config": {
+    "algorithm": "experiment12-d0-score-density-ratio-head-confirmation",
+    "algorithm_version": 1,
+    "bootstrap": {
+      "reps": 100,
+      "selection_audit_confidence": 0.9
+    },
+    "claim_scope": "normalized-head paired bounded synthetic density-ratio controls only",
+    "confirmation": {
+      "audit_paths_per_panel": 32,
+      "dense_validation_steps": [
+        0,
+        25,
+        50,
+        100,
+        150,
+        250
+      ],
+      "model_seeds": [
+        260891,
+        260892,
+        260893
+      ],
+      "selection_paths_per_panel": 32,
+      "steps": 4000,
+      "validation_every": 250
+    },
+    "head_coordinate_version": "d0-spatial-sum-to-mean-head-coordinate-v1",
+    "kernel": {
+      "alpha_eff": 1.0,
+      "edge_alpha_mode": "alpha_eff",
+      "grid_size": 28,
+      "lambda_mix": 0.35,
+      "limiter_fraction": 1.0,
+      "mass_floor": 1e-07,
+      "reference_substeps": 256,
+      "sample_steps": 512,
+      "tau_eff": 5e-05
+    },
+    "loss_scale": 0.05173607018770852,
+    "microbatch": {
+      "clusters": 32,
+      "null_coupling": "independent-dirichlet-pooled-label-swap",
+      "teacher_coupling": "common-gamma-stochastic-anchor",
+      "time_bin_counts": [
+        4,
+        4,
+        4,
+        4,
+        16
+      ]
+    },
+    "model_schema": "d0-boundary-smooth-potential-unet-mean-head-v2",
+    "optimization": {
+      "adaptive_loss_scaling": 0,
+      "body_weight_decay": 0.0001,
+      "clip_warmup_steps": 500,
+      "ema_decay": 0.99,
+      "grad_clip": 1.0,
+      "gradient_accumulation": "mean-then-clip-once",
+      "head_eps_factor": 0.0012755102040816326,
+      "head_lr_factor": 784,
+      "head_weight_decay_factor": 0.0012755102040816326,
+      "optimizer": "coordinate-conjugate-AdamW"
+    },
+    "optimizer_coordinate_version": "d0-mean-head-coordinate-adamw-v1",
+    "paired_accumulation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+    "paired_estimator_schema": "experiment12-d0-score-density-ratio-paired-mixture",
+    "paired_objective_version": "d0-density-ratio-paired-mixture-weighted-softplus-v1",
+    "paired_stream_version": "d0-density-ratio-paired-mixture-stream-v1",
+    "parent_artifact_registry_sha256": "c7aaab14493d32627a83b3abf69bee94384fbb54dafc2d32cdd88387f0234c1b",
+    "parent_scientific_fingerprint": "d75f6dcd39db716a9613b90e94c7213a07eb1433798862b7abed233b83242ccb",
+    "physical_training_performed": 0,
+    "pilot": {
+      "accumulation_levels": [
+        8
+      ],
+      "effective_cluster_counts": [
+        256
+      ],
+      "learning_rates": [
+        3e-05,
+        1e-05
+      ],
+      "profile_selection": "fixed-accumulation-8-two-learning-rate-pilot",
+      "selection_paths_per_panel": 1,
+      "steps": 1,
+      "validation_steps": [
+        0,
+        1
+      ]
+    },
+    "preflight": {
+      "bootstrap_reps": 100,
+      "confidence": 0.99,
+      "paths": 4
+    },
+    "root_seed": 260881,
+    "sampling_performed": 0,
+    "thresholds": {
+      "accumulation_steps": 8,
+      "base_channels": 32,
+      "cuda_equivalence_tolerance": 2e-06,
+      "derivative_equivalence_tolerance": 2e-06,
+      "float64_equivalence_tolerance": 1e-09,
+      "gradient_scaling_tolerance": 2e-06,
+      "grid_cells": 784,
+      "minimum_legacy_head_squared_gradient_share": 0.95,
+      "optimizer_conjugacy_tolerance": 2e-06,
+      "pilot_learning_rates": [
+        3e-05,
+        1e-05
+      ],
+      "stability": {
+        "accumulation_gradient_tolerance": 1e-06,
+        "accumulation_levels": [
+          2,
+          4,
+          8
+        ],
+        "density_ratio": {
+          "analytic_derivative_tolerance": 1e-08,
+          "analytic_null_tolerance": 1e-12,
+          "anchors_per_path": 32,
+          "audit_confidence": 0.9,
+          "audit_paths_per_panel": 32,
+          "confirm_confidence": 0.9,
+          "expected_audit_panels": [
+            "c",
+            "d"
+          ],
+          "expected_null_seeds": 3,
+          "expected_teacher_seeds": 3,
+          "expected_time_bins": 5,
+          "maximum_clip_fraction": 0.1,
+          "minimum_passing_teacher_seeds": 2,
+          "oracle_confidence": 0.99,
+          "pilot_learning_rates": [
+            0.0003,
+            0.0001,
+            3e-05,
+            1e-05
+          ],
+          "teacher": {
+            "bootstrap_confidence": 0.9,
+            "boundary_max_flux_ratio": 0.001,
+            "boundary_min_flux_slope": 0.9,
+            "expected_implicit_teacher_seeds": 3,
+            "expected_null_seeds": 3,
+            "expected_time_bins": 5,
+            "maximum_post_warmup_clip_fraction": 0.1,
+            "minimum_passing_implicit_teacher_seeds": 2,
+            "teacher_max_bin_relative_flux_l2": 0.2,
+            "teacher_max_overall_relative_flux_l2": 0.15,
+            "teacher_min_bin_flux_cosine": 0.95,
+            "teacher_min_overall_flux_cosine": 0.98,
+            "teacher_min_score_gain": 0.9
+          }
+        },
+        "expanded_gradient_tolerance": 1e-06,
+        "expanded_loss_tolerance": 1e-07,
+        "final_clip_windows": [
+          500,
+          200
+        ],
+        "loss_algebra_tolerance": 1e-12,
+        "maximum_clip_fraction": 0.1,
+        "pilot_learning_rates": [
+          3e-05,
+          1e-05
+        ],
+        "preflight_confidence": 0.99,
+        "preflight_paths": 128
+      }
+    }
+  },
+  "scientific_fingerprint": "4e33c9978c281204cbcace7a25a418f2995377f726c1594a4396223cf99208c1",
+  "source_fingerprint": "e221aa36bfe4c4b70928b01195f811143a201d7888baeb151ce15c582113d88a",
+  "source_paths": [
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\diag_d0_score_density_ratio_head_confirmation.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_density_ratio_head.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_density_ratio_head_gate.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_density_ratio_head_provenance.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_density_ratio_paired.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_density_ratio_stability_gate.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_density_ratio_stability_provenance.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\diag_d0_score_density_ratio_controls.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_density_ratio.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_density_ratio_gate.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_density_ratio_provenance.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_boundary_controls.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_score_optimizer_scale.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\d0_one_image_gate.py",
+    "C:\\Users\\mao17\\Workspace\\condition_df\\mnist\\eulerian_flux_mnist.py"
+  ]
+}

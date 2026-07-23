@@ -1,0 +1,422 @@
+{
+  "accumulation_level": 8,
+  "audit_step": 1,
+  "boundary_admissibility_certificate": {
+    "expected_model_version": "d0-boundary-smooth-potential-unet-mean-head-v2",
+    "finite_parameters": 1,
+    "head_coordinate_version": "d0-spatial-sum-to-mean-head-coordinate-v1",
+    "model_version": "d0-boundary-smooth-potential-unet-mean-head-v2",
+    "passed": 1,
+    "raw_log_density_used": 0,
+    "scalar_reduction": "spatial_mean",
+    "state_feature_names": [
+      "relative_density",
+      "log1p_relative_density"
+    ],
+    "structural_facet_certificate": "smooth-closed-simplex-inputs-plus-exact-head-equivalence-v1"
+  },
+  "checkpoint_selection": {
+    "confirmation": {
+      "accepted": 1,
+      "claim_scope": "independent confirmation state panel B tests only the panel-A nominee",
+      "evaluation_status": "evaluated",
+      "gate": "density_ratio_panel_b_confirmation",
+      "nominee_step": 1,
+      "panel_b_confidence": 0.9,
+      "panel_b_lower_bounds": [
+        5.736526967892175e-07,
+        1.8435986059994747e-07
+      ],
+      "panel_b_overall_bce": 0.6931466069072485,
+      "passed": 1,
+      "physical_training_performed": 0,
+      "sampling_performed": 0,
+      "selected_step": 1,
+      "subchecks": {
+        "a_nomination_pass": {
+          "operator": "==",
+          "passed": 1,
+          "threshold": 1,
+          "value": 1
+        },
+        "confirm_confidence": {
+          "operator": ">=",
+          "passed": 1,
+          "threshold": 0.9,
+          "value": 0.9
+        },
+        "panel_b_lower_bounds": {
+          "operator": "> 0 each",
+          "passed": 1,
+          "threshold": 0.0,
+          "value": [
+            5.736526967892175e-07,
+            1.8435986059994747e-07
+          ]
+        },
+        "unique_nominee_record": {
+          "operator": "==",
+          "passed": 1,
+          "threshold": 1,
+          "value": 1
+        }
+      }
+    },
+    "evaluation_status": "evaluated",
+    "gate": "density_ratio_checkpoint_selection",
+    "nomination": {
+      "candidate_count": 1,
+      "claim_scope": "single nonzero EMA checkpoint nomination using discovery state panel A only",
+      "evaluation_status": "evaluated",
+      "gate": "density_ratio_panel_a_nomination",
+      "nominee_panel_a_confidence": 0.9,
+      "nominee_panel_a_lower_bounds": [
+        -3.762963293185706e-07,
+        -3.464940069308753e-07
+      ],
+      "nominee_panel_a_overall_bce": 0.6931475568562746,
+      "nominee_step": 1,
+      "passed": 1,
+      "physical_training_performed": 0,
+      "sampling_performed": 0,
+      "subchecks": {
+        "nonzero_nominee_available": {
+          "operator": "==",
+          "passed": 1,
+          "threshold": 1,
+          "value": 1
+        },
+        "step_zero_present": {
+          "operator": "==",
+          "passed": 1,
+          "threshold": 1,
+          "value": 1
+        }
+      }
+    },
+    "nominee_step": 1,
+    "passed": 1,
+    "physical_training_performed": 0,
+    "sampling_performed": 0,
+    "selected_step": 1
+  },
+  "complete": 1,
+  "fingerprints": {
+    "accumulation_level": 8,
+    "adamw_epsilon": 1e-08,
+    "audit_panel_identities": null,
+    "body_weight_decay": 0.0001,
+    "checkpoint_schema_version": 1,
+    "grid_cells": 784,
+    "head_coordinate_version": "d0-spatial-sum-to-mean-head-coordinate-v1",
+    "learning_rate": 1e-05,
+    "loss_scale": 0.05173607018770852,
+    "microbatch_clusters": 32,
+    "model_schema": "d0-boundary-smooth-potential-unet-mean-head-v2",
+    "model_seed": 5779330004912519769,
+    "optimizer_coordinate_version": "d0-mean-head-coordinate-adamw-v1",
+    "paired_accumulation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+    "paired_estimator_schema": "experiment12-d0-score-density-ratio-paired-mixture",
+    "paired_objective_version": "d0-density-ratio-paired-mixture-weighted-softplus-v1",
+    "paired_stream_plan_fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+    "paired_stream_version": "d0-density-ratio-paired-mixture-stream-v1",
+    "phase": "pilot",
+    "physical_training_performed": 0,
+    "runtime_fingerprint": "596381c888ff9eb877f3afafa033ceee5701cab7dd87ae6300ae8af7393b1c9b",
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-head-confirmation-task-fingerprints",
+    "schema_version": 1,
+    "scientific_fingerprint": "0cf2bd1fabcc8d63416c2faad9ade1d8959cca92845ace39fabac3c90c5766f8",
+    "selection_panel_identities": {
+      "a": {
+        "anchor_ids_sha256": "2eec0f2b0f71ddc492a3964f49d6e28eb40d7eb7b24076a17455467a091311ce",
+        "class_counts": [
+          32,
+          32
+        ],
+        "class_targets_sha256": "f3708e0344d5b46c29b89c73b94708784b82e945eefc1db2b40b3f13c18cb14f",
+        "fingerprint": "252298a553d02b0145879f15bfc814c1b9e1880cf479f8a720b43e14ade0fdb1",
+        "labels_sha256": "5f6de7215c7ec20f11e5dd55f5c9a12e382f80a8b482208c665c24e959a33736",
+        "panel_version": "d0-density-ratio-panel-v1",
+        "path_count": 1,
+        "path_ids_sha256": "9c0b29054ae018321d498bb83ff4f2d037232947302595c2233776f0a9d61891",
+        "phase": "pilot-selection-accum-8",
+        "physical_training_performed": 0,
+        "pixels": 784,
+        "plan_fingerprint": "f65fb72566e99d15b17d6025c91fb9387c60ba6be4d497c4883aa6697dafcbbb",
+        "role": "a",
+        "rows": 64,
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-panel",
+        "schema_version": 1,
+        "state_sha256": "befac9f21c4b14dcaf3b260829337a095fd7aab101f7d57ff22ca6accc05ac33",
+        "strata_sha256": "6e2466fe487fe1c784b83671794440d157f963c734eba0e13fed272139a6028d",
+        "stream_fingerprints": [
+          "eb12d796924d64602316668e1761bb41af4df7210490d5da742625b14194876f"
+        ],
+        "task": "bounded_teacher",
+        "tau_fraction_sha256": "2c3cbff84d5095514a2d2fc89e5914ab4294349a0bfe2495f59f99308c281f7d",
+        "unique_path_count": 1
+      },
+      "b": {
+        "anchor_ids_sha256": "217d6649971ea71370247757d51db5a4efdabf3d4342fd12897b85390af8e9a1",
+        "class_counts": [
+          32,
+          32
+        ],
+        "class_targets_sha256": "2558922cdd717021f5dee3533152e9da5aa5518edaa15f08d16edc03bff714c2",
+        "fingerprint": "461411cb04344bba1c69c3d869bf6894052e26f5808508d20cf42d8689bcab7f",
+        "labels_sha256": "5f6de7215c7ec20f11e5dd55f5c9a12e382f80a8b482208c665c24e959a33736",
+        "panel_version": "d0-density-ratio-panel-v1",
+        "path_count": 1,
+        "path_ids_sha256": "8d8fc0d59a7b1690dd37a598d905e2f861a11f23c2981ec3a84cbcea94305014",
+        "phase": "pilot-selection-accum-8",
+        "physical_training_performed": 0,
+        "pixels": 784,
+        "plan_fingerprint": "f65fb72566e99d15b17d6025c91fb9387c60ba6be4d497c4883aa6697dafcbbb",
+        "role": "b",
+        "rows": 64,
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-panel",
+        "schema_version": 1,
+        "state_sha256": "7953e241a3b31530ea30225e06a66d3fea3f82cd48266249870e1a6614ecaa41",
+        "strata_sha256": "daf2ed58718929f233cbb7e10f372fd88463fc0fd6c297d08cba09b3e3e596a6",
+        "stream_fingerprints": [
+          "804f43ce734e732f9a653796dfc58ab8cba406591453c1a701b2703af92bdcea"
+        ],
+        "task": "bounded_teacher",
+        "tau_fraction_sha256": "3bba27f004c447feac4e9961e21783b21774c6218f7c72595e16480b851b6b50",
+        "unique_path_count": 1
+      }
+    },
+    "source_fingerprint": "e221aa36bfe4c4b70928b01195f811143a201d7888baeb151ce15c582113d88a",
+    "stream_plan_fingerprint": "f65fb72566e99d15b17d6025c91fb9387c60ba6be4d497c4883aa6697dafcbbb",
+    "task": "bounded_teacher"
+  },
+  "finite": 1,
+  "head_coordinate_version": "d0-spatial-sum-to-mean-head-coordinate-v1",
+  "learning_rate": 1e-05,
+  "model_schema": "d0-boundary-smooth-potential-unet-mean-head-v2",
+  "model_seed": 5779330004912519769,
+  "nominee_checkpoint_path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\normalized-head-final-tiny-pilot\\20260720-113232_codex-final-end-to-end\\pilot\\accum-08\\lr-01\\bounded_teacher\\checkpoints\\nominee_ema.pt",
+  "nominee_checkpoint_sha256": "8bf2d049a086b86f0611061dd20960a573b2544cab7a488545ad40c3e20e69d3",
+  "nominee_step": 1,
+  "optimization_diagnostics": {
+    "clipping_windows": [
+      {
+        "clip_fraction": 0.0,
+        "start_step": 1,
+        "stop_step": 1
+      }
+    ],
+    "ema_update_norm_quantiles": {
+      "q00": 0.00044348626397550106,
+      "q100": 0.00044348626397550106,
+      "q50": 0.00044348626397550106,
+      "q90": 0.00044348626397550106,
+      "q99": 0.00044348626397550106
+    },
+    "final_200_clip_fraction": 0.0,
+    "final_500_clip_fraction": 0.0,
+    "normalized_body_gradient_norm_quantiles": {
+      "q00": 0.0,
+      "q100": 0.0,
+      "q50": 0.0,
+      "q90": 0.0,
+      "q99": 0.0
+    },
+    "normalized_head_gradient_norm_quantiles": {
+      "q00": 1.2752437676370241e-05,
+      "q100": 1.2752437676370241e-05,
+      "q50": 1.2752437676370241e-05,
+      "q90": 1.2752437676370241e-05,
+      "q99": 1.2752437676370241e-05
+    },
+    "optimizer_update_norm_quantiles": {
+      "q00": 0.04434862732887268,
+      "q100": 0.04434862732887268,
+      "q50": 0.04434862732887268,
+      "q90": 0.04434862732887268,
+      "q99": 0.04434862732887268
+    },
+    "post_warmup_clip_fraction": 0.0,
+    "raw_accumulated_gradient_norm_quantiles": {
+      "q00": 0.00024649026549759036,
+      "q100": 0.00024649026549759036,
+      "q50": 0.00024649026549759036,
+      "q90": 0.00024649026549759036,
+      "q99": 0.00024649026549759036
+    },
+    "reconstructed_legacy_preclip_gradient_norm_quantiles": {
+      "q00": 0.009997911138274269,
+      "q100": 0.009997911138274269,
+      "q50": 0.009997911138274269,
+      "q90": 0.009997911138274269,
+      "q99": 0.009997911138274269
+    },
+    "scaled_preclip_gradient_norm_quantiles": {
+      "q00": 1.2752437676370241e-05,
+      "q100": 1.2752437676370241e-05,
+      "q50": 1.2752437676370241e-05,
+      "q90": 1.2752437676370241e-05,
+      "q99": 1.2752437676370241e-05
+    }
+  },
+  "optimizer_coordinate": {
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "coordinate_factor": 784,
+    "coordinate_version": "d0-spatial-sum-to-mean-head-coordinate-v1",
+    "grid_size": 28,
+    "groups": [
+      {
+        "eps": 1e-08,
+        "lr": 1e-05,
+        "name": "body",
+        "parameter_names": [
+          "enc1.net.0.weight",
+          "enc1.net.0.bias",
+          "enc1.net.1.weight",
+          "enc1.net.1.bias",
+          "enc1.net.3.weight",
+          "enc1.net.3.bias",
+          "enc1.net.4.weight",
+          "enc1.net.4.bias",
+          "down1.weight",
+          "down1.bias",
+          "enc2.net.0.weight",
+          "enc2.net.0.bias",
+          "enc2.net.1.weight",
+          "enc2.net.1.bias",
+          "enc2.net.3.weight",
+          "enc2.net.3.bias",
+          "enc2.net.4.weight",
+          "enc2.net.4.bias",
+          "down2.weight",
+          "down2.bias",
+          "mid.net.0.weight",
+          "mid.net.0.bias",
+          "mid.net.1.weight",
+          "mid.net.1.bias",
+          "mid.net.3.weight",
+          "mid.net.3.bias",
+          "mid.net.4.weight",
+          "mid.net.4.bias",
+          "up2.conv.weight",
+          "up2.conv.bias",
+          "dec2.net.0.weight",
+          "dec2.net.0.bias",
+          "dec2.net.1.weight",
+          "dec2.net.1.bias",
+          "dec2.net.3.weight",
+          "dec2.net.3.bias",
+          "dec2.net.4.weight",
+          "dec2.net.4.bias",
+          "up1.conv.weight",
+          "up1.conv.bias",
+          "dec1.net.0.weight",
+          "dec1.net.0.bias",
+          "dec1.net.1.weight",
+          "dec1.net.1.bias",
+          "dec1.net.3.weight",
+          "dec1.net.3.bias",
+          "dec1.net.4.weight",
+          "dec1.net.4.bias"
+        ],
+        "weight_decay": 0.0001
+      },
+      {
+        "eps": 1.2755102040816327e-11,
+        "lr": 0.007840000000000001,
+        "name": "normalized_head",
+        "parameter_names": [
+          "out.weight",
+          "out.bias"
+        ],
+        "weight_decay": 1.2755102040816328e-07
+      }
+    ],
+    "model_version": "d0-boundary-smooth-potential-unet-mean-head-v2",
+    "version": "d0-mean-head-coordinate-adamw-v1"
+  },
+  "paired_stream_plan": {
+    "accumulation_levels": [
+      2,
+      4,
+      8
+    ],
+    "accumulation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+    "cluster_bin_counts": [
+      4,
+      4,
+      4,
+      4,
+      16
+    ],
+    "derivation_version": "d0-density-ratio-paired-mixture-stream-v1",
+    "effective_cluster_counts": [
+      64,
+      128,
+      256
+    ],
+    "fingerprint": "3fdf8dfd2416fd9b7a316d3deb40c208d3f92d400d788ccf32a051afee885fce",
+    "grid_size": 28,
+    "horizon": 0.00042517006802721087,
+    "label": 3,
+    "microbatch_clusters": 32,
+    "objective_version": "d0-density-ratio-paired-mixture-weighted-softplus-v1",
+    "physical_training_performed": 0,
+    "production_defaults_match": 0,
+    "production_root_seed": 260851,
+    "root_seed": 260881,
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-paired-mixture-stream-plan",
+    "schema_version": 1,
+    "stream_version": "d0-density-ratio-paired-mixture-stream-v1",
+    "teacher_epsilon": 0.5,
+    "teacher_version": "d0-bounded-four-anchor-mixture-v1"
+  },
+  "physical_training_performed": 0,
+  "sampling_performed": 0,
+  "sealed_panel_b_sha256": "d1dbaff53c0f98fd6467e96b6df656cfbe508fa1cd0b1042446fe35317ab2810",
+  "selected_checkpoint_path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\normalized-head-final-tiny-pilot\\20260720-113232_codex-final-end-to-end\\pilot\\accum-08\\lr-01\\bounded_teacher\\checkpoints\\best_ema.pt",
+  "selected_checkpoint_sha256": "8bf2d049a086b86f0611061dd20960a573b2544cab7a488545ad40c3e20e69d3",
+  "selected_step": 1,
+  "stream_plan": {
+    "batch_bin_counts": [
+      8,
+      8,
+      8,
+      8,
+      32
+    ],
+    "batch_size": 64,
+    "bin_counts": [
+      4,
+      4,
+      4,
+      4,
+      16
+    ],
+    "derivation_version": "d0-density-ratio-balanced-stream-v1",
+    "examples_per_class": 32,
+    "fingerprint": "f65fb72566e99d15b17d6025c91fb9387c60ba6be4d497c4883aa6697dafcbbb",
+    "grid_size": 28,
+    "horizon": 0.00042517006802721087,
+    "label": 3,
+    "model_version": "d0-boundary-smooth-potential-unet-v1",
+    "objective_version": "d0-balanced-raw-logit-bce-v1",
+    "physical_training_performed": 0,
+    "root_seed": 260881,
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-stream-plan",
+    "schema_version": 1,
+    "teacher_epsilon": 0.5,
+    "teacher_version": "d0-bounded-four-anchor-mixture-v1"
+  },
+  "target_training_steps": 1,
+  "task": "bounded_teacher",
+  "training_step": 1
+}

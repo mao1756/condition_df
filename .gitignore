@@ -7,10 +7,7 @@ __pycache__/
 data/
 outputs/
 mnist_data/
-experiment10/
-experiment11/
-experiment12_phase0/
-experiment12_d0/
+runs/
 *.aux
 *.log
 *.out

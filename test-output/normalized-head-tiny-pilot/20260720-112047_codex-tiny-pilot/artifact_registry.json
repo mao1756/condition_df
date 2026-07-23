@@ -1,0 +1,384 @@
+{
+  "physical_training_performed": 0,
+  "records": {
+    "adamw_ema_conjugacy.json": {
+      "sha256": "b94bc6c6fceae5e6f1a13c5a2a399d9337c9be6b4013534fa3889e5958c97ad2",
+      "size": 2605
+    },
+    "head_equivalence.json": {
+      "sha256": "02838b60a3c3b0c1301facb585feef4dd39579449fb5e43affaddb911dd314bc",
+      "size": 1420
+    },
+    "model_size_forensics.json": {
+      "sha256": "180be662de7906c346d7c56bc22e41726c0ccf7bea80194c48dc10d252174647",
+      "size": 563
+    },
+    "normalized_head_control_gate.json": {
+      "sha256": "79ee187c596ba1cf15fa4f7a9eb3958136cb8b2061956abbb687058fd9b1075b",
+      "size": 700662
+    },
+    "normalized_head_decision.json": {
+      "sha256": "189b32b4304a3a3a608c8f97966ba5e0338b49b16072238960808986de871d1d",
+      "size": 363
+    },
+    "normalized_head_gradient_forensics.png": {
+      "sha256": "1ce43d3781110659b61b2261f0460850f80c10431bdc2095da86cfa8b5f45541",
+      "size": 102307
+    },
+    "normalized_head_pilot_accum_8.json": {
+      "sha256": "5d363ae58f699e94e8f7ce4baaeaa871b7a545815241b6a9cd6f9f016f648634",
+      "size": 497306
+    },
+    "normalized_head_pilot_gate.json": {
+      "sha256": "4d3ceae0e9a0772282cfdb0b8bc534b865716bb27bd2db19d32f9bfb9ba3be9d",
+      "size": 547539
+    },
+    "normalized_head_pilot_learning_curves.png": {
+      "sha256": "bc6d46af65c0b9960be8ba4a0b8ad812d07d719ae4f6a29393a67e51bb29c7ec",
+      "size": 26402
+    },
+    "normalized_head_preflight.json": {
+      "sha256": "b3ac73e79941a41446597afe7eab32d6a9da2f7870b0d750aaf9441fda23836a",
+      "size": 5986
+    },
+    "normalized_head_preflight_gate.json": {
+      "sha256": "137f0b293232f923ee02df713361e4df355c8a173bd9e6e46d5d32b896be8ae1",
+      "size": 4290
+    },
+    "normalized_head_stream_plans.json": {
+      "sha256": "b351b4a00bf82b7d23ba0294e18410095272f2016ffd37da2fb2fcfb879e9a27",
+      "size": 2018
+    },
+    "paired_ratio_stream_replay.json": {
+      "sha256": "d5cb0aa89ecd455ce54e3e6ed6e7f9de74b6745b36022cc86f0396b29f9b7be2",
+      "size": 19270
+    },
+    "paired_ratio_structural_law_certificate.json": {
+      "sha256": "2b1a9c26c5198de97c7915f81ffcd487c7cad84e94df24de345b34a4b8707086",
+      "size": 703
+    },
+    "panels/pilot-selection-accum-8/bounded_teacher-a.json": {
+      "sha256": "6ad697487f2157bedfa00fd1650f9c5bf223c8ab172e34e3fdbe3eaeda4ea6ef",
+      "size": 2151
+    },
+    "panels/pilot-selection-accum-8/bounded_teacher-a.pt": {
+      "sha256": "19caa2e5a82283415cd0980493ed4ed0456999c9e33b32ed24c428f12dc4cee9",
+      "size": 209027
+    },
+    "panels/pilot-selection-accum-8/bounded_teacher-b.json": {
+      "sha256": "62cc428f44c05beb10221ef48a27bf99e223d695deede8823b65aff6611468d7",
+      "size": 2151
+    },
+    "panels/pilot-selection-accum-8/bounded_teacher-b.pt": {
+      "sha256": "3d8e1d49bc4938c522ef1ba248b0ce17336a5ba55fb44e709193cb15d9e58ab0",
+      "size": 209027
+    },
+    "panels/pilot-selection-accum-8/dirichlet_null-a.json": {
+      "sha256": "d47f784cf97c4a3a3f8719d0f582ffc8a239ce92b30750e3ed347a183c9ab4e3",
+      "size": 2149
+    },
+    "panels/pilot-selection-accum-8/dirichlet_null-a.pt": {
+      "sha256": "3479103b0bd7858c76fdb341987753fc291b3c983c9da427dad580c93fe3dec8",
+      "size": 209013
+    },
+    "panels/pilot-selection-accum-8/dirichlet_null-b.json": {
+      "sha256": "82e619761440ec5764a28ab7944b9b148c33ee11ac23595be3fec41f36f54168",
+      "size": 2149
+    },
+    "panels/pilot-selection-accum-8/dirichlet_null-b.pt": {
+      "sha256": "dfd97f7f192e2d45c2d8fbaa8111070d458b4c24bcd0dbb3345bf3d4a649e00f",
+      "size": 209013
+    },
+    "parent_head_gradient_forensics.csv": {
+      "sha256": "c612744d8f679c5596d8590b811a4d1026b0735e6b7548db18264e79fc82865d",
+      "size": 2886
+    },
+    "parent_head_layerwise_gradients.csv": {
+      "sha256": "563f9e5af04e7f28290572c6dc1134211541136f7b91780db407c7b04f5e89e5",
+      "size": 51946
+    },
+    "parent_provenance.json": {
+      "sha256": "a7a223fc2d3232db3257b9fe7a2f4931a1b2e8fe8fe0307e7d58b2fa52365809",
+      "size": 81433
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/checkpoint_metrics.csv": {
+      "sha256": "e835d757bfe2784faa10e8951bba0d1cd0f46368f9d271bbd378845295423eb9",
+      "size": 497
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/checkpoints/best.json": {
+      "sha256": "e83089d8b6d5a13a53efcc9dac1ceba11e1ec85909296d11c7d37cdff0bfda4c",
+      "size": 5370
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/checkpoints/best_ema.pt": {
+      "sha256": "2b965c1322915f3945bd380413fc0493b01396bdbe1f711ffc368713e2ea1143",
+      "size": 12596867
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/checkpoints/finalized-step-00000002.pt": {
+      "sha256": "5ebab0d772dde0ecd3f4602cf8a4de437b1680901a5451db324092c5fa1f25c4",
+      "size": 12613507
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/checkpoints/latest.json": {
+      "sha256": "a880204df677b44374f42db901cd7d7a1820b4989cef3aed07684c0942d86d61",
+      "size": 4991
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/checkpoints/nominee_ema.pt": {
+      "sha256": "2b965c1322915f3945bd380413fc0493b01396bdbe1f711ffc368713e2ea1143",
+      "size": 12596867
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/checkpoints/step-00000000.pt": {
+      "sha256": "518dd0d5f1b36d294fa6912905df31c1cd28f47a619cf1b23a5bcfbb5ab88c0c",
+      "size": 6316591
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/checkpoints/step-00000001.pt": {
+      "sha256": "2b965c1322915f3945bd380413fc0493b01396bdbe1f711ffc368713e2ea1143",
+      "size": 12596867
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/checkpoints/step-00000002.pt": {
+      "sha256": "71e19ad21bfafde7ddebc05ac0eaf3945ab1275533b8e8b97a58864139c85ad0",
+      "size": 12600899
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/clipping_windows.csv": {
+      "sha256": "3d48435f7079dca02b78fd292f8a6040c5e0a4e4b4894e4529a069104b7394d8",
+      "size": 45
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/sealed_panel_b.json": {
+      "sha256": "0490e290c8ff93e167e1fb3b6a877a5e7ec682b1868a7601a9cc21926188e9c1",
+      "size": 43173
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/selection_time_bin_metrics.csv": {
+      "sha256": "0d14f854248adf3bb0ffd0d12b6c75422fcebeac1bc2327d0b6c4ec62c01120a",
+      "size": 5911
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/task_result.json": {
+      "sha256": "ca60c7bbeaebcbf21b965e1b4f9f4d375e1d0037f784f6277c2c06d69e1f6dbe",
+      "size": 119653
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/task_status.json": {
+      "sha256": "9487166d7e24946968dd94a4178b11d9ca11bdbd6a87ece46406944ae3192af7",
+      "size": 5151
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/training_history.csv": {
+      "sha256": "37d082856507b9b431829d91ef6a1d9fef06a8ec8886552ba38063d713d1680e",
+      "size": 2891
+    },
+    "pilot/accum-08/lr-00/bounded_teacher/training_summary.json": {
+      "sha256": "5ff3676c65f57f788c46ef4e53ef344969a2b3be9e287075ca91e798da54249b",
+      "size": 14758
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/checkpoint_metrics.csv": {
+      "sha256": "1121648d2012d938dd8c625ef740da7041059361017c9a4a2e6e00668f4396ee",
+      "size": 493
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/checkpoints/best.json": {
+      "sha256": "2f639c5d8006175034a7229561bda6c6bdeca2cf6d270bd8a405e2774c08c0c6",
+      "size": 5367
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/checkpoints/best_ema.pt": {
+      "sha256": "b1aa6b858fe3b5452be4cf3cc59ba4917d0a5b581699dfbcff9c56dc29cb2fca",
+      "size": 12600899
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/checkpoints/finalized-step-00000002.pt": {
+      "sha256": "82687a4061ae9d70021ba6212f82b0805a9d0792a05b73234078efc9871d8762",
+      "size": 12605187
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/checkpoints/latest.json": {
+      "sha256": "8c02815d4cb1c785e9b6a6912d3b7f23907ad722799e278ea4dd9e0736e2cc40",
+      "size": 4988
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/checkpoints/nominee_ema.pt": {
+      "sha256": "b1aa6b858fe3b5452be4cf3cc59ba4917d0a5b581699dfbcff9c56dc29cb2fca",
+      "size": 12600899
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/checkpoints/step-00000000.pt": {
+      "sha256": "3f6808f5df7fe1f7eaefb21926ae7f29129129dba5438628d29975e00a410078",
+      "size": 6316591
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/checkpoints/step-00000001.pt": {
+      "sha256": "77979297d58bbddbc75d66d75fdb5e741da2524b0ea4ee9ae4e4baa0949b1841",
+      "size": 12596867
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/checkpoints/step-00000002.pt": {
+      "sha256": "b1aa6b858fe3b5452be4cf3cc59ba4917d0a5b581699dfbcff9c56dc29cb2fca",
+      "size": 12600899
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/clipping_windows.csv": {
+      "sha256": "3d48435f7079dca02b78fd292f8a6040c5e0a4e4b4894e4529a069104b7394d8",
+      "size": 45
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/sealed_panel_b.json": {
+      "sha256": "a8faff9787c4c9055990ef6f0627666d0c14230d175b009eb46cc2334f9c26ce",
+      "size": 15747
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/selection_time_bin_metrics.csv": {
+      "sha256": "565cdd7f54251121fa432f131adb0c0c239f6d7088f31769a5610fa6cf8b47ed",
+      "size": 4008
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/task_result.json": {
+      "sha256": "7388c9a410e7f6f4c6468503e96180ac5f8683ebc6a3277488178c7fc75ad8ab",
+      "size": 72941
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/task_status.json": {
+      "sha256": "d28bd20e252eb8621221a366987d7f219e53d4c142b31255128ee901336b1e8d",
+      "size": 5147
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/training_history.csv": {
+      "sha256": "9f5dab7a08588a987eee87bde81e8801ca07cabc21bf4f7f1cf0df79a03101ba",
+      "size": 2856
+    },
+    "pilot/accum-08/lr-00/dirichlet_null/training_summary.json": {
+      "sha256": "9288bf1b67fc4571b1fe407e4279f7544ff2b23fafe4f6dd19c3e32ac45e0070",
+      "size": 14755
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/checkpoint_metrics.csv": {
+      "sha256": "1cbb712b90a03d8e951bdb0f2083728ce06a5e1c17a49a4b6fe771a0c92749a1",
+      "size": 496
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/checkpoints/best.json": {
+      "sha256": "fab344ef9c17df51b03dbd7ac3385f1a7805729f27dbec9d5800693699912df2",
+      "size": 5370
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/checkpoints/best_ema.pt": {
+      "sha256": "a87951cfc4df9f1016e3ef979b58633dd9169eabd2e80f69bbc3c72694f26fff",
+      "size": 12596867
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/checkpoints/finalized-step-00000002.pt": {
+      "sha256": "3c668f338ae84be7fd575e3b37dbbf2ca0f1b44dc614eb19f18432c81af224f3",
+      "size": 12613507
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/checkpoints/latest.json": {
+      "sha256": "344b915c04750f6a5b3b10ee6e24043f4bf85b483b2a0ede28083c8d16008fde",
+      "size": 4991
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/checkpoints/nominee_ema.pt": {
+      "sha256": "a87951cfc4df9f1016e3ef979b58633dd9169eabd2e80f69bbc3c72694f26fff",
+      "size": 12596867
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/checkpoints/step-00000000.pt": {
+      "sha256": "0d79a9d9261d6a5227f432423f7658f642305dd7ef0050a70bd7c5c1325f4e55",
+      "size": 6316591
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/checkpoints/step-00000001.pt": {
+      "sha256": "a87951cfc4df9f1016e3ef979b58633dd9169eabd2e80f69bbc3c72694f26fff",
+      "size": 12596867
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/checkpoints/step-00000002.pt": {
+      "sha256": "10e45245fba0c707715c31f53002a329dd4e00b291453339aead83cd0b0cb836",
+      "size": 12600899
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/clipping_windows.csv": {
+      "sha256": "3d48435f7079dca02b78fd292f8a6040c5e0a4e4b4894e4529a069104b7394d8",
+      "size": 45
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/sealed_panel_b.json": {
+      "sha256": "a6ac64c1748b5fd9a1e1ca951bae549bcd4d4f8dfe132a222d41598f2929b9fa",
+      "size": 43298
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/selection_time_bin_metrics.csv": {
+      "sha256": "1ab13e6d59aea0992b508b6bcfc2384973745072f1a8da049acc5b182035adb5",
+      "size": 5909
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/task_result.json": {
+      "sha256": "e46eacf8f959a53d0ad9d0bf09a3f54fb3757a8cba00f1b673753e39afa16297",
+      "size": 119884
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/task_status.json": {
+      "sha256": "1f58f9df49fb126de87ea98abc3675ed40169ee994c1bd20317ef9c6f6fb8fa8",
+      "size": 5151
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/training_history.csv": {
+      "sha256": "89ee36146abcce4187b1e601b88f2156899ff2a988b02cd65f7dccd7a13ddaaf",
+      "size": 2897
+    },
+    "pilot/accum-08/lr-01/bounded_teacher/training_summary.json": {
+      "sha256": "684855f6981ec5dd463918094298b41901751c6715f1a7760cd59edcc2a837dc",
+      "size": 14797
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/checkpoint_metrics.csv": {
+      "sha256": "a8e8364362d61d61e1873a8b0da01fb42a8973e13232747895394071c8f1b465",
+      "size": 489
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/checkpoints/best.json": {
+      "sha256": "230e0f37132f8964483ea34634c4ce5756a584cc44bea8b43fb9f6dc1b501618",
+      "size": 5367
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/checkpoints/best_ema.pt": {
+      "sha256": "22ea5cc68569581e1b416e30070027da93b75bc5c55201bab4c986f4e16cc0c7",
+      "size": 12600899
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/checkpoints/finalized-step-00000002.pt": {
+      "sha256": "cd606f7e6bce1dfad99eb2d878f613a43103e834fd43f3f37d4ec00efe090ab6",
+      "size": 12605187
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/checkpoints/latest.json": {
+      "sha256": "c363fc349a7964e0b8a3a3619cd9bde667917569df761746265e8f127e12c7fc",
+      "size": 4988
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/checkpoints/nominee_ema.pt": {
+      "sha256": "22ea5cc68569581e1b416e30070027da93b75bc5c55201bab4c986f4e16cc0c7",
+      "size": 12600899
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/checkpoints/step-00000000.pt": {
+      "sha256": "905c2a874dc3f2182049648a9a23f0023f4ce7226c17086b0fcfc8112671ec59",
+      "size": 6316591
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/checkpoints/step-00000001.pt": {
+      "sha256": "1817d050da9c04741db664b99c88a492448f76ebacc79a034ae149ef21a985a5",
+      "size": 12596867
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/checkpoints/step-00000002.pt": {
+      "sha256": "22ea5cc68569581e1b416e30070027da93b75bc5c55201bab4c986f4e16cc0c7",
+      "size": 12600899
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/clipping_windows.csv": {
+      "sha256": "3d48435f7079dca02b78fd292f8a6040c5e0a4e4b4894e4529a069104b7394d8",
+      "size": 45
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/sealed_panel_b.json": {
+      "sha256": "71d99be94dc11589e230464a7031decf44c856e2b2e057e4ba2a1bc45c9eb853",
+      "size": 15735
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/selection_time_bin_metrics.csv": {
+      "sha256": "a7f26eab629be9cfdf5ae599f56ff40cbbfb0039f31afd03322fd98dd5965c42",
+      "size": 4010
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/task_result.json": {
+      "sha256": "e7730be92ecdcc859bbb10c21e52f02285a0ed8700b271486476c10c2c9f60c1",
+      "size": 72979
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/task_status.json": {
+      "sha256": "b2311f912c373742a659382320b1e0a8f7cdaf8ffc9b7d89598555d5c8ea6349",
+      "size": 5147
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/training_history.csv": {
+      "sha256": "acaedaed15ff051f4a7977f0e6f216ea879a1dfe9c0d484dfee6ff9c1b08a01e",
+      "size": 2860
+    },
+    "pilot/accum-08/lr-01/dirichlet_null/training_summary.json": {
+      "sha256": "2223805a45a5efce943cb755eadcf7138a88e6aeed5db22bf692a67f9bb8d84c",
+      "size": 14781
+    },
+    "pilot_panel_registry_accum_8.json": {
+      "sha256": "eadd4c5f97559a444b721a50d2d065d688f9fa2af37a89a717505c96f551d5a7",
+      "size": 6797
+    },
+    "pilot_profile_summary.csv": {
+      "sha256": "b22c46071a4f88e90e56cc68913e3e70e33424ca8f88357dd87d9d673c1c8452",
+      "size": 215
+    },
+    "pilot_task_failures.json": {
+      "sha256": "09fb0da655aadcbeee9b3b2cce1bb8cbb71cdf1b2a64abdcd7717d7d681d27c3",
+      "size": 98
+    },
+    "run_manifest.json": {
+      "sha256": "b4f42d818a19f5a42c8e11b64b35a581dba963113f0fabd4edc6cd1ebb3cafe1",
+      "size": 8680
+    }
+  },
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-head-confirmation-artifact-registry",
+  "schema_version": 1,
+  "terminal_files_excluded_to_avoid_self_reference": [
+    "artifact_registry.json",
+    "run_status.json"
+  ]
+}

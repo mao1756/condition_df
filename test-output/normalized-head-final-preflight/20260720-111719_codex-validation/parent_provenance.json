@@ -1,0 +1,1986 @@
+{
+  "all_tasks_complete_finite": 1,
+  "artifacts": {
+    "decision": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\density_ratio_stability_decision.json",
+      "sha256": "4c90a28c10fb460c033b8732a98762f64a5c39fe6f6cd6f2763602edadb6578b",
+      "size": 402
+    },
+    "manifest": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\run_manifest.json",
+      "sha256": "d03eebbfe31c2e1080f86674ebc8c2cf44d7228a94d2d716fc34d7e5b3fc6df7",
+      "size": 7700
+    },
+    "parent_provenance": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\parent_provenance.json",
+      "sha256": "d8076589c14415b61c205c3c1b269b7e4618c5e887c39df99bf27e4733b747ca",
+      "size": 66591
+    },
+    "pilot_failures": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\pilot_task_failures.json",
+      "sha256": "09fb0da655aadcbeee9b3b2cce1bb8cbb71cdf1b2a64abdcd7717d7d681d27c3",
+      "size": 98
+    },
+    "pilot_gate": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\stability_pilot_gate.json",
+      "sha256": "51b86a03f3fc12cddf4f7fba4ce1266006f62fabce6a5b3a9a964eaaec1960dd",
+      "size": 3843869
+    },
+    "preflight_gate": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\paired_ratio_preflight_gate.json",
+      "sha256": "576f623d5a676a8d883554c2eb5465838aabd6de5d1dc4b2f1cedb6d83e8c365",
+      "size": 3410
+    },
+    "preflight_raw": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\paired_ratio_preflight.json",
+      "sha256": "1df1b02569649ff54f954ef1604301635e6fdfceefde3d47d8d1c56fe4540fbc",
+      "size": 5130
+    },
+    "registry": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\artifact_registry.json",
+      "sha256": "c7aaab14493d32627a83b3abf69bee94384fbb54dafc2d32cdd88387f0234c1b",
+      "size": 60540
+    },
+    "status": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\run_status.json",
+      "sha256": "37658ea32b7b9cded20c29bdcbc53ac6581827a8d45218d71fe491c82884f6c6",
+      "size": 933
+    },
+    "stream_plans": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\paired_ratio_stream_plans.json",
+      "sha256": "b32e4e385f7eb80dd6a69e26fe9643f2c90ac79a945bc7daa70017e7eb646144",
+      "size": 2018
+    },
+    "stream_replay": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\paired_ratio_stream_replay.json",
+      "sha256": "9032f6d2a3f922a3fbb9ca719bcfd0433eea2e64fa2b9a37cb7a30836fe48586",
+      "size": 19275
+    },
+    "structural_law": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\paired_ratio_structural_law_certificate.json",
+      "sha256": "9522db3d2453dc4226d8d94cb783805af1ddaaba9c9feb58c2bd6c60fa3b9ea7",
+      "size": 708
+    },
+    "variance_forensics": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\paired_ratio_variance_forensics.json",
+      "sha256": "f5cf352a3c10adc86622c39f10072bbd53925074740678de2939b5a49fe9265e",
+      "size": 56380
+    },
+    "workflow": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls\\boundary_control_stability_gate.json",
+      "sha256": "31f367b99425e1999282af003ac5c1544efbeef4e21689f8a916446d27302067",
+      "size": 4275384
+    }
+  },
+  "confirmation_performed": 0,
+  "horizon": 0.00042517006802721087,
+  "kernel": {
+    "alpha_eff": 1.0,
+    "edge_alpha_mode": "alpha_eff",
+    "grid_size": 28,
+    "lambda_mix": 0.35,
+    "limiter_fraction": 1.0,
+    "mass_floor": 1e-07,
+    "reference_substeps": 256,
+    "sample_steps": 512,
+    "tau_eff": 5e-05
+  },
+  "model": {
+    "base_channels": 32,
+    "input_channels": [
+      "N*s",
+      "log1p(N*s)",
+      "tau/T",
+      "label",
+      "periodic_coordinates"
+    ],
+    "raw_log_density_used": 0,
+    "schema": "d0-boundary-smooth-potential-unet-v1",
+    "schema_version": 1
+  },
+  "parent_decision": "classification_variance_reduction_unresolved",
+  "parent_loss_scale": 0.05173607018770852,
+  "passed": 1,
+  "physical_training_performed": 0,
+  "pilot_candidate_count": 6,
+  "pilot_pass": 0,
+  "pilot_task_count": 12,
+  "preflight_pass": 1,
+  "run_dir": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_stability_confirmation\\20260720-011809_production-paired-density-ratio-controls",
+  "runtime_fingerprint": "596381c888ff9eb877f3afafa033ceee5701cab7dd87ae6300ae8af7393b1c9b",
+  "sampling_performed": 0,
+  "schedule_metadata": {
+    "dt_sub": 3.243790191857993e-09,
+    "horizon": 0.00042517006802721087,
+    "rate_schedule_sha256": "ef53a0276059d95ac671981e624377c4a91e8ea538cb286ddbb18a6bfa3917cd",
+    "reference_substeps": 256,
+    "sample_steps": 512,
+    "tau_eff": 5e-05,
+    "total_substeps": 131072
+  },
+  "schema": "experiment12-d0-score-density-ratio-head-confirmation-parent-provenance",
+  "schema_version": 1,
+  "scientific_config": {
+    "algorithm": "experiment12-d0-score-density-ratio-stability-confirmation",
+    "algorithm_version": 1,
+    "bootstrap": {
+      "reps": 10000,
+      "selection_audit_confidence": 0.9
+    },
+    "claim_scope": "paired-mixture bounded synthetic density-ratio controls only",
+    "confirmation": {
+      "audit_paths_per_panel": 32,
+      "dense_validation_steps": [
+        0,
+        25,
+        50,
+        100,
+        150,
+        250
+      ],
+      "model_seeds": [
+        260861,
+        260862,
+        260863
+      ],
+      "selection_paths_per_panel": 32,
+      "steps": 4000,
+      "validation_every": 250
+    },
+    "kernel": {
+      "alpha_eff": 1.0,
+      "edge_alpha_mode": "alpha_eff",
+      "grid_size": 28,
+      "lambda_mix": 0.35,
+      "limiter_fraction": 1.0,
+      "mass_floor": 1e-07,
+      "reference_substeps": 256,
+      "sample_steps": 512,
+      "tau_eff": 5e-05
+    },
+    "loss_scale": 0.05173607018770852,
+    "microbatch": {
+      "clusters": 32,
+      "null_coupling": "independent-dirichlet-pooled-label-swap",
+      "teacher_coupling": "common-gamma-stochastic-anchor",
+      "time_bin_counts": [
+        4,
+        4,
+        4,
+        4,
+        16
+      ]
+    },
+    "model_schema": "d0-boundary-smooth-potential-unet-v1",
+    "optimization": {
+      "adaptive_loss_scaling": 0,
+      "clip_warmup_steps": 500,
+      "ema_decay": 0.99,
+      "grad_clip": 1.0,
+      "gradient_accumulation": "mean-then-clip-once",
+      "optimizer": "AdamW",
+      "weight_decay": 0.0001
+    },
+    "paired_accumulation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+    "paired_estimator_schema": "experiment12-d0-score-density-ratio-paired-mixture",
+    "paired_objective_version": "d0-density-ratio-paired-mixture-weighted-softplus-v1",
+    "paired_stream_version": "d0-density-ratio-paired-mixture-stream-v1",
+    "parent_artifact_registry_sha256": null,
+    "parent_scientific_fingerprint": "0c483db669756b4657ead19d89e00aee257d6dfca169e16eb82fa4ab2108ce85",
+    "physical_training_performed": 0,
+    "pilot": {
+      "accumulation_levels": [
+        2,
+        4,
+        8
+      ],
+      "effective_cluster_counts": [
+        64,
+        128,
+        256
+      ],
+      "hierarchical_stop": "first-level-with-eligible-profile",
+      "learning_rates": [
+        3e-05,
+        1e-05
+      ],
+      "selection_paths_per_panel": 16,
+      "steps": 2000,
+      "validation_steps": [
+        0,
+        25,
+        50,
+        100,
+        150,
+        250,
+        500,
+        750,
+        1000,
+        1500,
+        2000
+      ]
+    },
+    "preflight": {
+      "bootstrap_reps": 10000,
+      "confidence": 0.99,
+      "paths": 128
+    },
+    "root_seed": 260851,
+    "sampling_performed": 0,
+    "thresholds": {
+      "accumulation_gradient_tolerance": 1e-06,
+      "accumulation_levels": [
+        2,
+        4,
+        8
+      ],
+      "density_ratio": {
+        "analytic_derivative_tolerance": 1e-08,
+        "analytic_null_tolerance": 1e-12,
+        "anchors_per_path": 32,
+        "audit_confidence": 0.9,
+        "audit_paths_per_panel": 32,
+        "confirm_confidence": 0.9,
+        "expected_audit_panels": [
+          "c",
+          "d"
+        ],
+        "expected_null_seeds": 3,
+        "expected_teacher_seeds": 3,
+        "expected_time_bins": 5,
+        "maximum_clip_fraction": 0.1,
+        "minimum_passing_teacher_seeds": 2,
+        "oracle_confidence": 0.99,
+        "pilot_learning_rates": [
+          0.0003,
+          0.0001,
+          3e-05,
+          1e-05
+        ],
+        "teacher": {
+          "bootstrap_confidence": 0.9,
+          "boundary_max_flux_ratio": 0.001,
+          "boundary_min_flux_slope": 0.9,
+          "expected_implicit_teacher_seeds": 3,
+          "expected_null_seeds": 3,
+          "expected_time_bins": 5,
+          "maximum_post_warmup_clip_fraction": 0.1,
+          "minimum_passing_implicit_teacher_seeds": 2,
+          "teacher_max_bin_relative_flux_l2": 0.2,
+          "teacher_max_overall_relative_flux_l2": 0.15,
+          "teacher_min_bin_flux_cosine": 0.95,
+          "teacher_min_overall_flux_cosine": 0.98,
+          "teacher_min_score_gain": 0.9
+        }
+      },
+      "expanded_gradient_tolerance": 1e-06,
+      "expanded_loss_tolerance": 1e-07,
+      "final_clip_windows": [
+        500,
+        200
+      ],
+      "loss_algebra_tolerance": 1e-12,
+      "maximum_clip_fraction": 0.1,
+      "pilot_learning_rates": [
+        3e-05,
+        1e-05
+      ],
+      "preflight_confidence": 0.99,
+      "preflight_paths": 128
+    }
+  },
+  "scientific_fingerprint": "d75f6dcd39db716a9613b90e94c7213a07eb1433798862b7abed233b83242ccb",
+  "selected_profile": 0,
+  "source_fingerprint": "9df51f099798caea738551a10712f0001bd3fb36f0caa1ff3f19b68460239aa4",
+  "task_failure_count": 0,
+  "terminal_registry_record_count": 332,
+  "transitive_parent_provenance": {
+    "all_nulls_selected_zero": 1,
+    "all_teacher_clipping_failed": 1,
+    "artifacts": {
+      "calibration": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\density_ratio_loss_scale_calibration.json",
+        "sha256": "7e7155656f8355f6fd3dd1a62b905c3537e8f2e746a4375a98c1f07217226c6f",
+        "size": 2997
+      },
+      "decision": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\density_ratio_control_decision.json",
+        "sha256": "41e45301a8ffa2228430608d410b0df54c8e41cf422de4f8c79ac6d7d7d882f5",
+        "size": 290
+      },
+      "manifest": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\run_manifest.json",
+        "sha256": "aecfeae37185edcfc47a0daee8cb91c045d3f207003daadace4433fbde482ab6",
+        "size": 7322
+      },
+      "parent_provenance": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\parent_provenance.json",
+        "sha256": "d72b92fbf6a0bbb3bfaca4e33273b18acfdb49b515943f04c789a7b98d7900b9",
+        "size": 52915
+      },
+      "pilot_candidates": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\pilot_candidate_registry.json",
+        "sha256": "28612ece694a36907de1cc6b0cfe55ac9ecaf462d359200dceff64fb07e1ae55",
+        "size": 2342568
+      },
+      "pilot_failures": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\pilot_task_failures.json",
+        "sha256": "b6ff6347f45afe1d7c457ea20a4cc912c4d6c21cf5af307b0eec9701c7b0ce22",
+        "size": 209
+      },
+      "pilot_gate": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\density_ratio_pilot_gate.json",
+        "sha256": "4ef3ac00e36abf4d386e76bdca847e895e380e717d20516c9adceaaa9d913790",
+        "size": 39755
+      },
+      "pilot_panels": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\pilot_panel_registry.json",
+        "sha256": "5cc85b16d8e94da2b93c3be91136c80a5346be787c42df58642f53b7d732f3db",
+        "size": 11402
+      },
+      "preflight_gate": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\density_ratio_preflight_gate.json",
+        "sha256": "b0687c9af3b32411ea63ccda053451abc7cd4d78542ede5c20561f90ba171807",
+        "size": 3849
+      },
+      "preflight_raw": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\density_ratio_preflight.json",
+        "sha256": "886503bc379d57bb036d084afaf34a89dd0f6944e476ad1b284e23cd494be163",
+        "size": 26906
+      },
+      "registry": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\artifact_registry.json",
+        "sha256": "1f75918032388a3f346948294809ee251248c0bc90a81c6ae2ef94f7c10705a5",
+        "size": 38775
+      },
+      "report": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\density_ratio_control_report.json",
+        "sha256": "f1f49a220027da01121e2c29f99bbaf29493d9ff41975a91c14df0642f66e224",
+        "size": 113506
+      },
+      "status": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\run_status.json",
+        "sha256": "469c7676499a80c08944ced915bf5b7814c775212c375bd8b4c17cf0baec1596",
+        "size": 874
+      },
+      "stream_plan": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\density_ratio_stream_plan.json",
+        "sha256": "1e080a8c7f677cc55d91c3916238ef40c38e16a45438cb3a992bb22e1e17e790",
+        "size": 761
+      },
+      "stream_replay": {
+        "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls\\density_ratio_stream_replay_preflight.json",
+        "sha256": "4079d96924d636bc82b1a36b76fc272f9a409024ca6b2fce45cd40ed167b62cb",
+        "size": 23193
+      }
+    },
+    "confirmation_performed": 0,
+    "horizon": 0.00042517006802721087,
+    "kernel": {
+      "alpha_eff": 1.0,
+      "edge_alpha_mode": "alpha_eff",
+      "grid_size": 28,
+      "lambda_mix": 0.35,
+      "limiter_fraction": 1.0,
+      "mass_floor": 1e-07,
+      "reference_substeps": 256,
+      "sample_steps": 512,
+      "tau_eff": 5e-05
+    },
+    "model": {
+      "base_channels": 32,
+      "input_channels": [
+        "N*s",
+        "log1p(N*s)",
+        "tau/T",
+        "label",
+        "periodic_coordinates"
+      ],
+      "raw_log_density_used": 0,
+      "schema": "d0-boundary-smooth-potential-unet-v1",
+      "schema_version": 1
+    },
+    "parent_decision": "classification_optimizer_unresolved",
+    "parent_loss_scale": 0.05173607018770852,
+    "passed": 1,
+    "physical_training_performed": 0,
+    "pilot_candidate_count": 4,
+    "pilot_pass": 0,
+    "preflight_pass": 1,
+    "run_dir": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_density_ratio_controls\\20260719-233220_production-density-ratio-controls",
+    "runtime_fingerprint": "596381c888ff9eb877f3afafa033ceee5701cab7dd87ae6300ae8af7393b1c9b",
+    "sampling_performed": 0,
+    "schedule_metadata": {
+      "dt_sub": 3.243790191857993e-09,
+      "horizon": 0.00042517006802721087,
+      "rate_schedule_sha256": "ef53a0276059d95ac671981e624377c4a91e8ea538cb286ddbb18a6bfa3917cd",
+      "reference_substeps": 256,
+      "sample_steps": 512,
+      "tau_eff": 5e-05,
+      "total_substeps": 131072
+    },
+    "schema": "experiment12-d0-score-density-ratio-stability-confirmation-parent-provenance",
+    "schema_version": 1,
+    "scientific_config": {
+      "algorithm": "experiment12-d0-score-density-ratio-controls",
+      "algorithm_version": 1,
+      "bootstrap": {
+        "reps": 10000,
+        "selection_audit_confidence": 0.9
+      },
+      "claim_scope": "boundary-admissible exact synthetic density-ratio controls only",
+      "confirmation": {
+        "audit_panels": [
+          "c",
+          "d"
+        ],
+        "audit_paths_per_panel": 32,
+        "dense_validation_steps": [
+          0,
+          25,
+          50,
+          100,
+          150,
+          250
+        ],
+        "model_seeds": [
+          260831,
+          260832,
+          260833
+        ],
+        "selection_panels": [
+          "a",
+          "b"
+        ],
+        "selection_paths_per_panel": 32,
+        "steps": 4000,
+        "validation_every": 250
+      },
+      "kernel": {
+        "alpha_eff": 1.0,
+        "edge_alpha_mode": "alpha_eff",
+        "grid_size": 28,
+        "lambda_mix": 0.35,
+        "limiter_fraction": 1.0,
+        "mass_floor": 1e-07,
+        "reference_substeps": 256,
+        "sample_steps": 512,
+        "tau_eff": 5e-05
+      },
+      "model_schema": "d0-boundary-smooth-potential-unet-v1",
+      "model_schema_version": 1,
+      "objective_version": "d0-balanced-raw-logit-bce-v1",
+      "optimization": {
+        "adaptive_loss_scaling": 0,
+        "calibration_state_count": 256,
+        "clip_warmup_steps": 500,
+        "ema_decay": 0.99,
+        "grad_clip": 1.0,
+        "initial_grad_target": 0.1,
+        "optimizer": "AdamW",
+        "weight_decay": 0.0001
+      },
+      "panel_version": "d0-density-ratio-panel-v1",
+      "parent_artifact_registry_sha256": null,
+      "parent_scientific_fingerprint": "f13caa52d780ea971a94a6e598e73808eb29bedccf2cf395097d6eac0c2dbc93",
+      "physical_training_performed": 0,
+      "pilot": {
+        "audit_paths": 0,
+        "learning_rates": [
+          0.0003,
+          0.0001,
+          3e-05,
+          1e-05
+        ],
+        "selection_panels": [
+          "a",
+          "b"
+        ],
+        "selection_paths_per_panel": 16,
+        "steps": 2000,
+        "validation_steps": [
+          0,
+          25,
+          50,
+          100,
+          150,
+          250,
+          500,
+          750,
+          1000,
+          1500,
+          2000
+        ]
+      },
+      "preflight": {
+        "bootstrap_reps": 10000,
+        "confidence": 0.99,
+        "paths": 128
+      },
+      "root_seed": 260821,
+      "sampling_performed": 0,
+      "stream": {
+        "batch_bin_counts": [
+          8,
+          8,
+          8,
+          8,
+          32
+        ],
+        "batch_size": 64,
+        "class_bin_counts": [
+          4,
+          4,
+          4,
+          4,
+          16
+        ],
+        "class_prior": 0.5,
+        "examples_per_class": 32,
+        "stateless_seed_tuple": [
+          "root_seed",
+          "phase",
+          "task",
+          "step",
+          "namespace"
+        ]
+      },
+      "stream_version": "d0-density-ratio-balanced-stream-v1",
+      "thresholds": {
+        "analytic_derivative_tolerance": 1e-08,
+        "analytic_null_tolerance": 1e-12,
+        "anchors_per_path": 32,
+        "audit_confidence": 0.9,
+        "audit_paths_per_panel": 32,
+        "confirm_confidence": 0.9,
+        "expected_audit_panels": [
+          "c",
+          "d"
+        ],
+        "expected_null_seeds": 3,
+        "expected_teacher_seeds": 3,
+        "expected_time_bins": 5,
+        "maximum_clip_fraction": 0.1,
+        "minimum_passing_teacher_seeds": 2,
+        "oracle_confidence": 0.99,
+        "pilot_learning_rates": [
+          0.0003,
+          0.0001,
+          3e-05,
+          1e-05
+        ],
+        "teacher": {
+          "bootstrap_confidence": 0.9,
+          "boundary_max_flux_ratio": 0.001,
+          "boundary_min_flux_slope": 0.9,
+          "expected_implicit_teacher_seeds": 3,
+          "expected_null_seeds": 3,
+          "expected_time_bins": 5,
+          "maximum_post_warmup_clip_fraction": 0.1,
+          "minimum_passing_implicit_teacher_seeds": 2,
+          "teacher_max_bin_relative_flux_l2": 0.2,
+          "teacher_max_overall_relative_flux_l2": 0.15,
+          "teacher_min_bin_flux_cosine": 0.95,
+          "teacher_min_overall_flux_cosine": 0.98,
+          "teacher_min_score_gain": 0.9
+        }
+      }
+    },
+    "scientific_fingerprint": "0c483db669756b4657ead19d89e00aee257d6dfca169e16eb82fa4ab2108ce85",
+    "source_fingerprint": "4f79ae24b6fc2754b0fc56ce1e96d5f163df4ea68b3ca500e7c17b4d47503c70",
+    "teacher_b_confirmed_learning_rates": [
+      1e-05,
+      3e-05
+    ],
+    "terminal_registry_record_count": 222,
+    "transitive_parent_provenance": {
+      "artifacts": {
+        "confirmation_failures": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\confirmation_task_failures.json",
+          "sha256": "e7e1091dc1db954cc32e7563478308665e2600486b577defb72dd26a2aa4cc4b",
+          "size": 106
+        },
+        "confirmation_gate": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\boundary_control_stability_gate.json",
+          "sha256": "cd6fecab5dbfea4a262cbfee7d9f8c239e2aad8151627ba52473455e30a25465",
+          "size": 2111830
+        },
+        "decision": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\control_stability_decision.json",
+          "sha256": "49284ff13c74de61c9cccc1bb2b44c7bc9fea7e1a5a6b7642d32d0e55821dd2c",
+          "size": 304
+        },
+        "forensic": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\parent_forensic_replay.json",
+          "sha256": "6b76cd3294884c6f54e9136a6ff194179d2909e401d7047aecaab95b144a0c82",
+          "size": 7130
+        },
+        "manifest": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\run_manifest.json",
+          "sha256": "2abb3387fc26cdc9f8efd81a64d7459e19893a58c5f453d79c58340b40b4d861",
+          "size": 6287
+        },
+        "null_confirmation": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\null_confirmation.json",
+          "sha256": "6b1f3e5f1774449e33cc91fdb4367ea69ae71fa37768da6a3c245bb6aa7cad9b",
+          "size": 1038621
+        },
+        "parent_provenance": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\parent_provenance.json",
+          "sha256": "e293ac35266d394a8a0326755da8b0e1a611cbbeb0011741041fb6751d3237b2",
+          "size": 39308
+        },
+        "pilot_candidates": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\pilot_candidate_registry.json",
+          "sha256": "b4057764bef0d3618a3289ad8219b21b0aa8dd86eb5ae490f704d8ae15899469",
+          "size": 879609
+        },
+        "pilot_failures": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\pilot_task_failures.json",
+          "sha256": "5a7896c01b7fe5687eb75ce6623fac1a7df0f41b92a7b855a6792b34eeaf0fc4",
+          "size": 217
+        },
+        "pilot_gate": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\stability_pilot_gate.json",
+          "sha256": "6e547607514d4e25a7954967caa146d714c65b8436f56a7d8e01af6ec3134ccc",
+          "size": 17228
+        },
+        "preflight_gate": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\stability_preflight_gate.json",
+          "sha256": "e4cc1c7efa1c3e210bd0fbeaf827def55e1ac02d471d0716089102c588caeffe",
+          "size": 112066
+        },
+        "profile_binding": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\confirmation_profile_binding.json",
+          "sha256": "6261c8dfaf5359865d2d66d211324e2a5ab111317cfe014a8360ef4c6bce54e8",
+          "size": 4213
+        },
+        "registry": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\artifact_registry.json",
+          "sha256": "a0fc2a98d81fa1315b7239a13235142d91b2c5bdc9b1e8b1d6084acfac5215c1",
+          "size": 67117
+        },
+        "report": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\stability_confirmation_report.json",
+          "sha256": "75f06f68161427a4cc34ce218c8688168a4c2832711255ed57d2c9c3a11e9ab6",
+          "size": 2524814
+        },
+        "selected_profile": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\selected_stability_profile.json",
+          "sha256": "d49e222a97aed1cf7960740564f80f9b31a78d9791341c15ec93774b4f77d17c",
+          "size": 3520
+        },
+        "status": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\run_status.json",
+          "sha256": "bd85841680d5399d13a5dfb5edb34f96fb13f5061f970948140e59642eefee4c",
+          "size": 806
+        },
+        "stein_gate": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\stein_identity_preflight_gate.json",
+          "sha256": "aff0597cec2dd6e5fc4e1123df9ec1a22e13da709fb1b0fe6fc8c900bddbb8f2",
+          "size": 2362
+        },
+        "stein_raw": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\stein_identity_preflight.json",
+          "sha256": "9be6dd7ced06028dbd9b620be929170456f88c5cdfcf739b5538c7622e54a9e4",
+          "size": 37607
+        },
+        "teacher_confirmation": {
+          "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls\\implicit_teacher_confirmation.json",
+          "sha256": "b7d3a8e07f6f451cc8b42cc165abc5bbf2f16dc7a141cfa9a46b341206b80a6e",
+          "size": 1053914
+        }
+      },
+      "confirmation_optimizer_health_pass": 1,
+      "horizon": 0.00042517006802721087,
+      "kernel": {
+        "alpha_eff": 1.0,
+        "edge_alpha_mode": "alpha_eff",
+        "grid_size": 28,
+        "lambda_mix": 0.35,
+        "limiter_fraction": 1.0,
+        "mass_floor": 1e-07,
+        "reference_substeps": 256,
+        "sample_steps": 512,
+        "tau_eff": 5e-05
+      },
+      "model": {
+        "base_channels": 32,
+        "input_channels": [
+          "N*s",
+          "log1p(N*s)",
+          "tau/T",
+          "label",
+          "periodic_coordinates"
+        ],
+        "raw_log_density_used": 0,
+        "schema": "d0-boundary-smooth-potential-unet-v1",
+        "schema_version": 1
+      },
+      "null_passing_seed_count": 2,
+      "parent_decision": "implicit_objective_unstable",
+      "passed": 1,
+      "physical_training_performed": 0,
+      "pilot_pass": 1,
+      "probe_bank_status": "agree",
+      "run_dir": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_stability_confirmation\\20260718-232902_production-streamed-implicit-controls",
+      "runtime_fingerprint": "fb59746cc0da9515591c0a442e0152b5448db9747eb5a6526df81884df1fc475",
+      "sampling_performed": 0,
+      "schedule_metadata": {
+        "dt_sub": 3.243790191857993e-09,
+        "horizon": 0.00042517006802721087,
+        "rate_schedule_sha256": "ef53a0276059d95ac671981e624377c4a91e8ea538cb286ddbb18a6bfa3917cd",
+        "reference_substeps": 256,
+        "sample_steps": 512,
+        "tau_eff": 5e-05,
+        "total_substeps": 131072
+      },
+      "schema": "experiment12-d0-score-density-ratio-controls-parent-provenance",
+      "schema_version": 1,
+      "scientific_config": {
+        "algorithm": "experiment12-d0-score-control-stability-confirmation",
+        "algorithm_version": 1,
+        "bootstrap": {
+          "confidence": 0.9,
+          "reps": 10000
+        },
+        "claim_scope": "streamed boundary-admissible synthetic implicit-score controls only",
+        "confirmation": {
+          "audit_paths": 32,
+          "dense_validation_steps": [
+            0,
+            25,
+            50,
+            100,
+            150,
+            250
+          ],
+          "model_seeds": [
+            260811,
+            260812,
+            260813
+          ],
+          "selection_paths": 32,
+          "steps": 4000,
+          "validation_every": 250
+        },
+        "kernel": {
+          "alpha_eff": 1.0,
+          "edge_alpha_mode": "alpha_eff",
+          "grid_size": 28,
+          "lambda_mix": 0.35,
+          "limiter_fraction": 1.0,
+          "mass_floor": 1e-07,
+          "reference_substeps": 256,
+          "sample_steps": 512,
+          "tau_eff": 5e-05
+        },
+        "model_schema": "d0-boundary-smooth-potential-unet-v1",
+        "model_schema_version": 1,
+        "optimization": {
+          "adaptive_loss_scaling": 0,
+          "clip_warmup_steps": 500,
+          "ema_decay": 0.99,
+          "grad_clip": 1.0,
+          "implicit_loss_scale": 0.00266397028560976,
+          "loss_scale_source": "verified parent implicit calibration",
+          "weight_decay": 0.0001
+        },
+        "parent_artifact_registry_sha256": null,
+        "parent_scientific_fingerprint": "8177f10df842576f7a53009b9678de6590b70a4d0721a3080a97e18157f17744",
+        "physical_training_performed": 0,
+        "pilot": {
+          "audit_paths": 0,
+          "learning_rates": [
+            0.0001,
+            3e-05,
+            1e-05,
+            3e-06
+          ],
+          "selection_paths": 16,
+          "steps": 1000,
+          "validation_steps": [
+            0,
+            25,
+            50,
+            100,
+            150,
+            250,
+            500,
+            750,
+            1000
+          ]
+        },
+        "root_seed": 260801,
+        "sampling_performed": 0,
+        "stein": {
+          "amplitudes": [
+            0.0,
+            0.25,
+            0.5,
+            1.0,
+            2.0
+          ],
+          "confidence": 0.99,
+          "paths": 128
+        },
+        "stream": {
+          "anchor_bin_counts": [
+            4,
+            4,
+            4,
+            4,
+            16
+          ],
+          "anchors_per_cluster": 32,
+          "batch_size": 64,
+          "clusters_per_step": 2,
+          "stateless_seed_tuple": [
+            "root_seed",
+            "phase",
+            "law",
+            "step",
+            "bank"
+          ],
+          "training_probe_banks": 2,
+          "training_probes_per_bank": 4
+        },
+        "stream_schema": "experiment12-d0-score-control-stream",
+        "thresholds": {
+          "confirmation_null_seeds": 3,
+          "confirmation_teacher_seeds": 3,
+          "maximum_clip_fraction": 0.1,
+          "minimum_passing_teacher_seeds": 2,
+          "pilot_final_window_steps": 200,
+          "pilot_learning_rates": [
+            0.0001,
+            3e-05,
+            1e-05,
+            3e-06
+          ],
+          "pilot_stability_start_step": 101,
+          "pilot_steps": 1000,
+          "stein_bootstrap_confidence": 0.99,
+          "stein_paths": 128,
+          "stein_teacher_amplitudes": [
+            0.0,
+            0.25,
+            0.5,
+            1.0,
+            2.0
+          ]
+        }
+      },
+      "scientific_fingerprint": "f13caa52d780ea971a94a6e598e73808eb29bedccf2cf395097d6eac0c2dbc93",
+      "selected_learning_rate": 1e-05,
+      "source_fingerprint": "ed37afe95a4266cef14297efa34f8cd698c84ce13957800f4c86092314cef652",
+      "teacher_passing_seed_count": 0,
+      "terminal_registry_record_count": 381,
+      "transitive_parent_provenance": {
+        "all_six_tasks_complete_finite_clipping_only": 1,
+        "artifacts": {
+          "calibration_gate": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\loss_scale_calibration_gate.json",
+            "sha256": "0b7c47638f6995687a38c4f0e962ab70ea6916b75d09c365751fd01d1b3842c7",
+            "size": 4737
+          },
+          "control_gate": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\boundary_control_gate.json",
+            "sha256": "810b4c2afbe1de07be2c98a45ec6a2f3ad2b1498ebcf04974d6074caad1412d6",
+            "size": 1803292
+          },
+          "control_report": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\boundary_control_report.json",
+            "sha256": "9560b50908eb6a2ee32e6922ad3970ee091fbb09c690d2cd9bdc560b66a51969",
+            "size": 1892606
+          },
+          "decision": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\control_repair_decision.json",
+            "sha256": "4d251c785ce1eebd47dc42efa00326806dddecf3ebb0358dc07cd23b9821ee4e",
+            "size": 303
+          },
+          "implicit_calibration": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\implicit_loss_scale_calibration.json",
+            "sha256": "145694f1e59d99c195479cd3126c51626b694fab30c0beccd8fb29c307bf9908",
+            "size": 1762
+          },
+          "implicit_study": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\implicit_teacher_study.json",
+            "sha256": "b9775651e47fdd96c247a090ffda98256704f98798c0ce2e12000019a143f938",
+            "size": 801221
+          },
+          "manifest": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\run_manifest.json",
+            "sha256": "7fd4b37077f098519996dd1304b4e72220c89eebc1d121098de7334ebb624057",
+            "size": 7590
+          },
+          "null_study": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\null_study.json",
+            "sha256": "dcda355d8134b5b126838dfe3b8552ef93996edc87a60a0aee023f6c4c76f748",
+            "size": 789557
+          },
+          "operator_preflight": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\boundary_operator_preflight.json",
+            "sha256": "05886646483473e31d6e4952225592199b135c077db630450a11011e37cf9629",
+            "size": 12784
+          },
+          "parent_provenance": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\parent_provenance.json",
+            "sha256": "2507952fa73b296d1cb9f68282b963b91e99663381cb83772789fccac9582fd7",
+            "size": 22456
+          },
+          "preflight_gate": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\boundary_preflight_gate.json",
+            "sha256": "88880c9401799dd27bbb4254779abbe05780b198a87d81ea85bd0dd0ee6aebe4",
+            "size": 1744
+          },
+          "registry": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\artifact_registry.json",
+            "sha256": "4e1a3bd4365636d678e75cc6eee6d8fd01581e20b4464a2eacb7bd95478e14e5",
+            "size": 90991
+          },
+          "status": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\run_status.json",
+            "sha256": "c18de399b7b4c9d54aeec9e9b69f4f29c0fbbe8daac7cb79a80054344271925e",
+            "size": 797
+          },
+          "supervised": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\supervised_teacher_control.json",
+            "sha256": "8d0699509be71044ac1383faed0a7243c316053c9f6f336a4f0de5833d72cf09",
+            "size": 223128
+          },
+          "supervised_calibration": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\supervised_loss_scale_calibration.json",
+            "sha256": "310160f0a3bb1dd87bca7b2faedc9f4da8a5742018f8199dc768dd65345412db",
+            "size": 1766
+          },
+          "task_failures": {
+            "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\task_failures.json",
+            "sha256": "c5b0023ab59b097cfd96063affd4976c108a70f020116bb258d1d2aa9df4860c",
+            "size": 58
+          }
+        },
+        "downstream_optimizer_task_gates": [
+          {
+            "model_seed": 260785,
+            "optimizer_gate": {
+              "claim_scope": "finite optimization within the frozen clipping limit",
+              "evaluation_status": "evaluated",
+              "gate": "optimizer_task_health",
+              "passed": 0,
+              "sampling_performed": 0,
+              "subchecks": {
+                "complete": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "finite": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "post_warmup_clip_fraction": {
+                  "operator": "<=",
+                  "passed": 0,
+                  "threshold": 0.1,
+                  "value": 1.0
+                }
+              }
+            },
+            "task_kind": "implicit_teacher"
+          },
+          {
+            "model_seed": 260786,
+            "optimizer_gate": {
+              "claim_scope": "finite optimization within the frozen clipping limit",
+              "evaluation_status": "evaluated",
+              "gate": "optimizer_task_health",
+              "passed": 0,
+              "sampling_performed": 0,
+              "subchecks": {
+                "complete": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "finite": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "post_warmup_clip_fraction": {
+                  "operator": "<=",
+                  "passed": 0,
+                  "threshold": 0.1,
+                  "value": 1.0
+                }
+              }
+            },
+            "task_kind": "implicit_teacher"
+          },
+          {
+            "model_seed": 260787,
+            "optimizer_gate": {
+              "claim_scope": "finite optimization within the frozen clipping limit",
+              "evaluation_status": "evaluated",
+              "gate": "optimizer_task_health",
+              "passed": 0,
+              "sampling_performed": 0,
+              "subchecks": {
+                "complete": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "finite": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "post_warmup_clip_fraction": {
+                  "operator": "<=",
+                  "passed": 0,
+                  "threshold": 0.1,
+                  "value": 1.0
+                }
+              }
+            },
+            "task_kind": "implicit_teacher"
+          },
+          {
+            "model_seed": 260785,
+            "optimizer_gate": {
+              "claim_scope": "finite optimization within the frozen clipping limit",
+              "evaluation_status": "evaluated",
+              "gate": "optimizer_task_health",
+              "passed": 0,
+              "sampling_performed": 0,
+              "subchecks": {
+                "complete": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "finite": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "post_warmup_clip_fraction": {
+                  "operator": "<=",
+                  "passed": 0,
+                  "threshold": 0.1,
+                  "value": 1.0
+                }
+              }
+            },
+            "task_kind": "null"
+          },
+          {
+            "model_seed": 260786,
+            "optimizer_gate": {
+              "claim_scope": "finite optimization within the frozen clipping limit",
+              "evaluation_status": "evaluated",
+              "gate": "optimizer_task_health",
+              "passed": 0,
+              "sampling_performed": 0,
+              "subchecks": {
+                "complete": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "finite": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "post_warmup_clip_fraction": {
+                  "operator": "<=",
+                  "passed": 0,
+                  "threshold": 0.1,
+                  "value": 1.0
+                }
+              }
+            },
+            "task_kind": "null"
+          },
+          {
+            "model_seed": 260787,
+            "optimizer_gate": {
+              "claim_scope": "finite optimization within the frozen clipping limit",
+              "evaluation_status": "evaluated",
+              "gate": "optimizer_task_health",
+              "passed": 0,
+              "sampling_performed": 0,
+              "subchecks": {
+                "complete": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "finite": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "post_warmup_clip_fraction": {
+                  "operator": "<=",
+                  "passed": 0,
+                  "threshold": 0.1,
+                  "value": 1.0
+                }
+              }
+            },
+            "task_kind": "null"
+          }
+        ],
+        "horizon": 0.00042517006802721087,
+        "implicit_loss_scale": 0.00266397028560976,
+        "kernel": {
+          "alpha_eff": 1.0,
+          "edge_alpha_mode": "alpha_eff",
+          "grid_size": 28,
+          "lambda_mix": 0.35,
+          "limiter_fraction": 1.0,
+          "mass_floor": 1e-07,
+          "reference_substeps": 256,
+          "sample_steps": 512,
+          "tau_eff": 5e-05
+        },
+        "model": {
+          "base_channels": 32,
+          "input_channels": [
+            "N*s",
+            "log1p(N*s)",
+            "tau/T",
+            "label",
+            "periodic_coordinates"
+          ],
+          "raw_log_density_used": 0,
+          "schema": "d0-boundary-smooth-potential-unet-v1",
+          "schema_version": 1
+        },
+        "parent_decision": "optimizer_scale_invalid",
+        "passed": 1,
+        "physical_training_performed": 0,
+        "probe_bank_status": "agree",
+        "run_dir": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair",
+        "runtime_fingerprint": "fb59746cc0da9515591c0a442e0152b5448db9747eb5a6526df81884df1fc475",
+        "sampling_performed": 0,
+        "schedule_metadata": {
+          "dt_sub": 3.243790191857993e-09,
+          "horizon": 0.00042517006802721087,
+          "rate_schedule_sha256": "ef53a0276059d95ac671981e624377c4a91e8ea538cb286ddbb18a6bfa3917cd",
+          "reference_substeps": 256,
+          "sample_steps": 512,
+          "tau_eff": 5e-05,
+          "total_substeps": 131072
+        },
+        "schema": "experiment12-d0-score-control-scale-repair-stability-parent-provenance",
+        "schema_version": 1,
+        "scientific_config": {
+          "algorithm": "experiment12-d0-score-control-scale-repair",
+          "algorithm_version": 1,
+          "bootstrap": {
+            "confidence": 0.9,
+            "reps": 10000
+          },
+          "claim_scope": "boundary-admissible optimizer-scaled synthetic implicit-score controls only",
+          "kernel": {
+            "alpha_eff": 1.0,
+            "edge_alpha_mode": "alpha_eff",
+            "grid_size": 28,
+            "lambda_mix": 0.35,
+            "limiter_fraction": 1.0,
+            "mass_floor": 1e-07,
+            "reference_substeps": 256,
+            "sample_steps": 512,
+            "tau_eff": 5e-05
+          },
+          "model": {
+            "base_channels": 32,
+            "input_channels": [
+              "N*s",
+              "log1p(N*s)",
+              "tau/T",
+              "label",
+              "periodic_coordinates"
+            ],
+            "raw_log_density_used": 0,
+            "schema": "d0-boundary-smooth-potential-unet-v1",
+            "schema_version": 1
+          },
+          "optimization": {
+            "amp": false,
+            "audit_probes": 64,
+            "base_channels": 32,
+            "batch_size": 64,
+            "calibration_state_count": 256,
+            "checkpoint_every": 250,
+            "clip_warmup_steps": 500,
+            "ema_decay": 0.99,
+            "grad_clip": 1.0,
+            "implicit_initial_grad_target": 0.1,
+            "learning_rate": 0.0001,
+            "scale_formula": "min(1,target/raw_initial_gradient_norm)",
+            "selection_probes": 16,
+            "supervised_initial_grad_target": 0.1,
+            "train_steps": 4000,
+            "training_probes": 4,
+            "validation_batch_size": 64,
+            "validation_every": 250,
+            "weight_decay": 0.0001
+          },
+          "parent_boundary_run_status_sha256": "82b4daf1dfb3a4fbbe83d4c081be9cb61e44eccc21445936f4546f2a6df05939",
+          "parent_scientific_fingerprint": "17febf94c90d6b721537be490362d242a0308a227df2ed887eac9eefbca6e5fb",
+          "physical_training_performed": 0,
+          "preflight": {
+            "operator_hutchinson_probes": 4096
+          },
+          "sampling_performed": 0,
+          "seeds": {
+            "audit_probe_a_seed": 260791,
+            "audit_probe_b_seed": 260792,
+            "batch_index_seed": 260794,
+            "bootstrap_seed": 260793,
+            "calibration_seed": 260783,
+            "null_data_seed": 260782,
+            "null_seeds": [
+              260785,
+              260786,
+              260787
+            ],
+            "selection_probe_a_seed": 260789,
+            "selection_probe_b_seed": 260790,
+            "supervised_seed": 260784,
+            "teacher_data_seed": 260781,
+            "teacher_seeds": [
+              260785,
+              260786,
+              260787
+            ],
+            "training_probe_seed": 260788
+          },
+          "synthetic_data": {
+            "anchor_bin_counts": [
+              4,
+              4,
+              4,
+              4,
+              16
+            ],
+            "anchors_per_path": 32,
+            "audit_paths": 32,
+            "fresh_parent_path_ids_reused": 0,
+            "fresh_parent_states_reused": 0,
+            "null_path_base": 7000000,
+            "selection_paths": 32,
+            "teacher_and_null_states_independent": 1,
+            "teacher_epsilon": 0.5,
+            "teacher_path_base": 6000000,
+            "teacher_version": "d0-bounded-four-anchor-mixture-v1",
+            "train_paths": 128
+          },
+          "thresholds": {
+            "bootstrap_confidence": 0.9,
+            "boundary_max_flux_ratio": 0.001,
+            "boundary_min_flux_slope": 0.9,
+            "expected_implicit_teacher_seeds": 3,
+            "expected_null_seeds": 3,
+            "expected_time_bins": 5,
+            "maximum_post_warmup_clip_fraction": 0.1,
+            "minimum_passing_implicit_teacher_seeds": 2,
+            "teacher_max_bin_relative_flux_l2": 0.2,
+            "teacher_max_overall_relative_flux_l2": 0.15,
+            "teacher_min_bin_flux_cosine": 0.95,
+            "teacher_min_overall_flux_cosine": 0.98,
+            "teacher_min_score_gain": 0.9
+          }
+        },
+        "scientific_fingerprint": "8177f10df842576f7a53009b9678de6590b70a4d0721a3080a97e18157f17744",
+        "source_fingerprint": "265fcfdbd5a8400d8500d5f4c3ec989541c3218a9b5186879b794e5c634e16b7",
+        "terminal_registry_record_count": 231,
+        "transitive_parent_provenance": {
+          "artifacts": {
+            "control_gate": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\boundary_control_gate.json",
+              "sha256": "e76fe6da04490b1a3e28f205a23e9e50201b3381aded9e43ae690a62a8b8a51b",
+              "size": 6744
+            },
+            "control_report": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\boundary_control_report.json",
+              "sha256": "cd6a258196007ed125bfed1b4a83da31325be9ecd68071de16122f5ec89eb7af",
+              "size": 7766
+            },
+            "decision": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\control_repair_decision.json",
+              "sha256": "03de757454d79ee5947a9db1b9cc72972e495e35923d4dd9fcb21e433c9fe858",
+              "size": 233
+            },
+            "failed_score_provenance": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\failed_run_provenance.json",
+              "sha256": "68006fccd5058608bc52b84931d3df180126fafeba861d192fa0f825f2fa210c",
+              "size": 6008
+            },
+            "implicit_study": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\implicit_teacher_study.json",
+              "sha256": "e39068f1b89adcfa4705e89a95dc82bcac94e291b4c91b56c72b2142767608d0",
+              "size": 662
+            },
+            "manifest": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\run_manifest.json",
+              "sha256": "173f9a96529b05755f8b4b5aec77d121b525354c2bbf58c100a4f1e823e1667a",
+              "size": 6728
+            },
+            "null_study": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\null_study.json",
+              "sha256": "f99dda05f116b7f560b85dbd030523b0330a5a09b79611d4faf643bd9db171d0",
+              "size": 505
+            },
+            "operator_preflight": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\boundary_operator_preflight.json",
+              "sha256": "341c35d5a3c55dd343efec7b0b42ae2f6b0d565d744c35690dcac21c845fc6a6",
+              "size": 12784
+            },
+            "preflight_gate": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\boundary_preflight_gate.json",
+              "sha256": "88880c9401799dd27bbb4254779abbe05780b198a87d81ea85bd0dd0ee6aebe4",
+              "size": 1744
+            },
+            "registry": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\artifact_registry.json",
+              "sha256": "10ea9aaaec5b3b9fdd7cccac950b2386ed7dcdff8270fb08bc3795d7a3288a76",
+              "size": 23830
+            },
+            "status": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\run_status.json",
+              "sha256": "82b4daf1dfb3a4fbbe83d4c081be9cb61e44eccc21445936f4546f2a6df05939",
+              "size": 750
+            },
+            "supervised": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\supervised_teacher_control.json",
+              "sha256": "f2207fcaa90bed40e7b3d81465e0208054a98e7fa7d9ff13b1848ffa54c77b50",
+              "size": 221470
+            },
+            "supervised_task_result": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\tasks\\supervised-teacher\\task_result.json",
+              "sha256": "f2207fcaa90bed40e7b3d81465e0208054a98e7fa7d9ff13b1848ffa54c77b50",
+              "size": 221470
+            },
+            "supervised_task_status": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\tasks\\supervised-teacher\\task_status.json",
+              "sha256": "e256874128d15406163826d4c822f5e42e2769a2b33c5694f5d102bdf5067972",
+              "size": 2602
+            },
+            "task_failures": {
+              "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls\\task_failures.json",
+              "sha256": "5020702235ee2c38ede0068013dce77006252334b359fe8fe9101bddd3416612",
+              "size": 162
+            }
+          },
+          "boundary_preflight_gate": {
+            "claim_scope": "closed-simplex model/operator domain",
+            "gate": "boundary_preflight",
+            "passed": 1,
+            "sampling_performed": 0,
+            "subchecks": {
+              "aggregate_preflight": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "energy_finite": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "generator_finite": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "gradient_finite": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "hvp_finite": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "incident_flux_endpoint_ratio": {
+                "operator": "<=",
+                "passed": 1,
+                "threshold": 0.001,
+                "value": 0.00010093641676844472
+              },
+              "incident_flux_slope": {
+                "operator": ">=",
+                "passed": 1,
+                "threshold": 0.9,
+                "value": 0.9991504773589839
+              },
+              "legacy_barrier_rejected": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "legacy_coefficient": {
+                "operator": "<=",
+                "passed": 1,
+                "threshold": 0.02,
+                "value": 0.01262158818557124
+              },
+              "operator_pass": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "orthogonal_probe_trace": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "potential_finite": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "production_workload_smoke": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              }
+            }
+          },
+          "failed_only_post_warmup_clipping": 1,
+          "horizon": 0.00042517006802721087,
+          "implicit_teacher_status": "not_evaluated",
+          "kernel": {
+            "alpha_eff": 1.0,
+            "edge_alpha_mode": "alpha_eff",
+            "grid_size": 28,
+            "lambda_mix": 0.35,
+            "limiter_fraction": 1.0,
+            "mass_floor": 1e-07,
+            "reference_substeps": 256,
+            "sample_steps": 512,
+            "tau_eff": 5e-05
+          },
+          "null_status": "not_evaluated",
+          "passed": 1,
+          "physical_training_performed": 0,
+          "run_dir": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_boundary_controls\\20260718-114633_production-boundary-admissible-controls",
+          "runtime_fingerprint": "fb59746cc0da9515591c0a442e0152b5448db9747eb5a6526df81884df1fc475",
+          "sampling_performed": 0,
+          "schedule_metadata": {
+            "dt_sub": 3.243790191857993e-09,
+            "horizon": 0.00042517006802721087,
+            "rate_schedule_sha256": "ef53a0276059d95ac671981e624377c4a91e8ea538cb286ddbb18a6bfa3917cd",
+            "reference_substeps": 256,
+            "sample_steps": 512,
+            "tau_eff": 5e-05,
+            "total_substeps": 131072
+          },
+          "schema": "experiment12-d0-score-boundary-controls-scale-repair-parent-provenance",
+          "schema_version": 1,
+          "scientific_config": {
+            "algorithm": "experiment12-d0-score-boundary-controls",
+            "algorithm_version": 1,
+            "bootstrap": {
+              "confidence": 0.9,
+              "reps": 10000
+            },
+            "claim_scope": "boundary-admissible exact synthetic implicit-score controls only",
+            "kernel": {
+              "alpha_eff": 1.0,
+              "edge_alpha_mode": "alpha_eff",
+              "grid_size": 28,
+              "lambda_mix": 0.35,
+              "limiter_fraction": 1.0,
+              "mass_floor": 1e-07,
+              "reference_substeps": 256,
+              "sample_steps": 512,
+              "tau_eff": 5e-05
+            },
+            "model": {
+              "base_channels": 32,
+              "input_channels": [
+                "N*s",
+                "log1p(N*s)",
+                "tau/T",
+                "label",
+                "periodic_coordinates"
+              ],
+              "raw_log_density_used": 0,
+              "schema": "d0-boundary-smooth-potential-unet-v1",
+              "schema_version": 1
+            },
+            "optimization": {
+              "amp": false,
+              "audit_probes_per_bank": 64,
+              "batch_size": 64,
+              "checkpoint_every": 250,
+              "clip_warmup_steps": 500,
+              "ema_decay": 0.99,
+              "grad_clip": 1.0,
+              "learning_rate": 0.0001,
+              "selection_probes_per_bank": 16,
+              "trace_probe_version": "d0-randomized-orthogonal-hadamard-v1",
+              "trace_probes": "randomized-orthogonal-hadamard",
+              "train_steps": 4000,
+              "training_probes": 4,
+              "validation_batch_size": 64,
+              "validation_every": 250,
+              "weight_decay": 0.0001
+            },
+            "parent_failed_run_sha256": "4a8348590f21841a6189efb038f37d9e649ba65aa65564907e6ca8354989ee87",
+            "parent_scientific_fingerprint": "9a19131cda6b52c63f6b93f934c1bc702b71a44efb9bdee1c4b050f306a36f14",
+            "preflight": {
+              "operator_hutchinson_probes": 4096
+            },
+            "sampling_performed": 0,
+            "seeds": {
+              "audit_probe_a_seed": 260777,
+              "audit_probe_b_seed": 260778,
+              "batch_index_seed": 260780,
+              "bootstrap_seed": 260779,
+              "calibration_seed": 260769,
+              "null_data_seed": 260768,
+              "null_seeds": [
+                260771,
+                260772,
+                260773
+              ],
+              "selection_probe_a_seed": 260775,
+              "selection_probe_b_seed": 260776,
+              "supervised_seed": 260770,
+              "teacher_data_seed": 260767,
+              "teacher_seeds": [
+                260771,
+                260772,
+                260773
+              ],
+              "training_probe_seed": 260774
+            },
+            "synthetic_data": {
+              "anchor_bin_counts": [
+                4,
+                4,
+                4,
+                4,
+                16
+              ],
+              "anchors_per_path": 32,
+              "audit_paths": 32,
+              "selection_paths": 32,
+              "teacher_and_null_states_independent": 1,
+              "teacher_epsilon": 0.5,
+              "teacher_version": "d0-bounded-four-anchor-mixture-v1",
+              "train_paths": 128
+            },
+            "thresholds": {
+              "bootstrap_confidence": 0.9,
+              "boundary_max_flux_ratio": 0.001,
+              "boundary_min_flux_slope": 0.9,
+              "expected_implicit_teacher_seeds": 3,
+              "expected_null_seeds": 3,
+              "expected_time_bins": 5,
+              "maximum_post_warmup_clip_fraction": 0.1,
+              "minimum_passing_implicit_teacher_seeds": 2,
+              "teacher_max_bin_relative_flux_l2": 0.2,
+              "teacher_max_overall_relative_flux_l2": 0.15,
+              "teacher_min_bin_flux_cosine": 0.95,
+              "teacher_min_overall_flux_cosine": 0.98,
+              "teacher_min_score_gain": 0.9
+            }
+          },
+          "scientific_fingerprint": "17febf94c90d6b721537be490362d242a0308a227df2ed887eac9eefbca6e5fb",
+          "source_fingerprint": "1103bdb417a0c4d48b51acb0f41143b1915b2b1e196e91cb3ac7ee5a36345757",
+          "supervised_optimizer_gate": {
+            "gate": "supervised_teacher_optimizer_health",
+            "passed": 0,
+            "sampling_performed": 0,
+            "subchecks": {
+              "post_warmup_clip_fraction": {
+                "operator": "<=",
+                "passed": 0,
+                "threshold": 0.1,
+                "value": 0.9897142857142858
+              }
+            }
+          },
+          "supervised_scientific_gate": {
+            "gate": "supervised_teacher_scientific_metrics",
+            "passed": 1,
+            "sampling_performed": 0,
+            "subchecks": {
+              "all_bin_flux_cosines": {
+                "operator": ">= each",
+                "passed": 1,
+                "threshold": 0.95,
+                "value": [
+                  0.9988681593713299,
+                  0.9989390996586908,
+                  0.9989804186540615,
+                  0.9993022634580401,
+                  0.9994198430576589
+                ]
+              },
+              "all_bin_relative_flux_l2": {
+                "operator": "<= each",
+                "passed": 1,
+                "threshold": 0.2,
+                "value": [
+                  0.04757239157727769,
+                  0.04618897724995249,
+                  0.045145872734423276,
+                  0.0373661147658329,
+                  0.03413257475271029
+                ]
+              },
+              "boundary_admissible": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "complete": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "data_end_score_gain": {
+                "operator": ">=",
+                "passed": 1,
+                "threshold": 0.9,
+                "value": 0.9988542536448665
+              },
+              "finite": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "overall_flux_cosine": {
+                "operator": ">=",
+                "passed": 1,
+                "threshold": 0.98,
+                "value": 0.9992495618222035
+              },
+              "overall_relative_flux_l2": {
+                "operator": "<=",
+                "passed": 1,
+                "threshold": 0.15,
+                "value": 0.038754806424800496
+              },
+              "overall_score_gain": {
+                "operator": ">=",
+                "passed": 1,
+                "threshold": 0.9,
+                "value": 0.9984927132232124
+              },
+              "selected_nonzero": {
+                "operator": ">",
+                "passed": 1,
+                "threshold": 0,
+                "value": 3750
+              }
+            }
+          },
+          "supervised_teacher_gate": {
+            "claim_scope": "representability of the exact bounded analytic score and flux",
+            "gate": "supervised_teacher",
+            "passed": 0,
+            "sampling_performed": 0,
+            "subchecks": {
+              "all_bin_flux_cosines": {
+                "operator": ">= each",
+                "passed": 1,
+                "threshold": 0.95,
+                "value": [
+                  0.9988681593713299,
+                  0.9989390996586908,
+                  0.9989804186540615,
+                  0.9993022634580401,
+                  0.9994198430576589
+                ]
+              },
+              "all_bin_relative_flux_l2": {
+                "operator": "<= each",
+                "passed": 1,
+                "threshold": 0.2,
+                "value": [
+                  0.04757239157727769,
+                  0.04618897724995249,
+                  0.045145872734423276,
+                  0.0373661147658329,
+                  0.03413257475271029
+                ]
+              },
+              "boundary_admissible": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "complete": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "data_end_score_gain": {
+                "operator": ">=",
+                "passed": 1,
+                "threshold": 0.9,
+                "value": 0.9988542536448665
+              },
+              "finite": {
+                "operator": "==",
+                "passed": 1,
+                "threshold": 1,
+                "value": 1
+              },
+              "overall_flux_cosine": {
+                "operator": ">=",
+                "passed": 1,
+                "threshold": 0.98,
+                "value": 0.9992495618222035
+              },
+              "overall_relative_flux_l2": {
+                "operator": "<=",
+                "passed": 1,
+                "threshold": 0.15,
+                "value": 0.038754806424800496
+              },
+              "overall_score_gain": {
+                "operator": ">=",
+                "passed": 1,
+                "threshold": 0.9,
+                "value": 0.9984927132232124
+              },
+              "post_warmup_clip_fraction": {
+                "operator": "<=",
+                "passed": 0,
+                "threshold": 0.1,
+                "value": 0.9897142857142858
+              },
+              "selected_nonzero": {
+                "operator": ">",
+                "passed": 1,
+                "threshold": 0,
+                "value": 3750
+              }
+            }
+          },
+          "transitive_failed_score_provenance": {
+            "artifacts": {
+              "artifact_registry": {
+                "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_dirichlet_score\\20260717-162622_production-one-image-dirichlet-score\\artifact_registry.json",
+                "sha256": "9d0d879b3d3be6bfa2d5283f090d1fdc55c48ccba895d6a7656e8353d845902a",
+                "size": 17609
+              },
+              "cache": {
+                "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_dirichlet_score\\20260717-162622_production-one-image-dirichlet-score\\cache_gate.json",
+                "sha256": "86ebf76b64aa2daf7144b274af5c04749fe8d86872020e2ef541ef7aaaed1851",
+                "size": 4384
+              },
+              "cache_index": {
+                "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_dirichlet_score\\20260717-162622_production-one-image-dirichlet-score\\cache\\parent\\cache_index.json",
+                "sha256": "0f0484c530a1b84889b3d8358724d91279f0bfd37a088f04164d17deed55fdf1",
+                "size": 13371
+              },
+              "controls": {
+                "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_dirichlet_score\\20260717-162622_production-one-image-dirichlet-score\\controls_gate.json",
+                "sha256": "9736faf93a5f8364c8ea3ba888ada9ac85cf584df124a28d2131bb3b96dbbce0",
+                "size": 6363
+              },
+              "manifest": {
+                "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_dirichlet_score\\20260717-162622_production-one-image-dirichlet-score\\run_manifest.json",
+                "sha256": "9cbb9b1d427da7711e21928875ce9f0cbe5fc557ebbbb804a590d25aad3cb7f0",
+                "size": 13214
+              },
+              "operator": {
+                "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_dirichlet_score\\20260717-162622_production-one-image-dirichlet-score\\operator_preflight.json",
+                "sha256": "071c9bd0fd3562e2a6f28478ceb8dee0a9abd9a0057c8bf0784a9c8e5401dd5e",
+                "size": 1487
+              },
+              "preflight": {
+                "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_dirichlet_score\\20260717-162622_production-one-image-dirichlet-score\\preflight_gate.json",
+                "sha256": "194a3872ab5ff9690c662f6079dbd76dc5cdb7c57d33764101ce8ef6e3d48cb0",
+                "size": 3304
+              },
+              "status": {
+                "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_dirichlet_score\\20260717-162622_production-one-image-dirichlet-score\\run_status.json",
+                "sha256": "4a8348590f21841a6189efb038f37d9e649ba65aa65564907e6ca8354989ee87",
+                "size": 765
+              }
+            },
+            "failed_null_gate": {
+              "claim_scope": "stationary Dirichlet zero-score null",
+              "gate": "null_control",
+              "null_control_pass": 0,
+              "passed": 0,
+              "subchecks": {
+                "complete": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "frozen_linear_comparator": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": "frozen_training_only_linear_spline_step0",
+                  "value": "frozen_training_only_linear_spline_step0"
+                },
+                "no_positive_audit_lower_bound": {
+                  "operator": "<=",
+                  "passed": 0,
+                  "threshold": 0.0,
+                  "value": 210.53771530681598
+                }
+              }
+            },
+            "failed_teacher_gate": {
+              "claim_scope": "exact nonuniform-Dirichlet teacher",
+              "gate": "positive_teacher",
+              "passed": 0,
+              "positive_teacher_pass": 0,
+              "subchecks": {
+                "all_bin_flux_cosines": {
+                  "operator": ">= each",
+                  "passed": 0,
+                  "threshold": 0.95,
+                  "value": [
+                    0.88648919800604,
+                    0.8898728082143186,
+                    0.891263976831649,
+                    0.8906136664298608,
+                    0.8881353228093701
+                  ]
+                },
+                "all_bin_relative_flux_l2": {
+                  "operator": "<= each",
+                  "passed": 0,
+                  "threshold": 0.2,
+                  "value": [
+                    0.46577723778204866,
+                    0.45780302365586734,
+                    0.4535379530378576,
+                    0.45481896804367533,
+                    0.45994707715797606
+                  ]
+                },
+                "complete": {
+                  "operator": "==",
+                  "passed": 1,
+                  "threshold": 1,
+                  "value": 1
+                },
+                "data_end_score_gain": {
+                  "operator": ">=",
+                  "passed": 0,
+                  "threshold": 0.9,
+                  "value": 0.8194200297658014
+                },
+                "nonlinear_component_recovered": {
+                  "operator": ">",
+                  "passed": 1,
+                  "threshold": 0.0,
+                  "value": 10555.87060546875
+                },
+                "overall_flux_cosine": {
+                  "operator": ">=",
+                  "passed": 0,
+                  "threshold": 0.98,
+                  "value": 0.8886765717903148
+                },
+                "overall_relative_flux_l2": {
+                  "operator": "<=",
+                  "passed": 0,
+                  "threshold": 0.15,
+                  "value": 0.45898304896978187
+                },
+                "overall_score_gain": {
+                  "operator": ">=",
+                  "passed": 0,
+                  "threshold": 0.9,
+                  "value": 0.8199949405119386
+                },
+                "selected_step": {
+                  "operator": ">",
+                  "passed": 1,
+                  "threshold": 0,
+                  "value": 1500
+                }
+              }
+            },
+            "kernel": {
+              "alpha_eff": 1.0,
+              "edge_alpha_mode": "alpha_eff",
+              "grid_size": 28,
+              "lambda_mix": 0.35,
+              "limiter_fraction": 1.0,
+              "mass_floor": 1e-07,
+              "reference_substeps": 256,
+              "sample_steps": 512,
+              "tau_eff": 5e-05
+            },
+            "passed": 1,
+            "physical_training_performed": 0,
+            "run_dir": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_dirichlet_score\\20260717-162622_production-one-image-dirichlet-score",
+            "sampling_performed": 0,
+            "schedule_metadata": {
+              "dt_sub": 3.243790191857993e-09,
+              "horizon": 0.00042517006802721087,
+              "rate_schedule_sha256": "ef53a0276059d95ac671981e624377c4a91e8ea538cb286ddbb18a6bfa3917cd",
+              "reference_substeps": 256,
+              "sample_steps": 512,
+              "tau_eff": 5e-05,
+              "total_substeps": 131072
+            },
+            "schema": "experiment12-d0-score-boundary-controls-failed-run-provenance",
+            "schema_version": 1,
+            "scientific_fingerprint": "9a19131cda6b52c63f6b93f934c1bc702b71a44efb9bdee1c4b050f306a36f14",
+            "source_fingerprint": "1103bdb417a0c4d48b51acb0f41143b1915b2b1e196e91cb3ac7ee5a36345757",
+            "verified_upstream_run_dir": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_dirichlet_score\\20260717-162622_production-one-image-dirichlet-score",
+            "verified_upstream_status_sha256": "4a8348590f21841a6189efb038f37d9e649ba65aa65564907e6ca8354989ee87"
+          },
+          "verifier_source_fingerprint": "265fcfdbd5a8400d8500d5f4c3ec989541c3218a9b5186879b794e5c634e16b7"
+        },
+        "verifier_source_fingerprint": "ed37afe95a4266cef14297efa34f8cd698c84ce13957800f4c86092314cef652"
+      },
+      "verifier_source_fingerprint": "4f79ae24b6fc2754b0fc56ce1e96d5f163df4ea68b3ca500e7c17b4d47503c70"
+    },
+    "verifier_source_fingerprint": "9df51f099798caea738551a10712f0001bd3fb36f0caa1ff3f19b68460239aa4"
+  },
+  "verifier_source_fingerprint": "66bacb93a31bc3bb81bc25db50c3ffe3dab61f8c26bf43f81fe3ed848b3203f3"
+}

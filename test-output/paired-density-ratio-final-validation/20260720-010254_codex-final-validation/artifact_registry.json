@@ -1,0 +1,52 @@
+{
+  "physical_training_performed": 0,
+  "records": {
+    "boundary_control_stability_gate.json": {
+      "sha256": "9c7394c42eecae21288c8f0df946b7cf75a8e955b4cefe7622a9dc6e16c1d3b3",
+      "size": 83784
+    },
+    "density_ratio_stability_decision.json": {
+      "sha256": "dbd0c8352973ee55e74ff3d1786504568a7eff51b18c54c0152882c333d6f10a",
+      "size": 335
+    },
+    "paired_ratio_preflight.json": {
+      "sha256": "1df1b02569649ff54f954ef1604301635e6fdfceefde3d47d8d1c56fe4540fbc",
+      "size": 5130
+    },
+    "paired_ratio_preflight_gate.json": {
+      "sha256": "576f623d5a676a8d883554c2eb5465838aabd6de5d1dc4b2f1cedb6d83e8c365",
+      "size": 3410
+    },
+    "paired_ratio_stream_plans.json": {
+      "sha256": "b32e4e385f7eb80dd6a69e26fe9643f2c90ac79a945bc7daa70017e7eb646144",
+      "size": 2018
+    },
+    "paired_ratio_stream_replay.json": {
+      "sha256": "9032f6d2a3f922a3fbb9ca719bcfd0433eea2e64fa2b9a37cb7a30836fe48586",
+      "size": 19275
+    },
+    "paired_ratio_structural_law_certificate.json": {
+      "sha256": "9522db3d2453dc4226d8d94cb783805af1ddaaba9c9feb58c2bd6c60fa3b9ea7",
+      "size": 708
+    },
+    "paired_ratio_variance_forensics.json": {
+      "sha256": "f5cf352a3c10adc86622c39f10072bbd53925074740678de2939b5a49fe9265e",
+      "size": 56380
+    },
+    "parent_provenance.json": {
+      "sha256": "d8076589c14415b61c205c3c1b269b7e4618c5e887c39df99bf27e4733b747ca",
+      "size": 66591
+    },
+    "run_manifest.json": {
+      "sha256": "39b8f6e38b9e60c462a82644b63d639ff7d4a9e5779855b189ecc7a0e1fed343",
+      "size": 7668
+    }
+  },
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-stability-confirmation-artifact-registry",
+  "schema_version": 1,
+  "terminal_files_excluded_to_avoid_self_reference": [
+    "artifact_registry.json",
+    "run_status.json"
+  ]
+}

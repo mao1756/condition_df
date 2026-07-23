@@ -1,0 +1,22 @@
+{
+  "artifact_registry_sha256": "3bba2a7792897d06a186609fd9acdbc4ec85c91ab444b04f9ab5cbd5b82a313b",
+  "artifact_registry_size": 2736,
+  "attempt_count": 1,
+  "decision": "classification_optimizer_unresolved",
+  "outcome": "complete",
+  "phase": "preflight",
+  "physical_training_authorized": 0,
+  "physical_training_performed": 0,
+  "recommended_next_action": "run the train/selection-only density-ratio pilot",
+  "require_gate": "none",
+  "required_gate": "none",
+  "required_gate_pass": 1,
+  "sampling_authorized": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-controls",
+  "schema_version": 1,
+  "skips": [],
+  "stage": "preflight",
+  "status": "complete",
+  "updated_at": "2026-07-19T23:25:06.737414+09:00"
+}

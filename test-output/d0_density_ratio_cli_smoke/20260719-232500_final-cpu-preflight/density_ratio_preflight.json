@@ -1,0 +1,157 @@
+{
+  "analytic_flux_max_error": 2.2737367544323206e-13,
+  "analytic_logit_max_error": 0.0,
+  "analytic_score_max_error": 5.684341886080802e-14,
+  "boundary_admissible": 1,
+  "boundary_certificate": {
+    "expected_model_version": "d0-boundary-smooth-potential-unet-v1",
+    "finite_parameters": 1,
+    "model_version": "d0-boundary-smooth-potential-unet-v1",
+    "passed": 1,
+    "raw_log_density_used": 0,
+    "state_feature_names": [
+      "relative_density",
+      "log1p_relative_density"
+    ],
+    "structural_facet_certificate": "smooth-closed-simplex-inputs-plus-parent-preflight-v1"
+  },
+  "class_balance_pass": 1,
+  "complete": 1,
+  "device_smoke": {
+    "batch_fingerprint": "f7622307231c7dba0ec81531adf2ab38d3d4347dd8564b8abc45bb910c205401",
+    "device": "cpu",
+    "finite_gradients": 1,
+    "finite_logits": 1,
+    "finite_loss": 1,
+    "gradient_norm": 0.3939765691757202,
+    "loss": 0.6931471824645996,
+    "passed": 1,
+    "physical_training_performed": 0,
+    "sampling_performed": 0
+  },
+  "device_smoke_pass": 1,
+  "evaluation_status": "evaluated",
+  "finite": 1,
+  "independent_class_namespaces": 1,
+  "null_bce_error": 0.0,
+  "null_exchangeability_certificate": {
+    "class_bin_counts": {
+      "0": [
+        4,
+        4,
+        4,
+        4,
+        16
+      ],
+      "1": [
+        4,
+        4,
+        4,
+        4,
+        16
+      ]
+    },
+    "class_counts": [
+      32,
+      32
+    ],
+    "derivation_version": "d0-density-ratio-balanced-stream-v1",
+    "independent_swap_namespace_present": 1,
+    "passed": 1,
+    "pool_and_swap_seeds_distinct": 1,
+    "pooled_state_namespace_present": 1,
+    "replay_verified": 1,
+    "rows": 64,
+    "task": "dirichlet_null"
+  },
+  "null_exchangeability_pass": 1,
+  "null_flux_max_abs": 0.0,
+  "null_score_max_abs": 0.0,
+  "operator_preflight_pass": 1,
+  "operator_preflight_source": {
+    "path": "C:\\Users\\mao17\\Workspace\\condition_df\\runs\\experiment12_d0_score_control_scale_repair\\20260718-124405_production-boundary-control-scale-repair\\boundary_operator_preflight.json",
+    "sha256": "05886646483473e31d6e4952225592199b135c077db630450a11011e37cf9629",
+    "size": 12784
+  },
+  "oracle_bootstrap_confidence": 0.99,
+  "panel_isolation_pass": 1,
+  "physical_training_performed": 0,
+  "provenance_pass": 1,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-controls-preflight-metrics",
+  "schema_version": 1,
+  "stream_replay_pass": 1,
+  "teacher_bce_improvement_lower_bounds": {
+    "data_end": {
+      "bce": 0.6382060832293197,
+      "bootstrap": {
+        "confidence": 0.99,
+        "finite": 1,
+        "lower_bound": 0.0449554045495857,
+        "path_count": 2,
+        "path_ids": [
+          605733240457572897,
+          8317005049763087296
+        ],
+        "path_values": [
+          0.0449554045495857,
+          0.06492679011166524
+        ],
+        "point_estimate": 0.05494109733062547,
+        "reps": 32,
+        "state_count": 64,
+        "upper_bound": 0.06492679011166524
+      },
+      "confidence": 0.99,
+      "improvement": 0.05494109733062547,
+      "lower_bound": 0.0449554045495857,
+      "upper_bound": 0.06492679011166524
+    },
+    "overall": {
+      "bce": 0.6622427406308387,
+      "bootstrap": {
+        "confidence": 0.99,
+        "finite": 1,
+        "lower_bound": 0.007109603715200974,
+        "path_count": 2,
+        "path_ids": [
+          605733240457572897,
+          8317005049763087296
+        ],
+        "path_values": [
+          0.007109603715200974,
+          0.05469927614301245
+        ],
+        "point_estimate": 0.03090443992910671,
+        "reps": 32,
+        "state_count": 128,
+        "upper_bound": 0.05469927614301245
+      },
+      "confidence": 0.99,
+      "improvement": 0.030904439929106707,
+      "lower_bound": 0.007109603715200974,
+      "upper_bound": 0.05469927614301245
+    }
+  },
+  "teacher_normalization_interval": {
+    "confidence": 0.99,
+    "finite": 1,
+    "lower": 0.9225940607952585,
+    "lower_bound": 0.9225940607952585,
+    "path_count": 2,
+    "path_ids": [
+      605733240457572897,
+      8317005049763087296
+    ],
+    "path_values": [
+      1.0308488247937624,
+      0.9225940607952585
+    ],
+    "point_estimate": 0.9767214427945105,
+    "reps": 32,
+    "state_count": 64,
+    "upper": 1.0308488247937624,
+    "upper_bound": 1.0308488247937624
+  },
+  "time_strata_pass": 1
+}

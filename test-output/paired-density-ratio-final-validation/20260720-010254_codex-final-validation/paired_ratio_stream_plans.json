@@ -1,0 +1,73 @@
+{
+  "evaluation_stream": {
+    "batch_bin_counts": [
+      8,
+      8,
+      8,
+      8,
+      32
+    ],
+    "batch_size": 64,
+    "bin_counts": [
+      4,
+      4,
+      4,
+      4,
+      16
+    ],
+    "derivation_version": "d0-density-ratio-balanced-stream-v1",
+    "examples_per_class": 32,
+    "fingerprint": "82aefbe654990c148b049a73a3a38c05d6f67b808f5b98a4cd9e228b7dcd8f7f",
+    "grid_size": 28,
+    "horizon": 0.00042517006802721087,
+    "label": 3,
+    "model_version": "d0-boundary-smooth-potential-unet-v1",
+    "objective_version": "d0-balanced-raw-logit-bce-v1",
+    "physical_training_performed": 0,
+    "root_seed": 260851,
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-stream-plan",
+    "schema_version": 1,
+    "teacher_epsilon": 0.5,
+    "teacher_version": "d0-bounded-four-anchor-mixture-v1"
+  },
+  "paired_training_stream": {
+    "accumulation_levels": [
+      2,
+      4,
+      8
+    ],
+    "accumulation_version": "d0-density-ratio-deterministic-gradient-accumulation-v1",
+    "cluster_bin_counts": [
+      4,
+      4,
+      4,
+      4,
+      16
+    ],
+    "derivation_version": "d0-density-ratio-paired-mixture-stream-v1",
+    "effective_cluster_counts": [
+      64,
+      128,
+      256
+    ],
+    "fingerprint": "b19650872040affa7a8581f8c3bc5b8f949e9c5cf55c6ca3c82ca7afd9ae8fde",
+    "grid_size": 28,
+    "horizon": 0.00042517006802721087,
+    "label": 3,
+    "microbatch_clusters": 32,
+    "objective_version": "d0-density-ratio-paired-mixture-weighted-softplus-v1",
+    "physical_training_performed": 0,
+    "production_defaults_match": 1,
+    "production_root_seed": 260851,
+    "root_seed": 260851,
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-paired-mixture-stream-plan",
+    "schema_version": 1,
+    "stream_version": "d0-density-ratio-paired-mixture-stream-v1",
+    "teacher_epsilon": 0.5,
+    "teacher_version": "d0-bounded-four-anchor-mixture-v1"
+  },
+  "physical_training_performed": 0,
+  "sampling_performed": 0
+}

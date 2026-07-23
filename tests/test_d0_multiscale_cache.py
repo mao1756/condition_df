@@ -183,6 +183,21 @@ def test_stratified_anchor_plan_honors_prescribed_per_path_bin_counts() -> None:
         )
 
 
+def test_anchor_validation_accepts_exact_tau_bin_boundaries() -> None:
+    plan = make_stratified_anchor_plan(
+        num_paths=2,
+        anchors_per_path=5,
+        total_substeps=40,
+        max_stride=4,
+        seed=260719,
+        bin_counts=(1, 1, 1, 1, 1),
+    )
+
+    # This compact grid contains integer endpoints at every 0.2 boundary.
+    # Validation must use the planner's integer convention, not rounded tau.
+    validate_anchor_plan(plan)
+
+
 def test_three_way_split_is_exact_deterministic_and_path_isolated() -> None:
     paths = np.arange(64, dtype=np.int64)
     split = deterministic_three_way_path_split(paths, seed=17)

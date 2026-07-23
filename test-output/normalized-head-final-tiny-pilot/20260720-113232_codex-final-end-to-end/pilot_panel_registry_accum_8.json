@@ -1,0 +1,148 @@
+{
+  "disjointness": {
+    "overlaps": [],
+    "panel_count": 4,
+    "panel_fingerprints": [
+      "252298a553d02b0145879f15bfc814c1b9e1880cf479f8a720b43e14ade0fdb1",
+      "461411cb04344bba1c69c3d869bf6894052e26f5808508d20cf42d8689bcab7f",
+      "f8291c6d754a211d63390841a7c54cf5b7e6b608a8e8ac48563bad013898f226",
+      "16381deffe6f9518f43c4ccf28a2536c4aa7d5dbb9df11fff5056b044a5aedab"
+    ],
+    "passed": 1,
+    "physical_training_performed": 0,
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-panel-disjointness",
+    "schema_version": 1
+  },
+  "panels": {
+    "bounded_teacher": {
+      "a": {
+        "anchor_ids_sha256": "2eec0f2b0f71ddc492a3964f49d6e28eb40d7eb7b24076a17455467a091311ce",
+        "class_counts": [
+          32,
+          32
+        ],
+        "class_targets_sha256": "f3708e0344d5b46c29b89c73b94708784b82e945eefc1db2b40b3f13c18cb14f",
+        "fingerprint": "252298a553d02b0145879f15bfc814c1b9e1880cf479f8a720b43e14ade0fdb1",
+        "labels_sha256": "5f6de7215c7ec20f11e5dd55f5c9a12e382f80a8b482208c665c24e959a33736",
+        "panel_version": "d0-density-ratio-panel-v1",
+        "path_count": 1,
+        "path_ids_sha256": "9c0b29054ae018321d498bb83ff4f2d037232947302595c2233776f0a9d61891",
+        "phase": "pilot-selection-accum-8",
+        "physical_training_performed": 0,
+        "pixels": 784,
+        "plan_fingerprint": "f65fb72566e99d15b17d6025c91fb9387c60ba6be4d497c4883aa6697dafcbbb",
+        "role": "a",
+        "rows": 64,
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-panel",
+        "schema_version": 1,
+        "state_sha256": "befac9f21c4b14dcaf3b260829337a095fd7aab101f7d57ff22ca6accc05ac33",
+        "strata_sha256": "6e2466fe487fe1c784b83671794440d157f963c734eba0e13fed272139a6028d",
+        "stream_fingerprints": [
+          "eb12d796924d64602316668e1761bb41af4df7210490d5da742625b14194876f"
+        ],
+        "task": "bounded_teacher",
+        "tau_fraction_sha256": "2c3cbff84d5095514a2d2fc89e5914ab4294349a0bfe2495f59f99308c281f7d",
+        "unique_path_count": 1
+      },
+      "b": {
+        "anchor_ids_sha256": "217d6649971ea71370247757d51db5a4efdabf3d4342fd12897b85390af8e9a1",
+        "class_counts": [
+          32,
+          32
+        ],
+        "class_targets_sha256": "2558922cdd717021f5dee3533152e9da5aa5518edaa15f08d16edc03bff714c2",
+        "fingerprint": "461411cb04344bba1c69c3d869bf6894052e26f5808508d20cf42d8689bcab7f",
+        "labels_sha256": "5f6de7215c7ec20f11e5dd55f5c9a12e382f80a8b482208c665c24e959a33736",
+        "panel_version": "d0-density-ratio-panel-v1",
+        "path_count": 1,
+        "path_ids_sha256": "8d8fc0d59a7b1690dd37a598d905e2f861a11f23c2981ec3a84cbcea94305014",
+        "phase": "pilot-selection-accum-8",
+        "physical_training_performed": 0,
+        "pixels": 784,
+        "plan_fingerprint": "f65fb72566e99d15b17d6025c91fb9387c60ba6be4d497c4883aa6697dafcbbb",
+        "role": "b",
+        "rows": 64,
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-panel",
+        "schema_version": 1,
+        "state_sha256": "7953e241a3b31530ea30225e06a66d3fea3f82cd48266249870e1a6614ecaa41",
+        "strata_sha256": "daf2ed58718929f233cbb7e10f372fd88463fc0fd6c297d08cba09b3e3e596a6",
+        "stream_fingerprints": [
+          "804f43ce734e732f9a653796dfc58ab8cba406591453c1a701b2703af92bdcea"
+        ],
+        "task": "bounded_teacher",
+        "tau_fraction_sha256": "3bba27f004c447feac4e9961e21783b21774c6218f7c72595e16480b851b6b50",
+        "unique_path_count": 1
+      }
+    },
+    "dirichlet_null": {
+      "a": {
+        "anchor_ids_sha256": "2814f91c59cd76928d27709de51ad711d30a1feee796094d0d192a86d763f785",
+        "class_counts": [
+          32,
+          32
+        ],
+        "class_targets_sha256": "01d2dea01256883ea64e883b3493ef42d8c2cd50e606868e1104c8f9393c124b",
+        "fingerprint": "f8291c6d754a211d63390841a7c54cf5b7e6b608a8e8ac48563bad013898f226",
+        "labels_sha256": "5f6de7215c7ec20f11e5dd55f5c9a12e382f80a8b482208c665c24e959a33736",
+        "panel_version": "d0-density-ratio-panel-v1",
+        "path_count": 1,
+        "path_ids_sha256": "b38f92048f6c0cc11c53660933da670b227c926a3d5fda5fb2b4982dff4efb1e",
+        "phase": "pilot-selection-accum-8",
+        "physical_training_performed": 0,
+        "pixels": 784,
+        "plan_fingerprint": "f65fb72566e99d15b17d6025c91fb9387c60ba6be4d497c4883aa6697dafcbbb",
+        "role": "a",
+        "rows": 64,
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-panel",
+        "schema_version": 1,
+        "state_sha256": "6ef6ce282a22b02b062c338bcb8fcd4d38ba96a384cb4eb6707e613cd956dc4f",
+        "strata_sha256": "1f6977bfaa7615dd8b7a122d4a19f337c8554d0418669ab0644ba4d1d71b06c6",
+        "stream_fingerprints": [
+          "8ceac6c4a8c774520f2cbfba474b7f6a6a8c007b09e05aeea0a815ca335e4908"
+        ],
+        "task": "dirichlet_null",
+        "tau_fraction_sha256": "26544fbeef62d525cca44f3e8bf6a001413cb1320860e8da71dcdf4ebf89cb1a",
+        "unique_path_count": 1
+      },
+      "b": {
+        "anchor_ids_sha256": "06a6c629c6574ec23795349e934ca7ccb62d504cc438a9e3e589df026e904bc2",
+        "class_counts": [
+          32,
+          32
+        ],
+        "class_targets_sha256": "8604ddca56383881412e108cb06cfc73fac81be4ef98496a6fb6a71bbdb30c8c",
+        "fingerprint": "16381deffe6f9518f43c4ccf28a2536c4aa7d5dbb9df11fff5056b044a5aedab",
+        "labels_sha256": "5f6de7215c7ec20f11e5dd55f5c9a12e382f80a8b482208c665c24e959a33736",
+        "panel_version": "d0-density-ratio-panel-v1",
+        "path_count": 1,
+        "path_ids_sha256": "19cca3f9a0ad37c8ef0cb17d6c84d5ca26decbc2a1f83ed80e08b76f56f07cfd",
+        "phase": "pilot-selection-accum-8",
+        "physical_training_performed": 0,
+        "pixels": 784,
+        "plan_fingerprint": "f65fb72566e99d15b17d6025c91fb9387c60ba6be4d497c4883aa6697dafcbbb",
+        "role": "b",
+        "rows": 64,
+        "sampling_performed": 0,
+        "schema": "experiment12-d0-score-density-ratio-panel",
+        "schema_version": 1,
+        "state_sha256": "7fc5309b5616efab6ac6f7860b99243f3d47d1836ffe0bdd32a6ecf6bdf01f12",
+        "strata_sha256": "53c13e92e86279e6d752c034dab7647f2ec4e8cccb593e04a0a38c229d1d27aa",
+        "stream_fingerprints": [
+          "cd586e1698430934cc842a44993f478e3d05ff521fcdf2baada3e4d6799a4385"
+        ],
+        "task": "dirichlet_null",
+        "tau_fraction_sha256": "a4e0e10384fc4b786cdbfc392f9c81cb1b780c11fbe5b5ee6bfc175c11859a94",
+        "unique_path_count": 1
+      }
+    }
+  },
+  "phase": "pilot-selection-accum-8",
+  "physical_training_performed": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-head-confirmation-panel-registry",
+  "schema_version": 1
+}

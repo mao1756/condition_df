@@ -2617,6 +2617,9 @@ class MaskedReferenceStepResult:
     valid_innovation_noise_energy_fraction: float = 1.0
     substep_states: Tensor | None = None
     realized_edge_transfers: Tensor | None = None
+    # Optional zero-dimensional tensor totals used by long-running diagnostics.
+    # Ordinary callers keep receiving the historical host-valued fields above.
+    device_diagnostics: dict[str, Tensor] | None = None
 
 
 def masked_reference_free_step_torch(
@@ -2633,6 +2636,7 @@ def masked_reference_free_step_torch(
     return_substep_states: bool = False,
     return_realized_transfers: bool = False,
     collect_diagnostics: bool = True,
+    diagnostics_device: bool = False,
 ) -> MaskedReferenceStepResult:
     """Boundary-correct free reference step with direction-aware limiting.
 
@@ -2653,6 +2657,10 @@ def masked_reference_free_step_torch(
     limiter-touched edges are masked for D0 innovation regression.  Set
     ``collect_diagnostics=False`` for cache construction when the caller only
     needs raw innovations/masks; this avoids thousands of host-device syncs.
+    ``diagnostics_device=True`` keeps diagnostic totals as zero-dimensional
+    tensors in ``device_diagnostics`` and leaves the legacy scalar totals at
+    zero.  This mode is intended for callers that aggregate many steps before a
+    single host synchronization.
     """
 
     if states.ndim != 2:
@@ -2661,6 +2669,8 @@ def masked_reference_free_step_torch(
         raise ValueError("dt must be non-negative and finite")
     if int(substeps) <= 0:
         raise ValueError("substeps must be positive")
+    if diagnostics_device and not collect_diagnostics:
+        raise ValueError("diagnostics_device requires collect_diagnostics=True")
     if dt == 0.0:
         raw = None
         mask = None
@@ -2708,6 +2718,25 @@ def masked_reference_free_step_torch(
     limited_mobility_weight_sum = 0.0
     noise_energy_sum = 0.0
     limited_noise_energy_sum = 0.0
+    device_diagnostics: dict[str, Tensor] | None = None
+    if diagnostics_device:
+        zero = states.new_zeros((), dtype=torch.float64)
+        device_diagnostics = {
+            "limited_edges": zero.clone(),
+            "proposed_edges": zero.clone(),
+            "drift_limited_edges": zero.clone(),
+            "noise_limited_edges": zero.clone(),
+            "nonfinite_edges": zero.clone(),
+            "floor_touched_pixels": zero.clone(),
+            "floor_proposed_pixels": zero.clone(),
+            "floor_correction_l1": zero.clone(),
+            "renorm_correction_l1": zero.clone(),
+            "mobility_weight_sum": zero.clone(),
+            "limited_mobility_weight_sum": zero.clone(),
+            "noise_energy_sum": zero.clone(),
+            "limited_noise_energy_sum": zero.clone(),
+            "max_simplex_mass_error": zero.clone(),
+        }
 
     def _budget_limiter(delta: Tensor, tail_budget: Tensor, head_budget: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         upper = tail_budget.clamp_min(0.0)
@@ -2785,15 +2814,33 @@ def masked_reference_free_step_torch(
                 # extra diagnostic pass is required.
                 theta_weight = theta.detach().clamp_min(0.0)
                 noise_energy_weight = noise_std.detach().square().clamp_min(0.0)
-                mobility_weight_sum += float(theta_weight.sum().detach().cpu())
-                limited_mobility_weight_sum += float(theta_weight.masked_select(invalid_for_regression).sum().detach().cpu())
-                noise_energy_sum += float(noise_energy_weight.sum().detach().cpu())
-                limited_noise_energy_sum += float(noise_energy_weight.masked_select(invalid_for_regression).sum().detach().cpu())
-                proposed_edges += int(invalid_for_regression.numel())
-                drift_limited_edges += int(drift_limited.count_nonzero().detach().cpu())
-                noise_limited_edges += int(noise_limited.count_nonzero().detach().cpu())
-                nonfinite_edges += int((drift_nonfinite | noise_nonfinite).count_nonzero().detach().cpu())
-                masked_edges += int(invalid_for_regression.count_nonzero().detach().cpu())
+                if device_diagnostics is not None:
+                    limited_count = invalid_for_regression.count_nonzero().to(torch.float64)
+                    device_diagnostics["mobility_weight_sum"].add_(theta_weight.sum().to(torch.float64))
+                    device_diagnostics["limited_mobility_weight_sum"].add_(
+                        theta_weight.masked_select(invalid_for_regression).sum().to(torch.float64)
+                    )
+                    device_diagnostics["noise_energy_sum"].add_(noise_energy_weight.sum().to(torch.float64))
+                    device_diagnostics["limited_noise_energy_sum"].add_(
+                        noise_energy_weight.masked_select(invalid_for_regression).sum().to(torch.float64)
+                    )
+                    device_diagnostics["proposed_edges"].add_(float(invalid_for_regression.numel()))
+                    device_diagnostics["drift_limited_edges"].add_(drift_limited.count_nonzero().to(torch.float64))
+                    device_diagnostics["noise_limited_edges"].add_(noise_limited.count_nonzero().to(torch.float64))
+                    device_diagnostics["nonfinite_edges"].add_(
+                        (drift_nonfinite | noise_nonfinite).count_nonzero().to(torch.float64)
+                    )
+                    device_diagnostics["limited_edges"].add_(limited_count)
+                else:
+                    mobility_weight_sum += float(theta_weight.sum().detach().cpu())
+                    limited_mobility_weight_sum += float(theta_weight.masked_select(invalid_for_regression).sum().detach().cpu())
+                    noise_energy_sum += float(noise_energy_weight.sum().detach().cpu())
+                    limited_noise_energy_sum += float(noise_energy_weight.masked_select(invalid_for_regression).sum().detach().cpu())
+                    proposed_edges += int(invalid_for_regression.numel())
+                    drift_limited_edges += int(drift_limited.count_nonzero().detach().cpu())
+                    noise_limited_edges += int(noise_limited.count_nonzero().detach().cpu())
+                    nonfinite_edges += int((drift_nonfinite | noise_nonfinite).count_nonzero().detach().cpu())
+                    masked_edges += int(invalid_for_regression.count_nonzero().detach().cpu())
 
             if return_innovations and raw_flat is not None and mask_flat is not None:
                 raw_flat[:, edge_class.flux_indices] = xi
@@ -2812,13 +2859,31 @@ def masked_reference_free_step_torch(
         # floating-point error.
         floored = before_floor.clamp_min(0.0)
         if collect_diagnostics:
-            floor_touched_pixels += int((before_floor < 0.0).count_nonzero().detach().cpu())
-            floor_correction_l1 += float((floored - before_floor).abs().sum().detach().cpu())
+            if device_diagnostics is not None:
+                device_diagnostics["floor_touched_pixels"].add_(
+                    (before_floor < 0.0).count_nonzero().to(torch.float64)
+                )
+                device_diagnostics["floor_proposed_pixels"].add_(float(before_floor.numel()))
+                device_diagnostics["floor_correction_l1"].add_(
+                    (floored - before_floor).abs().sum().to(torch.float64)
+                )
+            else:
+                floor_touched_pixels += int((before_floor < 0.0).count_nonzero().detach().cpu())
+                floor_correction_l1 += float((floored - before_floor).abs().sum().detach().cpu())
         before_renorm = floored
         sums = before_renorm.sum(dim=1, keepdim=True).clamp_min(tiny)
         out = before_renorm / sums
         if collect_diagnostics:
-            renorm_correction_l1 += float((out - before_renorm).abs().sum().detach().cpu())
+            if device_diagnostics is not None:
+                device_diagnostics["renorm_correction_l1"].add_(
+                    (out - before_renorm).abs().sum().to(torch.float64)
+                )
+                device_diagnostics["max_simplex_mass_error"] = torch.maximum(
+                    device_diagnostics["max_simplex_mass_error"],
+                    (out.sum(dim=1) - 1.0).abs().max().to(torch.float64),
+                )
+            else:
+                renorm_correction_l1 += float((out - before_renorm).abs().sum().detach().cpu())
         if return_substep_states:
             substep_state_chunks.append(out.clone())
         if return_innovations and raw_flat is not None and mask_flat is not None:
@@ -2865,6 +2930,7 @@ def masked_reference_free_step_torch(
         valid_innovation_noise_energy_fraction=float(1.0 - noise_energy_masked_fraction),
         substep_states=substep_state_tensor,
         realized_edge_transfers=realized_transfer_tensor,
+        device_diagnostics=device_diagnostics,
     )
 
 

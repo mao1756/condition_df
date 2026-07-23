@@ -1,0 +1,22 @@
+{
+  "artifact_registry_sha256": "f15b26706485b4b0353d3e919afa45908aef7e6c006035963ce26770bb8baa91",
+  "artifact_registry_size": 1826,
+  "attempt_count": 1,
+  "decision": "paired_ratio_preflight_passed",
+  "outcome": "complete",
+  "phase": "preflight",
+  "physical_training_authorized": 0,
+  "physical_training_performed": 0,
+  "recommended_next_action": "run the hierarchical paired-mixture optimizer pilot",
+  "require_gate": "preflight",
+  "required_gate": "preflight",
+  "required_gate_pass": 1,
+  "sampling_authorized": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-stability-confirmation",
+  "schema_version": 1,
+  "skips": [],
+  "stage": "preflight",
+  "status": "complete",
+  "updated_at": "2026-07-20T01:03:28.420421+09:00"
+}

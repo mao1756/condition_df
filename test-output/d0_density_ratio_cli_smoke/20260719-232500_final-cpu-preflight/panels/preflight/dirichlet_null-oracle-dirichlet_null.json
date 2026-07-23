@@ -1,0 +1,52 @@
+{
+  "binding": {
+    "path_count": 2,
+    "phase": "preflight",
+    "physical_training_performed": 0,
+    "role": "oracle-dirichlet_null",
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-controls-panel-binding",
+    "schema_version": 1,
+    "scientific_fingerprint": "7d3104b57b657c671a40c22cc792764797ce1599657b5226e9de03e6f249a05f",
+    "start_step": 2000000,
+    "stream_plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+    "task": "dirichlet_null"
+  },
+  "identity": {
+    "anchor_ids_sha256": "55ae9271c70ff06b3e91945e5bb02bf9f975de276b749adf9e7d187db0a8bc86",
+    "class_counts": [
+      64,
+      64
+    ],
+    "class_targets_sha256": "8a302e3574f1a3850241d13cc6f14cdd5e40c3349660b2524c4fb2528c51a608",
+    "fingerprint": "82c282d8fd48638065206906364b79d1f333d1bbe1475eda786fa58bea2f7efb",
+    "labels_sha256": "3fa686754d7bfb5a2ec67022906de0781859c73687fbc1a1a9b7534f39e74ffe",
+    "panel_version": "d0-density-ratio-panel-v1",
+    "path_count": 2,
+    "path_ids_sha256": "c18cd4f4316b5c1a736333e6e3a75db364858e8d8b867f58b95cee437b7938cc",
+    "phase": "preflight",
+    "physical_training_performed": 0,
+    "pixels": 784,
+    "plan_fingerprint": "58e9946067431a1a5728f7882d80cb46609b0917b88a7be81a256a60fa365b57",
+    "role": "oracle-dirichlet_null",
+    "rows": 128,
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-panel",
+    "schema_version": 1,
+    "state_sha256": "9c8694b163d9863194eddf7df96075cf37c470f1ca758434880089530f9b6ad7",
+    "strata_sha256": "941251d4769c898741e6a5a2d926f8f22cc2e45dd646e974ac2446bf732ccdd1",
+    "stream_fingerprints": [
+      "24cb6d8a73adabed1476b5de00aa8d07aaf07202c0e3724a0b6fe5f38abc8fad",
+      "eb0b950f9a67231e6dd90b9877fcc261cc5bb0ad5162edc76ab48fb063c08852"
+    ],
+    "task": "dirichlet_null",
+    "tau_fraction_sha256": "eddf33af10e637629167f20bd6036c90b93acf8c1dfab314032eb3d042cf721c",
+    "unique_path_count": 2
+  },
+  "physical_training_performed": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-controls-panel-sidecar",
+  "schema_version": 1,
+  "sha256": "f1f9036c7878a67ec68ce8ef468217f814447277423746b0873ca3626cae8bdc",
+  "size": 412941
+}

@@ -1,0 +1,392 @@
+{
+  "binding": {
+    "failed_run_status_sha256": "82b4daf1dfb3a4fbbe83d4c081be9cb61e44eccc21445936f4546f2a6df05939",
+    "runtime_fingerprint": "fb59746cc0da9515591c0a442e0152b5448db9747eb5a6526df81884df1fc475",
+    "scientific_fingerprint": "d4d71d084be2878a1687e68bf18c9f73ff0d8995eb152fb99e83a93aa57a83b9",
+    "source_fingerprint": "e758a2808684368cf8ee76162f416b8f76296347f0276303a597c2fd278cfa09"
+  },
+  "gate_metrics": {
+    "aggregate_preflight_pass": 1,
+    "energy_finite": 1,
+    "generator_finite": 1,
+    "gradient_finite": 1,
+    "hvp_finite": 1,
+    "incident_flux_endpoint_ratio": 0.00010093641676844472,
+    "incident_flux_loglog_slope": 0.9991504773589839,
+    "legacy_barrier_rejected": 1,
+    "legacy_coefficient_relative_error": 0.01262158818557124,
+    "operator_pass": 1,
+    "orthogonal_probe_pass": 1,
+    "potential_finite": 1,
+    "production_workload_smoke_pass": 1
+  },
+  "raw": {
+    "checks": {
+      "boundary_model_domain": {
+        "passed": true
+      },
+      "boundary_smooth_domain": {
+        "passed": true
+      },
+      "legacy_log_barrier_rejected": {
+        "passed": true
+      },
+      "operator": {
+        "passed": true
+      },
+      "orthogonal_probe_trace": {
+        "passed": true
+      }
+    },
+    "facet_ray": {
+      "checks": {
+        "conormal_four_decade_decay": {
+          "comparison": "<=",
+          "passed": true,
+          "threshold": 0.001,
+          "value": 0.00010027296300675323
+        },
+        "conormal_log_log_slope": {
+          "comparison": ">=",
+          "passed": true,
+          "threshold": 0.9,
+          "value": 0.9997515005600018
+        },
+        "legacy_barrier_nonvanishing": {
+          "four_decade_ratio": 1.0030045067909077,
+          "log_log_slope": -0.00027347556372602313,
+          "passed": true
+        },
+        "smooth_quantities_finite": {
+          "passed": true
+        }
+      },
+      "evaluation_device": "cpu",
+      "face_index": 0,
+      "grid_size": 4,
+      "incident_flux_endpoint_ratio": 0.00010027296300675323,
+      "incident_flux_loglog_slope": 0.9997515005600018,
+      "legacy_barrier_endpoint_ratio": 1.0030045067909077,
+      "legacy_barrier_loglog_slope": -0.00027347556372602313,
+      "legacy_barrier_rejected": true,
+      "model_version": "d0-boundary-smooth-potential-unet-v1",
+      "passed": true,
+      "requested_device": "cpu",
+      "rows": [
+        {
+          "energy": 1342.2239705859454,
+          "epsilon": 0.01,
+          "generator": -1745.1182470752046,
+          "gradient_max_abs": 13.793103448275863,
+          "hvp_max_abs": 190.2497027348395,
+          "incident_conormal_max_abs": 0.4809931712415347,
+          "legacy_incident_conormal_max_abs": 2.2105263157894735,
+          "potential": 0.5723423424746454
+        },
+        {
+          "energy": 1137.71553339608,
+          "epsilon": 0.001,
+          "generator": -2913.8816165170356,
+          "gradient_max_abs": 15.748031496062993,
+          "hvp_max_abs": 248.000496000992,
+          "incident_conormal_max_abs": 0.060281644779644025,
+          "legacy_incident_conormal_max_abs": 2.911242603550296,
+          "potential": 0.7095473919539509
+        },
+        {
+          "energy": 1105.1596276978166,
+          "epsilon": 0.0001,
+          "generator": -3070.072876985164,
+          "gradient_max_abs": 15.974440894568689,
+          "hvp_max_abs": 255.1827618940685,
+          "incident_conormal_max_abs": 0.006176686627720643,
+          "legacy_incident_conormal_max_abs": 2.9910125823846614,
+          "potential": 0.7242866677840216
+        },
+        {
+          "energy": 1101.7411376666435,
+          "epsilon": 1e-05,
+          "generator": -3086.1871747323003,
+          "gradient_max_abs": 15.997440409534475,
+          "hvp_max_abs": 255.91809965660659,
+          "incident_conormal_max_abs": 0.0006191858914377006,
+          "legacy_incident_conormal_max_abs": 2.999100125982362,
+          "potential": 0.7257718548779288
+        },
+        {
+          "energy": 1101.3976063612604,
+          "epsilon": 1e-06,
+          "generator": -3087.8036816678064,
+          "gradient_max_abs": 15.999744004095934,
+          "hvp_max_abs": 255.99180819660376,
+          "incident_conormal_max_abs": 6.193379406792704e-05,
+          "legacy_incident_conormal_max_abs": 2.9999100012599826,
+          "potential": 0.7259204873817693
+        },
+        {
+          "energy": 1101.36323635297,
+          "epsilon": 1e-07,
+          "generator": -3087.965383261251,
+          "gradient_max_abs": 15.999974400040958,
+          "hvp_max_abs": 255.99918080196608,
+          "incident_conormal_max_abs": 6.19353148873598e-06,
+          "legacy_incident_conormal_max_abs": 2.9999910000125998,
+          "potential": 0.7259353517713115
+        },
+        {
+          "energy": 1101.359799183309,
+          "epsilon": 1e-08,
+          "generator": -3087.9815539297238,
+          "gradient_max_abs": 15.999997440000412,
+          "hvp_max_abs": 255.9999180800197,
+          "incident_conormal_max_abs": 6.193546697257394e-07,
+          "legacy_incident_conormal_max_abs": 2.9999991000001267,
+          "potential": 0.7259368382216586
+        }
+      ]
+    },
+    "legacy_log_barrier": {
+      "admissible": false,
+      "boundary_rows": [
+        {
+          "epsilon": 0.0001,
+          "incident_conormal_max_abs": 2.9910125823846614
+        },
+        {
+          "epsilon": 1e-05,
+          "incident_conormal_max_abs": 2.999100125982362
+        },
+        {
+          "epsilon": 1e-06,
+          "incident_conormal_max_abs": 2.9999100012599826
+        },
+        {
+          "epsilon": 1e-07,
+          "incident_conormal_max_abs": 2.9999910000125998
+        },
+        {
+          "epsilon": 1e-08,
+          "incident_conormal_max_abs": 2.9999991000001267
+        }
+      ],
+      "checks": {
+        "conormal_does_not_vanish": {
+          "boundary_ratio": 1.0030045067909077,
+          "log_log_slope": -0.00027347556372602313,
+          "passed": true,
+          "ratio_threshold": 0.5,
+          "slope_threshold": 0.1
+        },
+        "empirical_coefficient": {
+          "expected": -180.0,
+          "passed": true,
+          "relative_error": 0.01262158818557124,
+          "threshold": 0.1,
+          "value": -177.72811412659718
+        },
+        "expected_negative_coefficient": {
+          "expected": -180.0,
+          "passed": true,
+          "value": -180.0
+        },
+        "fixture_rejected": {
+          "passed": true
+        }
+      },
+      "edge_alpha": 1.0,
+      "empirical_relative_error": 0.01262158818557124,
+      "empirical_trace_plus_drift_coefficient": -177.72811412659718,
+      "expected_trace_plus_drift_coefficient": -180.0,
+      "grid_size": 4,
+      "num_states": 4096,
+      "passed": true,
+      "seed": 260751
+    },
+    "model_facet_ray": {
+      "checks": {
+        "conormal_four_decade_decay": {
+          "comparison": "<=",
+          "passed": true,
+          "threshold": 0.001,
+          "value": 0.00010093641676844472
+        },
+        "conormal_log_log_slope": {
+          "comparison": ">=",
+          "passed": true,
+          "threshold": 0.9,
+          "value": 0.9991504773589839
+        },
+        "model_schema": {
+          "expected": "d0-boundary-smooth-potential-unet-v1",
+          "passed": true,
+          "value": "d0-boundary-smooth-potential-unet-v1"
+        },
+        "quantities_finite": {
+          "passed": true
+        }
+      },
+      "face_index": 0,
+      "grid_size": 4,
+      "incident_flux_endpoint_ratio": 0.00010093641676844472,
+      "incident_flux_loglog_slope": 0.9991504773589839,
+      "model_version": "d0-boundary-smooth-potential-unet-v1",
+      "parameter_initialization": "deterministic-nonzero-sinusoidal-v1",
+      "passed": true,
+      "rows": [
+        {
+          "energy": 0.003910019123388054,
+          "epsilon": 0.01,
+          "generator": -625.2609174552882,
+          "gradient_max_abs": 0.010744115663120307,
+          "hvp_max_abs": 5.557451369946887,
+          "incident_conormal_max_abs": 0.00028763019384075875,
+          "potential": -0.05032107665327898
+        },
+        {
+          "energy": 0.056465219021898674,
+          "epsilon": 0.001,
+          "generator": -617.5544480602201,
+          "gradient_max_abs": 0.03632268447824627,
+          "hvp_max_abs": 7.944745801198847,
+          "incident_conormal_max_abs": 8.584931663084437e-05,
+          "potential": -0.05032757935675975
+        },
+        {
+          "energy": 0.06856210792265953,
+          "epsilon": 0.0001,
+          "generator": -617.3161411929707,
+          "gradient_max_abs": 0.04001554959883607,
+          "hvp_max_abs": 8.257561118995202,
+          "incident_conormal_max_abs": 9.366659142720309e-06,
+          "potential": -0.050334429341595134
+        },
+        {
+          "energy": 0.06985418835963511,
+          "epsilon": 1e-05,
+          "generator": -617.298684913528,
+          "gradient_max_abs": 0.04038727273757827,
+          "hvp_max_abs": 8.289778830386194,
+          "incident_conormal_max_abs": 9.445599116072949e-07,
+          "potential": -0.050335183970482394
+        },
+        {
+          "energy": 0.06998424111567554,
+          "epsilon": 1e-06,
+          "generator": -617.297003566585,
+          "gradient_max_abs": 0.04042447061064198,
+          "hvp_max_abs": 8.293010202691741,
+          "incident_conormal_max_abs": 9.453500834765429e-08,
+          "potential": -0.05033526013967735
+        },
+        {
+          "energy": 0.06999725486006797,
+          "epsilon": 1e-07,
+          "generator": -617.2968360751544,
+          "gradient_max_abs": 0.040428190654750756,
+          "hvp_max_abs": 8.293333436178198,
+          "incident_conormal_max_abs": 9.454291083890828e-09,
+          "potential": -0.05033526776367018
+        },
+        {
+          "energy": 0.06999855631921319,
+          "epsilon": 1e-08,
+          "generator": -617.296819332444,
+          "gradient_max_abs": 0.040428562661729915,
+          "hvp_max_abs": 8.293365760489595,
+          "incident_conormal_max_abs": 9.454370109575802e-10,
+          "potential": -0.0503352685261402
+        }
+      ]
+    },
+    "model_version": "d0-boundary-smooth-potential-unet-v1",
+    "operator": {
+      "checks": {
+        "constant_gauge": {
+          "passed": true,
+          "threshold": 1e-12,
+          "value": 0.0
+        },
+        "finite": {
+          "passed": true
+        },
+        "hutchinson_trace": {
+          "passed": true,
+          "threshold": 0.01,
+          "value": 0.004214673106863053
+        },
+        "mass_gauge": {
+          "passed": true,
+          "threshold": 1e-12,
+          "value": 0.0
+        },
+        "product_rule": {
+          "passed": true,
+          "threshold": 1e-10,
+          "value": 2.6645352591003757e-15
+        }
+      },
+      "constant_generator_max_abs": 0.0,
+      "evaluation_device": "cpu",
+      "finite": true,
+      "grid_size": 4,
+      "hutchinson_probes": 4096,
+      "hutchinson_trace_relative_error": 0.004214673106863053,
+      "linear_generator_rms": 241.30797665937044,
+      "mass_gauge_generator_max_abs": 0.0,
+      "num_states": 8,
+      "passed": true,
+      "product_rule_max_abs_error": 2.6645352591003757e-15,
+      "quadratic_generator_rms": 58.28386642648578,
+      "requested_device": "cuda"
+    },
+    "orthogonal_probe_preflight": {
+      "checks": {
+        "exact_trace": {
+          "max_abs_error": 4.440892098500626e-16,
+          "passed": true,
+          "relative_error": 1.551953618449302e-16,
+          "threshold": 1e-11
+        },
+        "finite": {
+          "passed": true
+        },
+        "hadamard_gram": {
+          "passed": true,
+          "threshold": 1e-12,
+          "value": 0.0
+        }
+      },
+      "gram_max_abs_error": 0.0,
+      "grid_size": 4,
+      "max_abs_error": 4.440892098500626e-16,
+      "num_probes": 32,
+      "num_states": 4,
+      "passed": true,
+      "probe_version": "d0-randomized-orthogonal-hadamard-v1",
+      "relative_error": 1.551953618449302e-16
+    },
+    "passed": true,
+    "probe_version": "d0-randomized-orthogonal-hadamard-v1",
+    "production_workload_smoke": {
+      "audit_loss": 0.0040897186845541,
+      "audit_probes": 64,
+      "batch_size": 64,
+      "device": "cuda",
+      "elapsed_seconds": 5.284011100011412,
+      "finite": 1,
+      "gradients_finite": 1,
+      "grid_size": 28,
+      "passed": 1,
+      "peak_memory_gib": 3.104081630706787,
+      "production_shape": 1,
+      "training_loss": 0.023836273699998856,
+      "training_probes": 4
+    },
+    "requested_device": "cuda",
+    "requested_grid_size": 28,
+    "teacher_version": "d0-bounded-four-anchor-mixture-v1"
+  },
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-boundary-controls-boundary-operator-preflight",
+  "schema_version": 1
+}

@@ -717,13 +717,12 @@ def test_direct_flux_teacher_model_and_sampler_smoke() -> None:
     assert np.allclose(result.samples.sum(axis=1), 1.0)
 
 
-def test_terminal_classifier_metrics_and_goodbad_analysis() -> None:
+def test_terminal_classifier_metrics_and_goodbad_analysis(tmp_path) -> None:
     images, labels = _toy_digit_measures(num_samples=8, grid_size=8)
     clf = TinyMNISTClassifier(grid_size=8)
     metrics = classifier_generation_metrics(images.reshape(8, -1), labels, clf, grid_size=8, device="cpu")
     assert "classifier_acc" in metrics
-    from pathlib import Path
-    tmp = Path("/tmp/samples_goodbad_smoke.txt")
+    tmp = tmp_path / "samples_goodbad_smoke.txt"
     tmp.write_text("good bad good bad good bad good bad")
     analysis = analyze_goodbad_annotations(tmp, images.reshape(8, -1), labels, classifier_metrics=metrics)
     assert analysis["human_good_rate"] == 0.5

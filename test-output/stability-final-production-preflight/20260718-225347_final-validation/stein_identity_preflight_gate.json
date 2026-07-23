@@ -1,0 +1,125 @@
+{
+  "claim_scope": "exact analytic Dirichlet-null and bounded-teacher Stein identities",
+  "evaluation_status": "evaluated",
+  "gate": "stein_identity_preflight",
+  "operator_identity_pass": 1,
+  "passed": 1,
+  "physical_training_performed": 0,
+  "sampling_performed": 0,
+  "subchecks": {
+    "bootstrap_confidence": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 0.99,
+      "value": 0.99
+    },
+    "complete": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "finite": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 1,
+      "value": 1
+    },
+    "null_identity_interval": {
+      "operator": "contains",
+      "passed": 1,
+      "threshold": 0.0,
+      "value": 1
+    },
+    "path_count": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 128,
+      "value": 128
+    },
+    "physical_training_performed": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 0,
+      "value": 0
+    },
+    "recorded_teacher_scales": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": [
+        0.0,
+        0.25,
+        0.5,
+        1.0,
+        2.0
+      ],
+      "value": [
+        0.0,
+        0.25,
+        0.5,
+        1.0,
+        2.0
+      ]
+    },
+    "sampling_performed": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": 0,
+      "value": 0
+    },
+    "teacher_amplitudes": {
+      "operator": "==",
+      "passed": 1,
+      "threshold": [
+        0.0,
+        0.25,
+        0.5,
+        1.0,
+        2.0
+      ],
+      "value": [
+        0.0,
+        0.25,
+        0.5,
+        1.0,
+        2.0
+      ]
+    },
+    "teacher_identity_intervals": {
+      "operator": "all contain",
+      "passed": 1,
+      "threshold": 0.0,
+      "value": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    }
+  },
+  "thresholds": {
+    "confirmation_null_seeds": 3,
+    "confirmation_teacher_seeds": 3,
+    "maximum_clip_fraction": 0.1,
+    "minimum_passing_teacher_seeds": 2,
+    "pilot_final_window_steps": 200,
+    "pilot_learning_rates": [
+      0.0001,
+      3e-05,
+      1e-05,
+      3e-06
+    ],
+    "pilot_stability_start_step": 101,
+    "pilot_steps": 1000,
+    "stein_bootstrap_confidence": 0.99,
+    "stein_paths": 128,
+    "stein_teacher_amplitudes": [
+      0.0,
+      0.25,
+      0.5,
+      1.0,
+      2.0
+    ]
+  }
+}

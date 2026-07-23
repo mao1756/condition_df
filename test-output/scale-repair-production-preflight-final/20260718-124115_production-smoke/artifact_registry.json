@@ -1,0 +1,91 @@
+{
+  "records": {
+    "analytic_teacher_metrics.csv": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\analytic_teacher_metrics.csv",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    "audit_path_objective_risks.csv": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\audit_path_objective_risks.csv",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    "boundary_control_gate.json": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\boundary_control_gate.json",
+      "sha256": "4da75574aa7c9645023e6109001c514d009de4aedc4b33eb9fb8f798925fb17e",
+      "size": 182
+    },
+    "boundary_control_report.json": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\boundary_control_report.json",
+      "sha256": "359812d250d481187adb131466c3effa5e9920c2cb4552a70dd69983eeba93c5",
+      "size": 679
+    },
+    "boundary_operator_preflight.json": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\boundary_operator_preflight.json",
+      "sha256": "809c6fab9966a13e3ae4e931ca273f185099a94d1dfa313e56b24a26c74cdc9f",
+      "size": 12784
+    },
+    "boundary_preflight_gate.json": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\boundary_preflight_gate.json",
+      "sha256": "88880c9401799dd27bbb4254779abbe05780b198a87d81ea85bd0dd0ee6aebe4",
+      "size": 1744
+    },
+    "boundary_ray_metrics.csv": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\boundary_ray_metrics.csv",
+      "sha256": "a777a1bd4ae854ec6490f374681a5b8ff4fe828d494b7efe3b3fa9e861e349b9",
+      "size": 2660
+    },
+    "boundary_ray_refinement.png": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\boundary_ray_refinement.png",
+      "sha256": "1b32a435d20dd651108f256080568a8a743b3514bc996200d661ac6fbed6c66a",
+      "size": 60636
+    },
+    "checkpoint_metrics.csv": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\checkpoint_metrics.csv",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    "control_repair_decision.json": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\control_repair_decision.json",
+      "sha256": "e90b658912ae301484e488bee84c333bdfa33b74e7ef019b641baf2de4cd4445",
+      "size": 234
+    },
+    "control_seed_metrics.csv": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\control_seed_metrics.csv",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    "control_time_bin_metrics.csv": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\control_time_bin_metrics.csv",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    "parent_provenance.json": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\parent_provenance.json",
+      "sha256": "2507952fa73b296d1cb9f68282b963b91e99663381cb83772789fccac9582fd7",
+      "size": 22456
+    },
+    "run_manifest.json": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\run_manifest.json",
+      "sha256": "bfff05395e94689b6e499a85749aa5a4b3bfbb667c9b640b72dbd0516032a178",
+      "size": 7309
+    },
+    "selection_path_objective_risks.csv": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\selection_path_objective_risks.csv",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    "training_component_diagnostics.csv": {
+      "path": "C:\\Users\\mao17\\Workspace\\condition_df\\test-output\\scale-repair-production-preflight-final\\20260718-124115_production-smoke\\training_component_diagnostics.csv",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    }
+  },
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-control-scale-repair-artifact-registry",
+  "schema_version": 1,
+  "terminal_files_excluded_to_avoid_self_reference": [
+    "artifact_registry.json",
+    "run_status.json"
+  ]
+}

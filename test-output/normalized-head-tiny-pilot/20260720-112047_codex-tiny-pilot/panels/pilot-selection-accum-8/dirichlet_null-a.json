@@ -1,0 +1,51 @@
+{
+  "binding": {
+    "path_count": 1,
+    "phase": "pilot-selection-accum-8",
+    "physical_training_performed": 0,
+    "role": "a",
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-controls-panel-binding",
+    "schema_version": 1,
+    "scientific_fingerprint": "2c88b19c52dac8587ca48acfa0a0f3e8a62e857dc9150d8b084093053985f5e5",
+    "start_step": 4000000,
+    "stream_plan_fingerprint": "f65fb72566e99d15b17d6025c91fb9387c60ba6be4d497c4883aa6697dafcbbb",
+    "task": "dirichlet_null"
+  },
+  "identity": {
+    "anchor_ids_sha256": "2814f91c59cd76928d27709de51ad711d30a1feee796094d0d192a86d763f785",
+    "class_counts": [
+      32,
+      32
+    ],
+    "class_targets_sha256": "01d2dea01256883ea64e883b3493ef42d8c2cd50e606868e1104c8f9393c124b",
+    "fingerprint": "f8291c6d754a211d63390841a7c54cf5b7e6b608a8e8ac48563bad013898f226",
+    "labels_sha256": "5f6de7215c7ec20f11e5dd55f5c9a12e382f80a8b482208c665c24e959a33736",
+    "panel_version": "d0-density-ratio-panel-v1",
+    "path_count": 1,
+    "path_ids_sha256": "b38f92048f6c0cc11c53660933da670b227c926a3d5fda5fb2b4982dff4efb1e",
+    "phase": "pilot-selection-accum-8",
+    "physical_training_performed": 0,
+    "pixels": 784,
+    "plan_fingerprint": "f65fb72566e99d15b17d6025c91fb9387c60ba6be4d497c4883aa6697dafcbbb",
+    "role": "a",
+    "rows": 64,
+    "sampling_performed": 0,
+    "schema": "experiment12-d0-score-density-ratio-panel",
+    "schema_version": 1,
+    "state_sha256": "6ef6ce282a22b02b062c338bcb8fcd4d38ba96a384cb4eb6707e613cd956dc4f",
+    "strata_sha256": "1f6977bfaa7615dd8b7a122d4a19f337c8554d0418669ab0644ba4d1d71b06c6",
+    "stream_fingerprints": [
+      "8ceac6c4a8c774520f2cbfba474b7f6a6a8c007b09e05aeea0a815ca335e4908"
+    ],
+    "task": "dirichlet_null",
+    "tau_fraction_sha256": "26544fbeef62d525cca44f3e8bf6a001413cb1320860e8da71dcdf4ebf89cb1a",
+    "unique_path_count": 1
+  },
+  "physical_training_performed": 0,
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-density-ratio-controls-panel-sidecar",
+  "schema_version": 1,
+  "sha256": "3479103b0bd7858c76fdb341987753fc291b3c983c9da427dad580c93fe3dec8",
+  "size": 209013
+}

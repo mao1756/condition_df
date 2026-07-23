@@ -1,0 +1,60 @@
+{
+  "physical_training_performed": 0,
+  "records": {
+    "control_stability_decision.json": {
+      "sha256": "445c43903cd3dbf548c76f1e8d94a551255e8a731642ad98e4fb2fb583ee7da9",
+      "size": 296
+    },
+    "forensics/forensic_replay.json": {
+      "sha256": "6b76cd3294884c6f54e9136a6ff194179d2909e401d7047aecaab95b144a0c82",
+      "size": 7130
+    },
+    "forensics/forensic_risk_replay.csv": {
+      "sha256": "34196024e16b0f7738f360f11985a7c53e92ea666fd10929a437ea1a5fda4f45",
+      "size": 1865
+    },
+    "parent_forensic_replay.json": {
+      "sha256": "6b76cd3294884c6f54e9136a6ff194179d2909e401d7047aecaab95b144a0c82",
+      "size": 7130
+    },
+    "parent_provenance.json": {
+      "sha256": "e293ac35266d394a8a0326755da8b0e1a611cbbeb0011741041fb6751d3237b2",
+      "size": 39308
+    },
+    "run_manifest.json": {
+      "sha256": "f27ca629f9af4e8417b832f1df7c0aa58c5884ab9b2561f0267dc0c8affc3b68",
+      "size": 6257
+    },
+    "stability_confirmation_report.json": {
+      "sha256": "ef25324c660b9c3ffb4500dce211500e23ab6b296de65a65e254fe087b1f3389",
+      "size": 171233
+    },
+    "stability_preflight_gate.json": {
+      "sha256": "e4cc1c7efa1c3e210bd0fbeaf827def55e1ac02d471d0716089102c588caeffe",
+      "size": 112066
+    },
+    "stein_identity_preflight.json": {
+      "sha256": "9be6dd7ced06028dbd9b620be929170456f88c5cdfcf739b5538c7622e54a9e4",
+      "size": 37607
+    },
+    "stein_identity_preflight_gate.json": {
+      "sha256": "aff0597cec2dd6e5fc4e1123df9ec1a22e13da709fb1b0fe6fc8c900bddbb8f2",
+      "size": 2362
+    },
+    "stream_plan.json": {
+      "sha256": "47ff89073c9f9356c0cf00095db81fe55e629d53764af17a863c0729e8df9cdf",
+      "size": 712
+    },
+    "stream_replay_preflight.json": {
+      "sha256": "ef47da4a0faf760a8eb89a36ecb80c8de2131129f57e881fbe0508986dcc0601",
+      "size": 25319
+    }
+  },
+  "sampling_performed": 0,
+  "schema": "experiment12-d0-score-control-stability-confirmation-artifact-registry",
+  "schema_version": 1,
+  "terminal_files_excluded_to_avoid_self_reference": [
+    "artifact_registry.json",
+    "run_status.json"
+  ]
+}
