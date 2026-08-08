@@ -16,4 +16,5 @@ runs/
 *.toc
 *.fls
 *.fdb_latexmk
-
+handoff/
+test-output/

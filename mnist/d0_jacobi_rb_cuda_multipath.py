@@ -34,6 +34,7 @@ from mnist.d0_jacobi_rb_cuda import (
 
 
 MULTIPATH_SCHEDULER_VERSION = "jacobi-rb-cuda-exact-multipath-v1"
+CAPTURE_PAYLOAD_SCHEMA = "jacobi-rb-cuda-exact-multipath-capture-v1"
 MAX_PATHS_PER_GROUP = 10
 SHARD_STEPS = 8
 PATH_STATE_SIZE = 28 * 28
@@ -101,6 +102,26 @@ class ExactMultipathPhaseStateRecord:
 
 
 @dataclass(frozen=True)
+class ExactMultipathCapturePayload:
+    """Read-only training rows captured without changing the exact chain.
+
+    Array axes are ``[local-step/phase, canonical-path, edge-or-cell]``.
+    The path axis is always sorted by ``path_id`` and is therefore independent
+    of the caller's input order or same-phase group schedule.  The payload is
+    deliberately absent from the scheduler's JSON evidence record.
+    """
+
+    path_ids: tuple[int, ...]
+    start_step: int
+    outer_steps: tuple[int, ...]
+    phases: tuple[int, ...]
+    later_head_fractions: np.ndarray = field(repr=False, compare=False)
+    denoising_targets: np.ndarray = field(repr=False, compare=False)
+    certificate_codes: np.ndarray = field(repr=False, compare=False)
+    post_phase_states: np.ndarray = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
 class ExactMultipathShardResult:
     """One exact eight-step shard and its restart/certificate evidence."""
 
@@ -112,6 +133,9 @@ class ExactMultipathShardResult:
     batch_final_state_sha256: str
     batch_certificate_sha256: str
     diagnostics: Mapping[str, Any]
+    capture_payload: ExactMultipathCapturePayload | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def to_record(self) -> dict[str, Any]:
         """Return the JSON-safe evidence; the device tensor stays separate."""
@@ -267,6 +291,7 @@ def run_exact_multipath_shard(
     sampler: Callable[..., Any] = sample_alpha1_rb_transition_batch_cuda,
     step_count: int = SHARD_STEPS,
     capture_phase_state_trace: bool = False,
+    capture_training_payload: bool = False,
 ) -> ExactMultipathShardResult:
     """Advance independent paths through one exact, phase-serial shard.
 
@@ -348,6 +373,9 @@ def run_exact_multipath_shard(
     prefix_blocks: list[Tensor] = []
     fallback_reason_blocks: list[Tensor] = []
     phase_state_blocks: list[Tensor] = []
+    capture_post_phase_states = bool(
+        capture_phase_state_trace or capture_training_payload
+    )
 
     started = time.perf_counter()
     for local_step in range(SHARD_STEPS):
@@ -529,7 +557,7 @@ def run_exact_multipath_shard(
             mode_blocks.append(phase_modes.detach())
             prefix_blocks.append(phase_prefixes.detach())
             fallback_reason_blocks.append(phase_fallback_reasons.detach())
-            if capture_phase_state_trace:
+            if capture_post_phase_states:
                 phase_state_blocks.append(values.detach().clone())
 
     # All materialization occurs after the complete eight-step shard.  Pack
@@ -549,7 +577,7 @@ def run_exact_multipath_shard(
     fallback_reasons_device = torch.stack(fallback_reason_blocks)
     phase_states_device = (
         torch.stack(phase_state_blocks)
-        if capture_phase_state_trace
+        if capture_post_phase_states
         else torch.empty(
             (0, path_count, PATH_STATE_SIZE),
             dtype=torch.float64,
@@ -739,6 +767,53 @@ def run_exact_multipath_shard(
         *_FORBIDDEN_DIAGNOSTICS,
     )
     scalars = dict(zip(scalar_names, scalar_values.tolist(), strict=True))
+    capture_payload: ExactMultipathCapturePayload | None = None
+    if capture_training_payload:
+        def readonly_c_contiguous(
+            array: np.ndarray, *, dtype: np.dtype[Any]
+        ) -> np.ndarray:
+            captured = np.array(array, dtype=dtype, order="C", copy=True)
+            captured.setflags(write=False)
+            return captured
+
+        captured_later = readonly_c_contiguous(
+            later_host[:, canonical_indices, :], dtype=np.dtype(np.float64)
+        )
+        captured_targets = readonly_c_contiguous(
+            target_host[:, canonical_indices, :], dtype=np.dtype(np.float64)
+        )
+        captured_codes = readonly_c_contiguous(
+            codes_host[:, canonical_indices, :], dtype=np.dtype(np.uint8)
+        )
+        captured_states = readonly_c_contiguous(
+            phase_states_host[:, canonical_indices, :],
+            dtype=np.dtype(np.float64),
+        )
+        expected_phase_count = SHARD_STEPS * len(PHASE_MATCHINGS)
+        if captured_states.shape != (
+            expected_phase_count,
+            path_count,
+            PATH_STATE_SIZE,
+        ):
+            raise AssertionError("training capture is missing post-phase states")
+        capture_payload = ExactMultipathCapturePayload(
+            path_ids=tuple(paths[index] for index in canonical_indices),
+            start_step=int(start_step),
+            outer_steps=tuple(
+                int(start_step) + local_step
+                for local_step in range(SHARD_STEPS)
+                for _phase in range(len(PHASE_MATCHINGS))
+            ),
+            phases=tuple(
+                phase
+                for _local_step in range(SHARD_STEPS)
+                for phase in range(len(PHASE_MATCHINGS))
+            ),
+            later_head_fractions=captured_later,
+            denoising_targets=captured_targets,
+            certificate_codes=captured_codes,
+            post_phase_states=captured_states,
+        )
     diagnostics: dict[str, Any] = {
         "version": MULTIPATH_SCHEDULER_VERSION,
         "path_count": path_count,
@@ -775,7 +850,7 @@ def run_exact_multipath_shard(
         "state_updates_device_resident": 1,
         "in_shard_host_roundtrip_count": 0,
         "evolving_state_host_roundtrip_count": 0,
-        "phase_state_trace_enabled": int(bool(capture_phase_state_trace)),
+        "phase_state_trace_enabled": int(capture_post_phase_states),
         "phase_state_trace_record_count": len(phase_state_records),
         "pre_shard_input_validation_synchronization_count": 1,
         "shard_summary_logical_boundary_count": 1,
@@ -803,6 +878,7 @@ def run_exact_multipath_shard(
         batch_final_state_sha256=batch_final_hash,
         batch_certificate_sha256=batch_certificate_hash,
         diagnostics=diagnostics,
+        capture_payload=capture_payload,
     )
 
 
@@ -869,8 +945,10 @@ __all__ = [
     "FROZEN_VALIDATION_GROUP_SIZES",
     "FROZEN_PROJECTION_GROUP_SIZES",
     "FROZEN_PROJECTION_PATH_COUNT",
+    "CAPTURE_PAYLOAD_SCHEMA",
     "ExactMultipathPathRecord",
     "ExactMultipathPhaseStateRecord",
+    "ExactMultipathCapturePayload",
     "ExactMultipathShardResult",
     "canonical_same_phase_transition_ids",
     "run_exact_multipath_shard",

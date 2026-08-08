@@ -1,2121 +1,313 @@
 \documentclass[11pt]{article}
-
 \usepackage[T1]{fontenc}
-\usepackage[utf8]{inputenc}
-\usepackage{lmodern}
-\usepackage[margin=1in]{geometry}
-\usepackage{amsmath,amssymb,amsthm,mathtools}
-\usepackage{bm}
-\usepackage{enumitem}
-\usepackage{booktabs}
-\usepackage{xcolor}
-\usepackage{fvextra}
-\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
-\Urlmuskip=0mu plus 1mu\relax
-
-\numberwithin{equation}{section}
-
-\newtheorem{theorem}{Theorem}[section]
-\newtheorem{proposition}[theorem]{Proposition}
-\newtheorem{lemma}[theorem]{Lemma}
-\newtheorem{assumption}[theorem]{Assumption}
-\newtheorem{remark}[theorem]{Remark}
-\newtheorem{definition}[theorem]{Definition}
-
-\newcommand{\T}{\mathbb T}
-\newcommand{\R}{\mathbb R}
-\newcommand{\E}{\mathbb E}
-\newcommand{\Pbb}{\mathbb P}
-\newcommand{\nuH}{\nu_h}
-\newcommand{\SigmaH}{\Sigma_h}
-\newcommand{\Ih}{I_h}
-\newcommand{\Eh}{\mathcal E_h}
-\newcommand{\Dh}{\mathcal D(\mathcal E_h)}
-\newcommand{\Th}{T_h}
-\newcommand{\dt}{\Delta t}
-\newcommand{\dive}{\operatorname{Div}_h}
-\newcommand{\unif}{\operatorname{unif}_h}
-\newcommand{\1}{\mathbf 1}
-\newcommand{\sha}[1]{\par\noindent{\footnotesize\ttfamily #1}\par}
-
-\title{Experiment D0: Forward-from-Data Reverse Innovation Matching\\
-\large Theory note and implementation-level patch plan}
-\author{Internal note}
-\date{\today}
-
+\usepackage{amsmath}
+\usepackage{amssymb}
 \begin{document}
-\maketitle
 
-\begin{abstract}
-This note writes the theory behind the D0 patch plan.  D0 replaces terminal-reward bridge estimation from a source/noise distribution by reverse-time learning on free forward rollouts that start at data.  The key observation is that, for the symmetric finite-volume Dirichlet--Ferguson reference process, the time reversal of the free process started from the data law is itself a time-inhomogeneous Doob transform.  Its heat potential is the forward data density relative to the grid Dirichlet law, propagated by the same free semigroup.  The recommended estimator regresses the realized reverse physical edge transfer after subtracting the known reverse reference drift; its conditional mean is the physical Doob residual in the small-step limit.  This is the finite-volume analogue of DDPM denoising, but in conservative edge coordinates and with state-dependent harmonic mobility.  Raw forward-innovation regression remains a possible full-Euler-kernel parameterization, but its mean contains the reference-drift baseline and finite-step mobility corrections and must not be identified with the Doob shift alone.
+\section*{Current Experiment 12 status}
+The active fixed-grid route is the exact Jacobi/Rao--Blackwell eager-prefix
+boundary-tangent time-local confirmation in the final section of this note.
+It keeps the certified transition and raw denoising target unchanged and
+trains on fresh one-image evidence. A pass would authorize planning, but not
+executing, a separate at-most-eight-phase controller control. The earlier
+D0-v0, density-ratio, and coarse-residual sections are retained as provenance;
+they are not current sampling instructions. No active gate in this note
+authorizes or performs a complete reverse path or image reconstruction.
 
-The continuum Doob/Girsanov construction and the Lagrangian conditioning mechanism are in \cite[Sec.~3]{main-manuscript}.  The finite-volume grid, renormalized harmonic mobility, closed form, symmetric Hunt process, grid SDE, and terminal h-transform simulation rule are in \cite[Secs.~3--7]{eulerian-manuscript}.  The C0 weighted-innovation estimator and Brownian-coordinate loss are in \cite[Secs.~6--11]{c0-note}.  The C0--C3 failure record motivating D0 is summarized in \cite[Secs.~4--8]{experiment11-report}.
-\end{abstract}
+\section{The D0-v0 fixed-grid model}
 
-\tableofcontents
+\paragraph{Scope.}
+D0-v0 is a practical positive-time model on a fixed $28\times28$ simplex.
+It does not claim a nonsingular continuum or time-zero limit. Its first
+milestone is deliberately only the reconstruction of one MNIST image.
 
-\section{Purpose of the D0 patch}
-
-The original Level C program asked for a class-conditional Eulerian h-transform sampler on the MNIST mass simplex.  The previous estimators tried to learn a conditional law of the free reference process given that a terminal state looked digit-like.  In practice the free reference endpoints did not overlap the digit manifold: high-weight terminals were still noise blobs, C0 produced an almost zero learned/noise ratio, C1 suffered Girsanov effective-sample-size collapse, branch methods learned noise-level fluctuations, and the scalar value method learned a smooth value without producing a useful edge-gradient generator \cite[Secs.~4--8]{experiment11-report}.
-
-D0 changes the measure on which the reverse field is learned.  Every training path starts at a lambda-floored data image and is then noised by the free conservative finite-volume dynamics.  For the theory baseline, the regression target is the realized reverse physical transfer with the known reverse reference drift removed, conditioned on the later state.  Thus the high-signal regime near data is actually sampled, rather than being reached only through an exponentially rare terminal event.
-
-The central claim is:
-\begin{quote}
-\emph{D0 is not an abandonment of the h-transform program.  It is the h-transform whose terminal datum is the data density relative to the finite-volume reference law, propagated forward from data rather than estimated backward from a rare terminal reward.}
-\end{quote}
-
-\section{Finite-volume background}
-
-This section fixes notation.  It is intentionally short; the detailed construction, closedness, Mosco program, boundary handling, and exact h-transform simulation rule are in \cite{eulerian-manuscript}.  The infinite-dimensional Doob transform behind the construction is in \cite{main-manuscript}.
-
-\subsection{Grid state space and conservative incidence}
-
-Let \(h=1/n\), let
+\paragraph{Reference and reversal.}
+Let $\nu$ be the symmetric Dirichlet reference with concentration
+$\alpha_{\mathrm{eff}}=1$ per cell, and let $p_\tau$ be the positive-time
+forward marginal. On the finite grid, write
 \[
-  \Ih = \{0,1,\ldots,n-1\}^d
+  v_\tau(s)=\frac{dp_\tau}{d\nu}(s),
+  \qquad f_\tau(s)=\log v_\tau(s).
 \]
-with periodic indexing, and let \(\SigmaH\) be the probability simplex
+For the reversible reference process, the conditioning part of the reverse
+flux on an oriented edge $i\to j$ is
 \[
-  \SigmaH=\left\{s=(s_i)_{i\in\Ih}: s_i\ge 0,\quad \sum_{i\in\Ih}s_i=1\right\}.
+  J^{\mathrm{cond}}_{ij}
+  =2N\,a(\tau)\,\theta_{ij}(s)
+    \left(\partial_{s_j}f_\tau-\partial_{s_i}f_\tau\right),
 \]
-The reconstructed measure is
+where $N=28^2$, $\theta$ is the established harmonic mobility, and $a$ is the
+reference time-change rate. The existing limiter-aware reverse kernel adds
+this flux to the known reversible drift and shared reference noise.
+
+\paragraph{Density-ratio learning.}
+At a matched $(\tau,y)$, positives are forward-noised states from the single
+image and negatives are independent samples from
+$\operatorname{Dirichlet}(\alpha_{\mathrm{eff}}\mathbf 1)$. A balanced
+logistic classifier has population logit $f_\tau$ up to the balanced class
+constant. The implementation uses the existing boundary-smooth scalar
+potential with the normalized spatial-mean head. Sampling differentiates the
+raw logit with respect to the simplex state and converts it to physical flux.
+
+\paragraph{Time-zero convention.}
+MNIST data are singular and sparse at time zero. Training excludes time zero,
+and reverse sampling stops before the final zero-time substep. D0-v0 therefore
+tests only the fixed-grid positive-time construction.
+
+\paragraph{Decision rule.}
+The first production run is evaluated once against coarse gates for finite
+simplex-preserving sampling, held-out density-ratio BCE, correlation
+improvement, and relative $L^1$ reduction. Failure publishes the samples and
+summary and stops. It does not authorize seed searches, estimator changes, or
+threshold optimization.
+
+\paragraph{Deferred work.}
+Exact Jacobi targets, certification and replay workflows, continuum
+refinement, full-MNIST training, class priors, guidance, additional seeds, and
+micro-accuracy metric optimization are outside D0-v0. The pre-v0 theory is
+preserved in the repository's documentation archive.
+
+\section{Exact Jacobi/Rao--Blackwell coarse-residual gate}
+
+\paragraph{Restricted fixed-grid claim.}
+The additive Jacobi investigation keeps the grid at $28\times28$,
+$K=512$, and the certified Rao--Blackwell label $\bar Z$. Its terminal
+coarse witness uses two independent 64-path panels and detects
 \[
-  I_h(s)=\sum_{i\in\Ih}s_i\delta_{x_i^h}.
+  S=\operatorname{mean}_{c}(a_cb_c)
+   =0.0006484248701021389>0,
 \]
-A positively oriented edge is \(e=(i,\ell)\), with tail \(i\) and head \(j=i+e_\ell\).  For smooth \(F:\SigmaH\to\R\), define
-\begin{equation}\label{eq:edge-derivative-d0}
-  \partial_e^h F(s)=\frac{\partial_{s_j}F(s)-\partial_{s_i}F(s)}{h}.
-\end{equation}
-For an edge flux \(J=(J_{i,\ell})\), use the conservative incidence convention
-\begin{equation}\label{eq:incidence-d0}
-  (\dive J)_p=\sum_{\ell=1}^d J_{p-e_\ell,\ell}-\sum_{\ell=1}^d J_{p,\ell}.
-\end{equation}
-A positive edge flux moves mass from the tail to the head.  The state update is
+where $c$ indexes reverse-time quartile, split phase, and oriented edge.
+This is evidence for a nonzero coarse conditional mean for one frozen image,
+not a continuum or reconstruction result.
+
+\paragraph{Frozen shrinkage baseline.}
+With $a$ and $b$ the two panel means, define
 \[
-  \dot s=\dive J.
+  N=\frac12\operatorname{mean}_{c}(a_c-b_c)^2,\qquad
+  \lambda=\frac{S}{S+N/2},\qquad
+  B_c=\lambda\frac{a_c+b_c}{2}.
 \]
-This convention matches the finite-volume simulation rule in \cite[Sec.~7.4]{eulerian-manuscript}.
+Numerically, $N=0.00315904482822984$,
+$\lambda=0.2910413880506186$, and
+$\operatorname{mean}(B^2)=0.00018871847424106853$. The rule is frozen
+before fresh neural evidence is generated and retains every signed cell
+value.
 
-\subsection{Renormalized harmonic mobility}
-
-The finite-volume program uses the renormalized harmonic mobility
-\begin{equation}\label{eq:theta-d0}
-  \theta_e(s)=\theta^h_{i,\ell}(s)=\frac{2\alpha_h+1}{\alpha_h}\frac{s_i s_j}{s_i+s_j},
-  \qquad \alpha_h=\beta h^d,
-\end{equation}
-with value zero if \(s_i=s_j=0\).  The code sometimes uses a legacy fixed value \(\bar \alpha=1\) in place of \(\alpha_h\).  At a fixed grid this defines a legitimate practical reference, and the formulas below remain meaningful with that effective parameter.  It does not, however, keep \(\beta\) fixed as the grid is refined.  The Dirichlet--Ferguson scaling and finite-volume convergence claims refer specifically to \(\alpha_h=\beta h^d\); a fixed-\(\bar\alpha\) experiment must be labelled fixed-grid unless a separate refinement argument is supplied \cite[Secs.~4--6]{eulerian-manuscript}.
-
-It is useful to write
-\begin{equation}\label{eq:R-d0}
-  R(a,b)=\begin{cases}
-  \dfrac{a-b}{a+b},&a+b>0,\\[0.5em]
-  0,&a=b=0.
-  \end{cases}
-\end{equation}
-The canonical free Dirichlet drift edge flux is
-\begin{equation}\label{eq:canonical-drift-flux-d0}
-  b_e^0(s)=\frac{2\alpha_h+1}{h^2}R(s_i,s_j).
-\end{equation}
-The closed-form SDE and its boundary rules are derived in \cite[Sec.~6]{eulerian-manuscript}.
-
-\subsection{The symmetric reference process}
-
-The clean D0 theory uses a \(\nu_h\)-symmetric reference process.  Let \(\nu_h\) be the grid Dirichlet law
+\paragraph{Unchanged denoising objective.}
+The new model has the form
 \[
-  \nu_h=\operatorname{Dir}\bigl((\beta h^d)_{i\in\Ih}\bigr),
+  g_\theta(W)=B(C(W))+r_\theta(W)
 \]
-and let \(L_h\) be the generator of the closed symmetric form \((\mathcal E_h,\mathcal D(\mathcal E_h))\).  In edge coordinates the canonical process can be written formally as
-\begin{equation}\label{eq:canonical-edge-flux-d0}
-  dK_e(t)=b_e^0(S_t)\,dt+\frac{\sqrt{2\theta_e(S_t)}}{h}\,dW_e(t),
-  \qquad dS_t=\dive dK(t).
-\end{equation}
-
-For numerical calibration it is often convenient to use a time-change or noise schedule.  The exact symmetric version is
-\begin{equation}\label{eq:symmetric-scaled-reference-d0}
-  dK_e(t)=a(t)b_e^0(S_t)\,dt+\sqrt{a(t)}\frac{\sqrt{2\theta_e(S_t)}}{h}\,dW_e(t),
-  \qquad a(t)>0.
-\end{equation}
-Equivalently, if the code parameter is \(w_\sigma(t)\), then exact symmetry corresponds to
-\begin{equation}\label{eq:symmetry-scaling-condition-d0}
-  a(t)=w_\sigma(t)^2,\qquad w_{\mathrm{free}}(t)=w_\sigma(t)^2.
-\end{equation}
-A code path that independently chooses \(w_{\mathrm{free}}\) and \(w_\sigma\) still has a well-defined Euler kernel and a valid conditional-innovation regression target, but the exact identification of the reverse dynamics with a \(\nu_h\)-symmetric h-transform is then no longer literal.  In that case the experiment should be reported as learning the reverse kernel of the chosen practical Euler reference.
-
-\section{Standard terminal h-transform at fixed grid size}
-
-For comparison with D0, recall the ordinary terminal h-transform.  Let \(g_h:\SigmaH\to(0,\infty)\) be bounded above and below away from zero.  Let \(T_h(t)=e^{tL_h}\) denote the free semigroup and set
-\begin{equation}\label{eq:ordinary-h-potential-d0}
-  u_t^h(s)=T_h(T-t)g_h(s).
-\end{equation}
-Then \(u_t^h\) solves the backward heat equation \(\partial_tu_t^h+L_hu_t^h=0\), \(u_T^h=g_h\).  The tilted path law from time \(\tau\) and state \(s\) is
-\begin{equation}\label{eq:ordinary-tilted-law-d0}
-  \frac{d\widetilde {\Pbb}^{h}_{\tau,s}}{d\Pbb^{h}_{\tau,s}}\Big|_{\mathcal F_T}
-  =\frac{g_h(S_T)}{u^h_\tau(s)}.
-\end{equation}
-The h-transform keeps the same edge noise and adds the Brownian-coordinate shift
-\begin{equation}\label{eq:brownian-shift-d0}
-  \eta_e^u(t,s)=w_\sigma(t)\sqrt{2\theta_e(s)}\,\partial_e^h\log u_t^h(s).
-\end{equation}
-In physical edge-flux coordinates this is
-\begin{equation}\label{eq:physical-conditioning-flux-d0}
-  J_e^u(t,s)=\sigma_e(t,s)\eta_e^u(t,s)
-  =\frac{2w_\sigma(t)^2}{h}\theta_e(s)\partial_e^h\log u_t^h(s),
-\end{equation}
-where \(\sigma_e(t,s)=w_\sigma(t)\sqrt{2\theta_e(s)}/h\).  This is the finite-volume conditioning flux from \cite[Sec.~7]{eulerian-manuscript}.  The C0 note uses the same Brownian-coordinate shift in its weighted innovation identity \cite[Secs.~6--8]{c0-note}.
-
-The problem with C0--C3 was not the validity of \eqref{eq:brownian-shift-d0}.  It was the proposal measure: under free rollouts from the low-frequency source, the terminal digit event had negligible probability, so terminal weighting and branch weighting estimated a real but practically uninformative conditional mean \cite[Secs.~4--8]{experiment11-report}.
-
-\section{D0 as a data-density h-transform}
-
-\subsection{Data initialization and the density convention}
-
-For each class label \(y\), let \(\mathcal A_y\) be the set of normalized MNIST training images with that label.  D0 uses the lambda-floored data convention
-\begin{equation}\label{eq:data-floor-d0}
-  S_0=(1-\lambda)a+\lambda\unif,
-  \qquad a\in\mathcal A_y,
-  \qquad (\unif)_i=|\Ih|^{-1},
-\end{equation}
-where \(0<\lambda<1\) is fixed once and used consistently in rollouts, previews, feature computations, and evaluation.
-
-The floor has two roles.  First, it is an implementation convention defining the target distribution.  Second, it avoids the frozen-edge pathology \(\theta_e(s)=0\) on edges whose two endpoint masses are zero.  With \(\lambda>0\), every data-start state lies in the simplex interior.
-
-There is a measure-theoretic qualification.  An empirical data distribution is still singular with respect to \(\nu_h\), even after adding a uniform floor, because it is a finite mixture of point masses.  The exact density h-transform statement below therefore requires one of the following regularizations:
-\begin{enumerate}[label=\textup{(D\arabic*)},leftmargin=2.4em]
-  \item replace the empirical data law by a small smooth density \(v_0^y\nu_h\) concentrated near the floored data images;
-  \item or start the theoretical density identity at a small positive time \(t_{\min}>0\), where the free noising kernel has regularized the initial law.
-\end{enumerate}
-Directly sampling \eqref{eq:data-floor-d0} is a useful empirical approximation, but it is not by itself either regularization.  Results from time zero must therefore be reported as a discrete-data reverse-kernel experiment unless convergence from a specified smoothing or from \(t_{\min}>0\) is checked.
-
-\subsection{Forward density and reverse transition}
-
-Assume first that the class-conditional initial law is
+and minimizes
 \[
-  p_0^y(ds)=v_0^y(s)\nu_h(ds),\qquad v_0^y\ge0,\quad \int v_0^y\,d\nu_h=1.
-\]
-Let \(p_t^y\) be the law at forward time \(t\) under the symmetric free reference process, and write
-\begin{equation}\label{eq:forward-density-d0}
-  p_t^y(ds)=v_t^y(s)\nu_h(ds),
-  \qquad v_t^y=T_h(t)v_0^y
-\end{equation}
-for a time-homogeneous reference.  For a time-inhomogeneous symmetric time-change \(a(t)L_h\), replace \(T_h(t)\) by the corresponding forward propagator.
-
-Define the reversed path
-\[
-  Y_\tau=S_{T-\tau},\qquad 0\le \tau\le T.
-\]
-Then \(Y_0\sim p_T^y\) and \(Y_T\sim p_0^y\).  By \(\nu_h\)-symmetry, the reverse transition from \(\tau\) to \(\tau+\delta\) is
-\begin{equation}\label{eq:reverse-transition-d0}
-  \widetilde T^y_{\tau,\tau+\delta}F(s)
-  =\frac{1}{v_{T-\tau}^y(s)}
-  T_h(\delta)\bigl(v_{T-\tau-\delta}^yF\bigr)(s)+o(\delta),
-\end{equation}
-with the obvious exact propagator version in the time-inhomogeneous case.  Thus the reverse process is a time-inhomogeneous Doob transform of the same free reference with heat potential
-\begin{equation}\label{eq:data-heat-potential-d0}
-  h_\tau^y(s)=v_{T-\tau}^y(s).
-\end{equation}
-Indeed \(h_\tau^y\) solves the backward equation in reverse time,
-\[
-  \partial_\tau h_\tau^y+L_hh_\tau^y=0.
-\]
-Consequently the reverse Brownian-coordinate h-transform shift is
-\begin{equation}\label{eq:eta-rev-d0}
-  \eta_{\mathrm{rev},e}^y(\tau,s)
-  =w_\sigma(T-\tau)\sqrt{2\theta_e(s)}\,\partial_e^h\log v_{T-\tau}^y(s).
-\end{equation}
-The associated physical conditioning flux is
-\begin{equation}\label{eq:reverse-physical-flux-d0}
-  J_{\mathrm{rev},e}^y(\tau,s)
-  =\frac{2w_\sigma(T-\tau)^2}{h}\theta_e(s)\partial_e^h\log v_{T-\tau}^y(s).
-\end{equation}
-This is the same object class as the usual terminal h-transform flux \eqref{eq:physical-conditioning-flux-d0}; the only change is the choice of terminal datum.  In C0--C3, the heat potential was generated from a terminal preference/reward and had to be estimated in a rare-event region.  In D0, the potential is the data density propagated by the forward noising process, so its high-signal region is directly populated by training trajectories.
-
-\begin{proposition}[D0 reverse law as a Doob transform]\label{prop:d0-reverse-doob}
-Under the symmetric reference assumption \eqref{eq:symmetric-scaled-reference-d0} and the density convention above, the time reversal of the free process started from the class-conditional data law is the h-transform with space-time potential \(h_\tau^y=v_{T-\tau}^y\).  Its Brownian edge shift is \eqref{eq:eta-rev-d0}, and its physical conservative edge flux is \eqref{eq:reverse-physical-flux-d0}.
-\end{proposition}
-
-\begin{proof}
-For simplicity write the homogeneous case.  Let \(p_\delta(s,s')\nu_h(ds')\) be the transition kernel of the \(\nu_h\)-symmetric free process.  Bayes' formula gives
-\[
-  \Pbb(Y_{\tau+\delta}\in ds'\mid Y_\tau=s,Y\text{ label}=y)
-  =\frac{p_\delta(s',s)v_{T-\tau-\delta}^y(s')\nu_h(ds')}{v_{T-\tau}^y(s)}.
-\]
-Symmetry gives \(p_\delta(s',s)=p_\delta(s,s')\), which yields \eqref{eq:reverse-transition-d0}.  Differentiating the h-transform transition family at \(\delta=0\) gives the generator \(L_h+2\Gamma_h(\log h_\tau^y,\cdot)\).  In edge Brownian coordinates this is exactly the Girsanov shift \eqref{eq:eta-rev-d0}; converting to physical edge flux using \(\sigma_e=w_\sigma\sqrt{2\theta_e}/h\) gives \eqref{eq:reverse-physical-flux-d0}.  The same argument applies to a symmetric time-inhomogeneous time-change after replacing \(T_h(\delta)\) by the short-time propagator.
-\end{proof}
-
-\section{Unweighted reverse physical-residual matching}
-
-\subsection{Forward rollout cache}
-
-For each cached trajectory:
-\begin{enumerate}[label=\textup{(C\arabic*)},leftmargin=2.4em]
-  \item sample a label \(y\) and a floored data start \(S_0=(1-\lambda)a+\lambda\unif\), \(a\in\mathcal A_y\);
-  \item simulate the free reference process with learned control exactly zero;
-  \item store the realized physical edge transfer \(\Delta K^{\mathrm{app}}_{k,e}\) actually passed to the conservative incidence update, together with the raw Gaussian innovation \(\xi_{k,e}\) for diagnostics and the qualified alternative below;
-  \item store the per-edge limiter/mobility validity mask and aggregate floor-touched counts plus floor/renormalization correction magnitudes, but do not condition the physical-residual loss on whether a random intervention occurred.
-\end{enumerate}
-
-The strict baseline uses one elementary substep, \(r=1\).  Its realized reverse transfer is
-\begin{equation}\label{eq:realized-reverse-transfer-d0}
-  R_{k,e}=-\Delta K^{\mathrm{app}}_{k,e},
-\end{equation}
-because \(S_k=S_{k+1}+\dive R_k\) whenever no nonconservative repair is applied after the incidence update.  Write \(b_{k}^{\mathrm{ref}}(s)\) and \(\sigma_k^{\mathrm{ref}}(s)\) for the coefficients assigned by the implemented schedule to the forward interval \([t_k,t_{k+1}]\).  Their spatial arguments are evaluated at the later state.  Define the physical Doob-residual target
-\begin{equation}\label{eq:physical-residual-target-d0}
-  U_{k,e}=R_{k,e}
-  -b_{k,e}^{\mathrm{ref}}(S_{k+1})\Delta t.
-\end{equation}
-For numerical conditioning choose one positive run-level scalar \(c_U\), fixed across states and edges, and define
-\begin{equation}\label{eq:scaled-residual-target-d0}
-  \widehat U_k=\Pi_{\mathrm{inc}}U_k,
+  \frac{\operatorname{mean}
+    \bigl(B(C(W))+r_\theta(W)-\bar Z\bigr)^2}{c^2},
   \qquad
-  \widetilde U_{k,e}=\widehat U_{k,e}/c_U,
-\end{equation}
-where \(\Pi_{\mathrm{inc}}\) is the orthogonal projection onto the incidence-relevant edge subspace.  Unless explicitly overridden, the current implementation infers \(c_U\) once as the global root-mean-square of \(\widehat U\) on the initial cache, applies a declared positive floor, and then freezes that value across cache refreshes.  This deterministic rescaling preserves the projected conditional mean and keeps sampler units stable over a run.  State-dependent whitening by \(\sigma_e^{\mathrm{ref}}\sqrt{\Delta t}\) is a possible later variant, but it is not the implemented target and requires an explicit low-mobility convention.
-
-The baseline D0 cache slice is keyed at the later state:
-\begin{equation}\label{eq:d0-cache-slice}
-  \left(S_{k+1},\; \tau_{k+1}=T-t_{k+1},\; y,\; R_k,\; U_k,\; \widehat U_k,\; \widetilde U_k\right),
-\end{equation}
-as a logical training slice, with a finite-value mask only if required for numerical safety.  The current NPZ stores \(R_k\), the interval index/schedule, later state, and \(c_U\); together with the adjacent run dynamics configuration, these derive \(U_k\), \(\widehat U_k\), and \(\widetilde U_k\) when summarizing or batching rather than duplicating those tensors.  Limiter and floor events are reported rather than selected away: conditioning on a random ``no intervention'' event would learn a selected transition law.  There is no terminal reward, no log weight, and no source variable as a model input.  The original data image \(a\), raw \(\xi_k\), intervention flags, and terminal state may be stored for diagnostics but are not model inputs.
-
-This reuses C0's exact-substep bookkeeping but changes the supervised object.  C0 stored raw innovations, keyed them at the earlier state, and trained with self-normalized terminal weights \cite[Secs.~8--11]{c0-note}.  D0 keys realized reverse physical residuals at the later state and deletes the terminal weights.
-
-\subsection{Population regression identity}
-
-Let \(X=(\tau_{k+1},S_{k+1},y)\) be the model input for a D0 slice.  For any measurable predictor \(u=(u_e)_e\), define the population loss
-\begin{equation}\label{eq:population-d0-loss}
-  \mathcal L_{\mathrm{D0}}(u)=
-  \E\left[\sum_e |u_e(X)-\widetilde U_{k,e}|^2\right],
-\end{equation}
-where the expectation is over the unweighted forward-from-data rollout law.  Then the minimizer is the conditional mean
-\begin{equation}\label{eq:conditional-mean-target-d0}
-  u_e^\star(\tau_{k+1},s,y)=\E\left[\widetilde U_{k,e}\mid S_{k+1}=s,\;Y=y\right].
-\end{equation}
-For the symmetric reference, in the small-step limit and away from limiter/floor interventions,
-\begin{align}
-  \E[\widehat U_k\mid S_{k+1}=s,Y=y]
-  &=\Pi_{\mathrm{inc}}J_{\mathrm{rev}}^y(\tau_{k+1},s)\Delta t+o(\Delta t),
-  \label{eq:physical-residual-identity-d0}\\
-  u^\star(\tau_{k+1},s,y)
-  &=c_U^{-1}\Pi_{\mathrm{inc}}J_{\mathrm{rev}}^y(\tau_{k+1},s)\Delta t+o(\Delta t).
-  \label{eq:scaled-residual-identity-d0}
-\end{align}
-The sign is positive because \(R_k=-\Delta K_k^{\mathrm{app}}\) is already oriented in increasing reverse time.  Edge-cycle components lie in the null space of \(\dive\) and are not specified by the h-transform; the displayed identities therefore concern the projected, state-changing edge field actually used by the implementation.
-
-\begin{proof}[Proof sketch]
-Equation \eqref{eq:conditional-mean-target-d0} is the standard \(L^2\)-projection identity.  Proposition~\ref{prop:d0-reverse-doob} gives reverse physical drift \(b^{\mathrm{ref}}+J_{\mathrm{rev}}\).  Applying \(\Pi_{\mathrm{inc}}\) to the realized reverse transfer and subtracting the projected known reference term gives \eqref{eq:physical-residual-identity-d0}; division by the fixed scalar \(c_U\) gives \eqref{eq:scaled-residual-identity-d0}.  State-dependent mobility affects the finite-step remainder, which is why the equality is asymptotic rather than an exact identity for the implemented Euler kernel.
-\end{proof}
-
-\subsection{Qualified raw-innovation alternative}
-
-Raw forward-innovation regression can still parameterize the full reverse Euler kernel, but it is not a regression of the Doob shift alone.  Suppose one uses the subtract-forward update
-\begin{equation}\label{eq:subtract-forward-alternative-d0}
-  s_{\mathrm{new}}=s-
-  \dive\left[b^{\mathrm{ref}}(t,s)\Delta t
-  +
-  \sigma^{\mathrm{ref}}(t,s)\sqrt{\Delta t}\,(m_{\mathrm{full}}(t,s,y)+\zeta)\right].
-\end{equation}
-On a valid edge with coefficients frozen at \(s\), matching the reverse drift \(b^{\mathrm{ref}}+J_{\mathrm{rev}}\) requires
-\begin{equation}\label{eq:full-innovation-mean-d0}
-  m_{\mathrm{full},e}
-  =-\sqrt{\Delta t}\left(
-  \frac{2b_e^{\mathrm{ref}}}{\sigma_e^{\mathrm{ref}}}
-  +\eta_{\mathrm{rev},e}\right)+o(\sqrt{\Delta t}).
-\end{equation}
-Thus \(\E[\xi_k\mid S_{k+1},y]\) contains a nonzero reference-reversal baseline even when \(v\equiv1\), as well as finite-step state-dependent-mobility corrections.  The earlier identification \(\E[\xi_k\mid S_{k+1},y]\approx-\sqrt{\Delta t}\eta_{\mathrm{rev}}\) is therefore not valid when \(b^{\mathrm{ref}}\ne0\).  This full-kernel alternative may be kept as an ablation, but it should use a distinct target-space name and must not be reported as direct Doob-residual matching.
-
-\subsection{Training loss}
-
-The recommended network head predicts the globally scaled physical residual mean:
-\[
-  u_\theta(\tau,s,y)\in\R^{d\times n\times n}.
+  c^2=\operatorname{mean}_{\rm train}\bar Z^2.
 \]
-For a cached slice, project target and prediction onto the incidence-relevant edge subspace and use the per-slice loss
-\begin{equation}\label{eq:masked-d0-loss}
-  \ell_{\mathrm{D0}}(\theta)=
-  \frac{1}{|E_h|}\sum_e\left|u_{\theta,e}(\tau_{k+1},S_{k+1},y)-\widetilde U_{k,e}\right|^2.
-\end{equation}
-The full training objective is
-\begin{equation}\label{eq:d0-training-objective}
-  L_{\mathrm{D0}}(\theta)=\E_{\mathrm{cache}}[\ell_{\mathrm{D0}}(\theta)]
-  +\lambda_m\E_{\mathrm{cache}}\left[
-  \frac{1}{|E_h|}\sum_e|u_{\theta,e}(\tau,S,y)|^2
-  \right].
-\end{equation}
-For the exact conditional-mean baseline set \(\lambda_m=0\).  A positive output penalty changes the population minimizer by shrinking it, so it is an ablation rather than harmless regularization.  Parameter-space AdamW weight decay, gradient clipping, EMA weights, cache refresh, raw innovation diagnostics, and finite-value safety masks can be retained.  Intervention masks remain diagnostics.  There are no self-normalized sample weights.
+Thus the baseline is an initialization and control variate, not a replacement
+target. The exact label is not clipped, weighted, residualized on disk, or
+otherwise modified. Both residual output paths start at exactly zero, so
+update zero equals the frozen baseline.
 
-\section{Reverse sampler}
-
-\subsection{One-step sampler}
-
-The controlled initialization for the first D0 experiments is the terminal bank
-\begin{equation}\label{eq:prior-bank-d0}
-  S_K\sim p_T^y,
-\end{equation}
-obtained by storing terminal states of the same calibrated forward discretization used to build the cache.  This removes initial-law mismatch from a test of the reverse field.  It is an empirical, generally class-conditional sample from \(p_T^y\), not an analytic DDPM prior and not automatically a sample from \(\nu_h\).  A DDPM-like prior claim requires a separate mixing test showing that \(p_T^y\) is label-independent and close to the proposed known prior.
-
-Take stride \(r=1\).  Suppose the current reverse state is \(s=S_{k+1}\), at reverse time \(\tau_{k+1}=T-t_{k+1}\).  Draw independent fresh noises \(\zeta_e\sim N(0,1)\) and form the direct reverse transfer
-\begin{equation}\label{eq:direct-reverse-transfer-d0}
-  \Delta K_e^{\mathrm{rev}}=
-  b_{k,e}^{\mathrm{ref}}(s)\Delta t
-  +c_Uu_{\theta,e}(\tau_{k+1},s,y)
-  +\sigma_{k,e}^{\mathrm{ref}}(s)\sqrt{\Delta t}\,\zeta_e.
-\end{equation}
-Advance in increasing reverse time with the same positive incidence convention:
-\begin{equation}\label{eq:direct-reverse-state-update-d0}
-  s_{\mathrm{new}}=s+\dive(\Delta K^{\mathrm{rev}}).
-\end{equation}
-This exposes the known positive reverse reference drift and learns only the Doob residual.  Evaluating coefficients at the later state is first-order consistent with the continuous reverse diffusion.  The fresh identity Brownian field implements the reference diffusion coefficient; it is not a claim that the finite-step conditional covariance of the stored forward innovation is pointwise the identity, or even pointwise smaller than the identity, for nonlinear state-dependent mobility.
-
-A feasibility limiter may still be needed numerically, but applying the same named limiter in the two directions does not make the limited Euler kernel Bayes reversible.  The h-transform interpretation therefore requires limiter and floor/renormalization intervention rates to vanish under substep refinement.  If they remain material, the experiment learns a practical limited-kernel reverse process and must be labelled accordingly.
-
-\subsection{Block stride}
-
-The theory-lock baseline is exact-substep caching and \(r=1\).  For \(r>1\), a physical block target must subtract the known reverse reference drift at every actual intermediate state and schedule index:
-\begin{equation}\label{eq:block-physical-residual-d0}
-  U_k^{(r)}=-\sum_{q=0}^{r-1}\Delta K_{k+q}^{\mathrm{app}}
-  -\sum_{q=0}^{r-1}b_{k+q}^{\mathrm{ref}}(S_{k+q+1})\Delta t.
-\end{equation}
-Conditioning this total only on \(S_{k+r}\), then distributing a predicted mean uniformly over \(r\) reverse substeps, is a coarse-kernel approximation; it is not implied by the one-step h-transform identity when the field, mobility, or schedule changes within the block.  Promote strides \(r=4\) and then \(r=8\) only after \(r=1\) passes, with reverse schedule indices applied in the order \(k+r-1,\ldots,k\) and with explicit no-degradation tests.
-
-\subsection{State-dependent mobility and finite-step corrections}
-
-The closed symmetric reference generator already fixes the complete free drift associated with the state-dependent harmonic mobility.  In the direct sampler, that known reverse reference drift is included explicitly and the learned term estimates the additional physical Doob flux.  At finite Euler step size, freezing coefficients at the later state and applying any limiter produce discretization-dependent corrections in \(U_k\).  Those corrections are not part of the continuum Doob field.  They must be controlled by exact-substep tests and \(\Delta t\)-refinement rather than justified by saying that a raw conditional innovation automatically absorbs them.
-
-\section{Diagnostics and calibration}
-
-D0 should start with diagnostics before training a model.  These diagnostics are part of the theory because the reverse h-transform interpretation assumes that the forward noising law actually connects data to a usable terminal prior without being dominated by numerical clipping.
-
-\subsection{Phase 0: noising calibration}
-
-Run free forward noising from floored data starts and log:
-\begin{enumerate}[label=\textup{(P0.\arabic*)},leftmargin=2.9em]
-  \item preview grids of \(S_k\) at \(k\in\{0,K/8,K/4,\ldots,K\}\);
-  \item digit destruction curves: feature distance \(D_h(S_k,S_0)^2\), pixel correlation with \(S_0\), entropy, total variation, high-frequency/checkerboard energy;
-  \item numerical health: clip fraction, mobility-threshold masked fraction, and frozen-edge fraction;
-  \item a schedule sweep over \(w_\sigma\), \(K\), \(\lambda\), and, if kept, \(w_{\mathrm{free}}\).
-\end{enumerate}
-The gate is: by time \(T\), digit correlation should be near zero and entropy near its terminal plateau, while limiter and floor intervention rates are small and decrease under substep refinement.  A fixed-grid practical-kernel experiment may set a declared nonzero intervention tolerance; the strict h-transform baseline requires the intervention rate to be statistically indistinguishable from zero.  If no schedule destroys digits without intervention blowup, the limiter, substepping, or symmetry-compatible scaling should be fixed before training.
-
-\subsection{Acceptance tests}
-
-The first D0 training runs should be ordered as follows.
-\begin{enumerate}[leftmargin=2.0em]
-  \item \textbf{Zero-residual reference test.}  Start from \(\nu_h\) and run the direct reverse reference with \(u_\theta\equiv0\).  At a fixed grid it must preserve reference-law observables, and discrepancies must decrease under \(\Delta t\)-refinement.  Moment checks should include exact Dirichlet expectations and paired initial-to-terminal drift, not only comparison with one independent reference bank, whose sampling fluctuation can hide a common discretization bias.  This catches a wrong drift sign before training.
-  \item \textbf{Overfit-one-image smoke test.}  Train on a single floored digit at \(r=1\) and initialize from that digit's forward terminal bank.  The reverse sampler must reconstruct the same digit before a full-data run is justified.  If the independent cache and optimization controls pass but the held-out residual objective does not improve, the failure is evidence that the chosen pathwise label is not learnable at that budget; it is not by itself proof of a sign or incidence bug.
-  \item \textbf{Held-out forward reconstruction.}  Take a held-out forward path, start at its exact terminal state, and verify that reverse sampling reforms a same-class digit.  This tests the learned field without prior mismatch.
-  \item \textbf{Per-time-bin signal.}  Plot target RMS, residual RMS, and learned/noise step ratio by time bin.  Unlike C0's nearly flat zero signal, D0 should show strong time dependence, with largest signal near the data end.
-  \item \textbf{Sampler ablations.}  Compare deterministic reverse drift only, fresh-noise stochastic reverse, and control-strength sweeps.  The honest setting is strength one.  A source-initialized C0 comparison requires an explicit common cache adapter; the current D0 implementation has no rollout-initialization switch.
-\end{enumerate}
-
-\section{Positive-time implicit score after pathwise regression failure}
-\label{sec:implicit-score}
-
-The production block-residual studies provide a useful negative result.  The
-elementary one-image task did not beat its zero predictor.  A larger independent
-confirmation then tested five exact aggregation lengths with 128 paths and five
-model seeds.  Its cache arithmetic and deterministic teacher passed, but no
-stride beat the frozen training-only time-bin predictor on untouched audit
-paths.  In particular, the apparent signal at the coarsest stride was explained
-by time dependence rather than reproducible state dependence.  The confirmation
-therefore closed with no confirmed conditional-mean signal and did not authorize
-a sampler.
-
-This does not imply that the positive-time marginal lacks a relative score.
-It says that a noisy realized transfer is an ineffective supervised label for
-that score under the tested conditioning and evidence budget.  A symmetric
-Dirichlet form gives an alternative estimator that uses only marginal state
-samples.
-
-\subsection{Dirichlet-form score identity}
-
-Fix a positive forward time \(t>0\), a label \(y\), and write
-\(p_t^y=d\mu_t^y/d\nu_h\) whenever this density exists.  Put
-\(f_t^y=\log p_t^y\).  For the symmetric reference generator \(L_h\), with
-carr\'e du champ \(\Gamma_h\), integration by parts gives
-\begin{equation}\label{eq:implicit-score-objective}
-  \mathcal J_t(f)
-  :=\E_{\mu_t^y}\!\left[\Gamma_h(f,f)+2L_hf\right]
-  =\E_{\mu_t^y}\!\left[\Gamma_h(f-f_t^y,f-f_t^y)\right]+C_t,
-\end{equation}
-where \(C_t\) is independent of \(f\).  Thus a minimizer recovers the relative
-score modulo the usual additive, time-dependent gauge.  Unlike the block target,
-Eq.~\eqref{eq:implicit-score-objective} contains no realized reverse-transfer
-label and no conditional first-moment regression.
-
-Let \(N=n^2\), orient the two positive periodic edges from each grid cell, and
-write
+\paragraph{Fresh paired-risk decision.}
+After validation-only checkpoint selection, one untouched 64-path panel
+reports
 \[
-  r_e(f)=\partial_{s_{\mathrm{head}(e)}}f-
-          \partial_{s_{\mathrm{tail}(e)}}f,
-  \qquad
-  R_e(s)=\frac{s_{\mathrm{tail}(e)}-s_{\mathrm{head}(e)}}
-               {s_{\mathrm{head}(e)}+s_{\mathrm{tail}(e)}}.
+ \Delta_B=R(0)-R(B),\qquad
+ \Delta_R=R(B)-R(B+r_\theta).
 \]
-In the fixed-grid implementation,
-\begin{align}
-  \Gamma_h(f,g)
-    &=N\sum_e\theta_e(s)r_e(f)r_e(g),\label{eq:implicit-gamma}\\
-  L_hf
-    &=N\sum_e\left\{
-       \theta_e(s)\,\partial_e^2f
-       +(2\alpha+1)R_e(s)r_e(f)
-      \right\}.\label{eq:implicit-generator}
-\end{align}
-The code minimizes the positively rescaled per-state objective
-\(\{\Gamma_h(f,f)+2L_hf\}/(2N^2)\).  This normalization averages over the
-\(2N\) oriented grid edges and changes neither the population minimizer nor the
-physical flux.
-
-\subsection{Detached-coefficient Hutchinson estimator}
-
-The second-order term in Eq.~\eqref{eq:implicit-generator} is evaluated without
-forming a dense \(N\)-by-\(N\) Hessian.  For a Rademacher edge vector \(z\), set
-\[
-  v=D_h^{\!*}\!\left(\sqrt{\theta(s)}\,z\right).
-\]
-Then \(v^\top\nabla_s^2f\,v\) is an unbiased trace estimator.  Mobility,
-the ratio \(R_e\), and the tangent \(v\) are detached before the Hessian--vector
-product.  Differentiating them inside the HVP would count state dependence of
-the reference coefficients a second time, even though it is already encoded in
-the canonical reference drift.  Training uses one probe per state; checkpoint
-selection and audit use frozen independent multi-probe banks.
-
-The learned scalar is
-\begin{equation}\label{eq:implicit-model}
-  f_{\phi}(s,\tau,y)=f_{\mathrm{lin}}(s,\tau)+
-                     f_{\mathrm{UNet},\phi}(s,\tau,y).
-\end{equation}
-Here \(f_{\mathrm{lin}}\) is a frozen state-linear potential whose cell
-coefficients vary through an eight-dimensional cubic B-spline basis in time.
-It is fitted by a matrix-free float64 conjugate-gradient solve on training paths
-only.  The U-Net is position sensitive, twice differentiable, and has an exactly
-zero-initialized scalar output, so step zero equals the linear comparator.  A
-neural pass must improve beyond this comparator, not merely rediscover the
-schedule.
-
-Once learned, the corresponding physical Doob edge flux is
-\begin{equation}\label{eq:implicit-physical-flux}
-  J^{\mathrm{Doob}}_e(s,\tau,y)
-  =2Nw(\tau)\theta_e(s)r_e(f_{\phi}).
-\end{equation}
-Equation~\eqref{eq:implicit-physical-flux} is a score-to-flux identity.  The
-present experiment does not insert it into a reverse integrator.
-
-\subsection{Positive-time evidence design}
-
-The density claim is deliberately restricted away from time zero.  On the
-frozen \(K=512\), 256-substep temporal grid, every cached endpoint is at least
-1,024 forward substeps from data, so \(t_{\min}=T/128\).  The authoritative
-confirmation's 80 training paths and 24 checkpoint-selection paths may be
-reused as state samples.  Its already inspected 24 audit paths are forbidden.
-The implicit-score study generates 24 new audit paths and four distinct
-preflight paths, each with 32 anchors allocated \(4,4,4,4,16\) over the five
-reverse-time bins.
-
-The implementation is fail closed at four cumulative gates.
-\begin{enumerate}[leftmargin=2.0em]
-  \item \textbf{Operator preflight.}  On a \(4\)-by-\(4\) grid, constants and
-  total mass lie in the generator gauge, the product rule agrees with
-  \(2\Gamma_h\), and a 4,096-probe quadratic trace estimate has relative error
-  at most \(0.01\).  A production-device forward/backward smoke test must be
-  finite and remain below the declared peak-memory budget.
-  \item \textbf{State cache.}  Shards are deterministic and hash verified;
-  train, selection, new audit, and preflight path identities are disjoint; all
-  states are finite, strictly positive, and on the simplex; and the frozen
-  intervention and correction thresholds continue to hold.
-  \item \textbf{Synthetic controls.}  A time-varying nonuniform-Dirichlet
-  teacher has an analytic nonlinear score and physical flux.  Teacher and null
-  controls use 64 independent synthetic path clusters split (40/12/12) for
-  training, checkpoint selection, and audit; they reuse only the frozen time
-  plan, never physical state values or path identities.  The teacher must achieve
-  at least \(0.90\) audit score gain, flux cosine at least \(0.98\) overall and
-  \(0.95\) in every time bin, and relative flux error at most \(0.15\) overall
-  and \(0.20\) in every bin.  A stationary-Dirichlet null must not have a
-  positive whole-path audit lower bound relative to its frozen training-only
-  state-linear comparator.
-  \item \textbf{Physical score.}  Three seeds are selected using only the 24
-  selection paths.  Two independent 32-probe audit banks must agree on positive
-  improvements over both zero and the linear baseline, overall and at the data
-  end.  One-sided 90\% bootstrap intervals resample the 24 whole audit paths,
-  never states or model seeds.  Four-group median-of-means and two independent
-  probe-free Stein-witness banks provide separate robustness checks.  Each bank
-  contains 32 smooth periodic linear and 32 quadratic witnesses standardized
-  using training states only.  The quadratic generator retains its exact edge
-  Hessian term, and witness means are squared separately within each path and
-  each of the five time bins before equal aggregation, preventing cancellation
-  across time.  Cross-seed nonlinear-flux cosines must have median at least \(0.50\),
-  with lower bound at least \(0.25\).
-\end{enumerate}
-
-A pass establishes only positive-time, fixed-grid, one-image relative-score
-learnability beyond the declared linear comparator.  It does not establish a
-finite-step Bayes reversal of the limiter, time-zero density, conditional
-covariance, a known prior, multi-image quality, or spatial
-Dirichlet--Ferguson convergence.  Only after this gate passes may a separately
-named score-to-flux reconstruction experiment be designed.
-
-\section{Density-ratio classification fallback for bounded controls}
-\label{sec:density-ratio-controls}
-
-The streamed implicit-control confirmation separates two conclusions.  Fresh
-states and a smaller AdamW step size removed clipping and fixed-state
-memorization, so the optimizer itself was healthy.  Nevertheless the bounded
-teacher recovered only about one half of the weighted score signal and failed
-the frozen flux thresholds, while one null selection panel nominated a
-nonzero checkpoint whose signal disappeared on untouched audit states.  Thus
-the Dirichlet-form identity remains valid, but the tested empirical
-trace-plus-drift objective is not a trustworthy route to the required
-derivatives.  No physical-score task or sampler is authorized by that result.
-
-For the same bounded teacher, density-ratio classification removes the Hessian
-trace estimate entirely.  At each matched positive-time anchor, draw one class
-from the teacher marginal \(p_\tau\) and one from the Dirichlet reference
-\(\nu_h\), with equal class prior.  For one raw scalar logit \(\ell\), the
-balanced population logistic risk is
-\begin{equation}\label{eq:density-ratio-logistic-risk}
-  \mathcal R_\tau(\ell)
-  =\frac12\E_{p_\tau}\!\left[\operatorname{softplus}(-\ell)\right]
-   +\frac12\E_{\nu_h}\!\left[\operatorname{softplus}(\ell)\right].
-\end{equation}
-Pointwise minimization gives
-\begin{equation}\label{eq:density-ratio-bayes-logit}
-  \ell_\tau^*(s)=\log\frac{p_\tau(s)}{\nu_h(s)}.
-\end{equation}
-Exact balance at every time anchor is essential: unequal or time-dependent
-class priors would add a log-odds term.  The implementation therefore matches
-the complete time vector between classes in every batch and uses a single raw
-logit, avoiding the gauge ambiguity of a two-logit classifier.
-
-The derivative diagnostic acts on the raw logit, never on a sigmoid or a
-clipped probability.  With the existing positive edge orientation,
-\[
-  r_e(\ell)=\partial_{s_{\mathrm{head}(e)}}\ell
-             -\partial_{s_{\mathrm{tail}(e)}}\ell,
-  \qquad
-  J_e^{\mathrm{Doob}}=2Nw(\tau)\theta_e(s)r_e(\ell).
-\]
-For the bounded four-anchor teacher, the oracle logit is the analytic
-\(\log(p_\tau/\nu_h)\) already used by the boundary controls.  For the
-stationary null, both classes have law \(\nu_h\), so the unique normalized
-Bayes logit is zero.  A null panel is formed by pooling independent Dirichlet
-draws and applying a stateless balanced label swap within each matched time
-anchor, preventing a class-specific random-number stream from becoming a
-spurious feature.
-
-Classification accuracy is advisory because this deliberately bounded
-teacher is only weakly separable.  The gate instead uses held-out balanced BCE
-improvement and the unchanged analytic score and flux thresholds.  One
-discovery panel nominates exactly one checkpoint, a second independent panel
-tests that nominee once, and two further untouched panels audit the frozen
-choice separately.  Whole-path bootstrap intervals resample path clusters,
-not individual anchors.  A rejected null nominee is still evaluated on both
-audit panels so selection false discovery remains visible.
-
-The first classification pilot detected a reproducible teacher signal at the
-two smallest learning rates while every stationary null retained the analytic
-zero comparator.  It nevertheless failed the optimizer-health gate: clipping
-grew late in teacher training, reaching roughly \(0.30\) and \(0.21\), while
-the frozen limit was \(0.10\).  Since no profile qualified, no untouched C/D
-audit panel was generated.  This is an optimizer-variance result rather than
-evidence for either a null false positive or accurate relative-score recovery.
-
-For a fresh controls-only stability test, the same logistic risk can be
-estimated with lower variance without changing its expectation.  Write the
-bounded teacher as
-\[
-  p_\tau=(1-\epsilon)\nu_h+\epsilon\sum_j w_j(\tau)\nu_{h,j},
-  \qquad \epsilon=\tfrac12,
-\]
-where \(\nu_{h,j}=\operatorname{Dirichlet}(\mathbf 1+e_j)\).  Draw independent
-unit-rate Gamma coordinates \(G_i\), set
-\(S_0=G/\sum_iG_i\), draw \(J\sim w(\tau)\) and an independent
-\(E\sim\operatorname{Gamma}(1,1)\), and define
-\[
-  S_J=\frac{G+Ee_J}{\sum_iG_i+E}.
-\]
-Then \(S_0\sim\nu_h\) and, conditional on \(J\),
-\(S_J\sim\nu_{h,J}\).  The paired per-anchor estimator is
-\begin{equation}\label{eq:density-ratio-paired-risk}
-  \widehat{\mathcal R}^{\rm pair}_\tau(\ell)
-  =\frac{1-\epsilon}{2}\operatorname{softplus}[-\ell(S_0)]
-   +\frac{\epsilon}{2}\operatorname{softplus}[-\ell(S_J)]
-   +\frac12\operatorname{softplus}[\ell(S_0)].
-\end{equation}
-Its expectation equals \eqref{eq:density-ratio-logistic-risk}.  Relative to
-sampling a Bernoulli mixture indicator, it integrates out that indicator and
-uses the same reference state in the teacher's reference component and the
-negative-class term.  Deterministic accumulation of several independent
-paired microbatches averages this same estimator before one AdamW update; it
-changes estimator variance and effective batch size, not the population
-objective.  The loss multiplier, model, clipping norm, and physical score and
-flux thresholds must remain frozen so that a pass cannot be manufactured by
-changing optimizer units or the target law.
-
-\subsection{Paired-pilot result and normalized-head coordinates}
-
-The completed paired-mixture pilot passed every estimator preflight and all
-twelve teacher/null tasks were finite.  Rao--Blackwellization was effective:
-the measured loss-variance ratios relative to the original IID estimator were
-approximately \(0.064\) and \(0.042\), and the corresponding directional-gradient
-variance ratios were approximately \(0.099\) and \(0.073\).  Increasing the
-deterministic accumulation level from \(2\) to \(8\) also improved the teacher
-signal and reduced clipping.  At accumulation \(8\) and body learning rate
-\(3\mathbin{\times}10^{-5}\), the selected teacher attained overall/data-end
-score gains \(0.902/0.932\), flux cosines \(0.953/0.969\), relative flux errors
-\(0.303/0.249\), and positive panel-B lower bounds.  Every null arm retained
-the analytic zero checkpoint.  Nevertheless the teacher clipping fraction
-was \(0.269\), above the frozen \(0.10\) limit, and no profile qualified.  Thus
-no confirmation, physical training, or sampling was authorized.
-
-Layerwise inspection localizes this failure to the scalar-output coordinate,
-not to a lack of backbone capacity.  In the legacy boundary-smooth U-Net, let
-\(H_i(s,\tau,y)\in\R^c\) be the final feature at cell \(i\), let \(M=n^2\), and
-write the final \(1\mathbin{\times}1\) convolution as \((w,b)\).  The raw logit
-is
-\begin{equation}\label{eq:density-ratio-sum-head}
-  \ell_{\rm sum}(s,\tau,y)
-  =\sum_{i=1}^{M}\bigl(w^\top H_i(s,\tau,y)+b\bigr).
-\end{equation}
-On the \(28\times28\), \(c=32\) controls, the \(33\) final-head parameters
-account for roughly \(99\)--\(99.9\) percent of the squared parameter-gradient
-norm even though the backbone has about \(7.8\times10^5\) parameters.  The
-same width-32 representation had already fitted the supervised analytic
-teacher with score gain about \(0.999\), flux cosine about \(0.999\), and
-relative flux error about \(0.036\).  The evidence therefore points to the
-parameterization of the global scalar sum rather than an undersized model.
-
-Introduce a versioned, function-equivalent mean head
-\begin{equation}\label{eq:density-ratio-mean-head}
-  \ell_{\rm mean}(s,\tau,y)
-  =\frac1M\sum_{i=1}^{M}
-       \bigl({w'}^\top H_i(s,\tau,y)+b'\bigr),
-  \qquad w'=Mw,\quad b'=Mb.
-\end{equation}
-Equations~\eqref{eq:density-ratio-sum-head} and
-\eqref{eq:density-ratio-mean-head} are identical as functions.  Consequently
-their state gradients, edge scores, physical Doob fluxes, and boundary
-behavior are identical.  For the same scalar loss,
-\[
-  \nabla_{w'}L=M^{-1}\nabla_wL,
-  \qquad
-  \nabla_{b'}L=M^{-1}\nabla_bL,
-\]
-while every backbone gradient is unchanged.
-
-The AdamW update is coordinate-conjugate before clipping when the backbone
-uses \((\eta,\varepsilon,\lambda)\) and the mean head uses
-\begin{equation}\label{eq:density-ratio-head-adamw}
-  \eta'=M\eta,
-  \qquad \varepsilon'=\varepsilon/M,
-  \qquad \lambda'=\lambda/M.
-\end{equation}
-Indeed the first moment scales by \(M^{-1}\), the second moment by \(M^{-2}\),
-the adaptive step by \(M\), and the decoupled decay satisfies
-\(\eta'\lambda'=\eta\lambda\).  EMA is conjugate under the same parameter
-mapping.  The global Euclidean clipping operation is deliberately applied
-after transforming to the mean-head coordinates and is therefore not
-coordinate invariant; changing that optimizer geometry, without changing the
-represented logit or population BCE, is precisely the proposed repair.
-
-The normalized-head preflight first verifies functional and derivative
-equivalence.  It separately verifies AdamW, EMA, boundary, and stream
-equivalence.  Saved checkpoints from accumulation level \(8\) are replayed to
-confirm finite layerwise gradients and a median legacy-head squared-gradient
-share of at least \(0.95\).  Fresh training keeps width \(32\), the paired
-estimator, EMA \(0.99\), accumulation \(8\), global clip norm \(1\), and the
-frozen multiplier
-\[
-  c_{\rm BCE}=0.05173607018770852.
-\]
-A train/selection pilot tests body learning rates
-\(3\mathbin{\times}10^{-5}\) and \(10^{-5}\); untouched three-seed
-confirmation remains forbidden until one profile satisfies the unchanged
-optimizer, teacher, and analytic-zero-null gates.
-
-\subsection{Normalized-head result and oracle-qualified evidence power}
-\label{sec:density-ratio-selection-power}
-
-The normalized-head coordinate repair removed the optimizer pathology it was
-designed to address: all four pilot tasks were finite, boundary admissible,
-and had zero clipping.  Nevertheless no profile passed the sealed selection
-gate.  This failure cannot yet justify an \(H^1\)-type trust region because the
-same 16-path panel that rejected the learned teacher also rejected the exact
-analytic Bayes logit.
-
-For the saved 16-path forensic, let
-\[
-  \Delta_{a,p}
-  =\log 2-\operatorname{BCE}
-       \bigl(\ell^*(S_{a,p},\tau_{a,p}),Y_{a,p}\bigr),
-  \qquad
-  \ell^*=\log(p_\tau/\nu_h),
-\]
-and average anchors within each whole path before bootstrapping paths.  The
-saved overall/data-end pairs were
-\begin{align*}
-  \text{panel A point estimate} &= 0.01621771096/0.01721000665,\\
-  \text{panel A one-sided LB90} &= +0.00872031148/+0.00517841895,\\
-  \text{panel B point estimate} &= -0.00174841445/+0.00326400978,\\
-  \text{panel B one-sided LB90} &= -0.00913743689/-0.00565862046.
-\end{align*}
-Thus the observed sealed-panel-B rejection is an evidence-power failure: even
-the population-risk minimizer could not satisfy the declared finite-panel
-rule.
-
-The next controls-only workflow therefore qualifies its evidence before
-performing any optimizer step.  It first draws one independent 256-path
-calibration panel with 32 anchors per path and the existing
-\(4,4,4,4,16\) time strata.  The exact oracle must have finite, strictly
-positive one-sided 99-percent whole-path bootstrap lower bounds both overall
-and at the data end.  The panel is split by a predetermined rule into two
-128-path halves, and each half must independently satisfy the existing
-90-percent rule in both scopes.  Calibration paths are never reused for model
-selection or audit.
-
-The pilot then fixes fresh 128-path A/B panels for both teacher and null.  The
-exact teacher must qualify the actual teacher A and B panels, overall and at
-the data end, before training starts.  A failed panel is never resized,
-regenerated, or replaced after inspection.  A passing pilot freezes one
-profile and permits three-seed confirmation on entirely fresh, immutable
-128-path A/B/C/D panels; every teacher panel is oracle-qualified before
-training.  Whole paths, rather than anchors, remain the bootstrap unit.
-
-No model or objective variable changes in this experiment.  Width remains
-32; the spatial-mean head and coordinate-conjugate AdamW groups remain exact;
-accumulation remains 8; and the body learning rates remain
-\(3\mathbin{\times}10^{-5}\) and \(10^{-5}\).  Balanced BCE, EMA \(0.99\),
-the global clip norm 1, and
-\(c_{\rm BCE}=0.05173607018770852\) are frozen.  The pilot runs for 2,000
-updates from root seed 260931.  A passing profile is confirmed for 4,000
-updates with paired seeds 260941, 260942, and 260943.  The existing BCE,
-score-gain, flux-cosine, relative-flux-error, analytic-zero-null, optimizer,
-and three-seed thresholds are applied without weakening.
-
-The conservative null rule remains the authorization gate.  A separate
-non-authorizing multiplicity report distinguishes a discovery-panel event
-from a reproduced null signal: if only panel A is positive while sealed panel
-B rejects its nominee, the decision is
-\nolinkurl{null_gate_multiplicity_inconclusive}, not optimizer instability.
-The closed outcomes are
-\begin{itemize}[leftmargin=1.5em]
-  \item \nolinkurl{control_provenance_invalid};
-  \item \nolinkurl{oracle_power_invalid};
-  \item \nolinkurl{evidence_panel_underpowered};
-  \item \nolinkurl{null_gate_multiplicity_inconclusive};
-  \item \nolinkurl{classification_power_confirmation_unresolved};
-  \item \nolinkurl{classification_optimizer_invalid};
-  \item \nolinkurl{selection_false_discovery};
-  \item \nolinkurl{classification_audit_inconclusive};
-  \item \nolinkurl{no_detectable_density_ratio_signal};
-  \item \nolinkurl{density_ratio_value_only};
-  \item \nolinkurl{density_ratio_control_pipeline_repaired}.
-\end{itemize}
-Only an oracle-qualified unresolved power-confirmation result authorizes
-planning the separate \(H^1\) function-step trust experiment.  Only a repaired
-density-ratio control pipeline authorizes planning a fresh physical one-image
-score experiment.
-
-The production sequence is:
-\begin{Verbatim}[fontsize=\scriptsize,breaklines=true,breakanywhere=true]
-.\.venv\Scripts\python.exe -m mnist.diag_d0_score_density_ratio_selection_power_confirmation `
-  --runs-root runs/experiment12_d0_score_density_ratio_selection_power_confirmation `
-  --run-name production-density-ratio-selection-power `
-  --device cuda `
-  --stage preflight `
-  --parent-normalized-head-run-dir runs/experiment12_d0_score_density_ratio_head_confirmation/20260720-150202_production-normalized-head-density-ratio-controls `
-  --require-gate preflight
-
-$powerRun = "runs/experiment12_d0_score_density_ratio_selection_power_confirmation/<timestamp>_production-density-ratio-selection-power"
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_score_density_ratio_selection_power_confirmation `
-  --device cuda `
-  --stage pilot `
-  --resume-run-dir $powerRun `
-  --parent-normalized-head-run-dir runs/experiment12_d0_score_density_ratio_head_confirmation/20260720-150202_production-normalized-head-density-ratio-controls `
-  --require-gate pilot
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_score_density_ratio_selection_power_confirmation `
-  --device cuda `
-  --stage confirm `
-  --resume-run-dir $powerRun `
-  --parent-normalized-head-run-dir runs/experiment12_d0_score_density_ratio_head_confirmation/20260720-150202_production-normalized-head-density-ratio-controls `
-  --require-gate controls
-\end{Verbatim}
-
-This is still a controls-only test: every artifact records that physical
-training and sampling were not performed.  Passing proves only that the
-bounded synthetic density-ratio controls are detected with powered,
-oracle-qualified panels and satisfy the frozen derivative gates.  It does not
-establish physical-score learnability, reconstruction, a known prior, an
-exact finite-time reverse kernel, or spatial Dirichlet--Ferguson convergence.
-
-\subsection{Powered-pilot result and multiplicity-aware null confirmation}
-\label{sec:density-ratio-null-multiplicity}
-
-The oracle-qualified run
-\nolinkurl{20260720-204514_production-density-ratio-selection-power} completed
-with a verified 123-record terminal registry and decision
-\nolinkurl{null_gate_multiplicity_inconclusive}.  Its 256-path calibration,
-both predetermined 128-path halves, and the actual fixed teacher A/B panels
-passed their oracle-power gates before training.  All four pilot tasks were
-finite and boundary admissible, every clipping window was zero, and no task
-failed.
-
-Both learning rates learned a teacher signal and passed independent sealed
-panel B.  At body learning rate \(3\mathbin{\times}10^{-5}\), the teacher
-selected EMA step 2000.  Its A/B BCE values were
-(0.6801083346/0.6814580763); its A lower bounds were
-(+0.0101354213/+0.0137847375), and its sealed-B lower bounds were
-(+0.0088853571/+0.0093210751), overall/data-end.  The corresponding
-score gains were (0.886891/0.919885), flux cosines were
-(0.949558/0.965450), and relative flux errors were
-(0.317918/0.265274).  The \(10^{-5}\) arm also passed A and B but had a
-higher mean A/B BCE, (0.6817931156) versus (0.6807832055), and weaker
-derivatives.  The already declared profile ranking therefore prefers
-\(3\mathbin{\times}10^{-5}\) with accumulation 8.
-
-The null evidence exposed a defect in the old interpretation of panel A, not
-in the optimizer or model.  At \(3\mathbin{\times}10^{-5}\), the null
-panel-A lower bounds were
-\((-2.0771\mathbin{\times}10^{-6}/+2.8700\mathbin{\times}10^{-5})\), whereas
-sealed B gave
-\((-3.1140\mathbin{\times}10^{-5}/-3.0777\mathbin{\times}10^{-5})\).  At
-\(10^{-5}\), A gave
-\((-6.6940\mathbin{\times}10^{-6}/+9.0041\mathbin{\times}10^{-6})\), whereas
-B gave
-\((-4.1019\mathbin{\times}10^{-6}/-5.4485\mathbin{\times}10^{-6})\).
-Both panel-A nominees were rejected by sealed B and both null tasks selected
-the analytic zero.  Requiring A both to search checkpoints and to provide
-confirmatory null evidence counts a selected discovery fluctuation as if it
-were independent.  The two tiny data-end excursions therefore do not justify
-a capacity change or an \(H^1\) penalty.
-
-The corrected workflow assigns distinct statistical roles.  Panel A is used
-only to nominate one checkpoint.  The confirmatory null family is
-\[
-  \mathcal F
-  =\{(m,r,q):m\in\{1,2,3\},\ r\in\{B,C,D\},\
-                 q\in\{\mathrm{all},\mathrm{end}\}\}.
-\]
-For \(j\in\mathcal F\), let \(\widehat\Delta_j\) be the mean BCE improvement
-after first averaging anchors within each path and let
-\(\widehat{\operatorname{se}}_j\) be its whole-path standard error.  A
-deterministic 50,000-replicate studentized whole-path max--\(T\) bootstrap
-defines
-\begin{align}
- Z_j^*&=\frac{\widehat\Delta_j^*-\widehat\Delta_j}
-                    {\widehat{\operatorname{se}}_j^*},\\
- c_{0.95}
-  &=Q_{0.95}\!\left[\max_{j\in\mathcal F}Z_j^*\right],\\
- L_j^{\rm sim}
-  &=\widehat\Delta_j-c_{0.95}\widehat{\operatorname{se}}_j.
-\end{align}
-Within a panel role, the same resampled path indices are used across model
-seeds; the independent B, C, and D roles are resampled independently.  The
-analytic-zero null passes only when every \(L_j^{\rm sim}\leq0\).  This single
-18-comparison family uses one-sided simultaneous 95\% lower bounds and
-controls the family-wise false-signal probability at 0.05.  The raw legacy
-panelwise intervals and all panel-A excursions remain reported, but are
-non-authorizing.
-
-The new controls-only entry point is
-\nolinkurl{mnist.diag_d0_score_density_ratio_multiplicity_confirmation}.
-Its replay stage verifies the immutable parent sealed evidence, applies the
-same simultaneous rule across the two saved candidates, and freezes the
-already ranked profile without an optimizer step.  Confirmation starts new
-zero-initialized models on new streams and disjoint fixed 128-path A/B/C/D
-panels.  It uses root seed 260961, paired model seeds 260971--260973, 4,000
-updates, body learning rate \(3\mathbin{\times}10^{-5}\), and accumulation
-8.  The teacher oracle qualification, BCE objective, normalized-head model,
-coordinate-conjugate AdamW, loss scale, EMA, clipping rule, derivative
-thresholds, and two-of-three teacher-seed rule are unchanged.
-
-The production sequence is:
-\begin{Verbatim}[fontsize=\scriptsize,breaklines=true,breakanywhere=true]
-.\.venv\Scripts\python.exe -m mnist.diag_d0_score_density_ratio_multiplicity_confirmation `
-  --runs-root runs/experiment12_d0_score_density_ratio_multiplicity_confirmation `
-  --run-name production-multiplicity-aware-density-ratio-controls `
-  --device cuda `
-  --stage preflight `
-  --parent-selection-power-run-dir runs/experiment12_d0_score_density_ratio_selection_power_confirmation/20260720-204514_production-density-ratio-selection-power `
-  --require-gate preflight
-
-$multiplicityRun = "runs/experiment12_d0_score_density_ratio_multiplicity_confirmation/<timestamp>_production-multiplicity-aware-density-ratio-controls"
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_score_density_ratio_multiplicity_confirmation `
-  --device cuda `
-  --stage replay `
-  --resume-run-dir $multiplicityRun `
-  --parent-selection-power-run-dir runs/experiment12_d0_score_density_ratio_selection_power_confirmation/20260720-204514_production-density-ratio-selection-power `
-  --require-gate replay
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_score_density_ratio_multiplicity_confirmation `
-  --device cuda `
-  --stage confirm `
-  --resume-run-dir $multiplicityRun `
-  --parent-selection-power-run-dir runs/experiment12_d0_score_density_ratio_selection_power_confirmation/20260720-204514_production-density-ratio-selection-power `
-  --require-gate controls
-\end{Verbatim}
-
-This experiment performs no physical-score training and no sampling.  A pass
-authorizes only planning a separately named physical one-image density-ratio
-score experiment with fresh states.  It does not authorize sampling or prove
-physical-score learnability, reconstruction, a known prior, a time-zero
-density, an exact finite-time reverse kernel, or spatial
+A one-sided 99\% whole-path studentized max-$T$ family must place strictly
+positive simultaneous lower bounds on both contrasts. Passing establishes
+only held-out predictive learnability for this image and split chain. It
+authorizes planning a separate reverse-phase sampler control, not sampling,
+reconstruction, a known prior, unsplit-generator convergence, or spatial
 Dirichlet--Ferguson convergence.
 
-A passing synthetic density-ratio gate establishes only that the
-boundary-smooth network and classification estimator recover this bounded
-positive-time analytic ratio and reject a stationary null.  It authorizes a
-separately named physical one-image density-ratio score experiment with fresh
-states.  It does not authorize sampling and does not establish a finite-step
-Bayes reverse kernel, a known prior, a time-zero density, reconstruction, or
-spatial Dirichlet--Ferguson convergence.
+\section{Boundary-tangent Jacobi/RB controller}
 
-\subsection{Multiplicity result and EMA-proximal \texorpdfstring{$H^1$}{H1} function-step trust}
-\label{sec:density-ratio-h1-trust}
-
-The completed multiplicity-aware confirmation
-\nolinkurl{20260721-000607_production-multiplicity-aware-density-ratio-controls}
-ended with decision \nolinkurl{density_ratio_value_only}.  Its exact
-263-record terminal registry and transitive
-\(263\mathbin{\to}123\mathbin{\to}125\mathbin{\to}332\mathbin{\to}
-222\mathbin{\to}381\) provenance chain verify.  All six teacher/null tasks
-completed finite and boundary admissible, every clipping window was zero,
-all teacher nominees passed sealed panel B, and all nulls selected analytic
-step zero.  The simultaneous 18-member B/C/D null family also passed: its
-studentized max--\(T\) critical value was 2.78527696, every simultaneous
-lower bound was negative (from
-\(-1.98754\mathbin{\times}10^{-4}\) to
-\(-5.64340\mathbin{\times}10^{-5}\)), and the minimum adjusted \(p\)-value
-was 0.652107.  Thus the repaired selection semantics rejected a false null
-signal as intended.
-
-The learned values were useful, but their state derivatives were still too
-weak for physical flux.  Across teacher seeds 260971--260973, the independent
-C/D score gains were 0.906--0.941 overall and 0.934--0.954 at the data end.
-However, C/D flux cosines were only 0.957--0.974 and relative flux errors
-were 0.226--0.292.  No seed therefore met the frozen cosine threshold 0.98
-and relative-error threshold 0.15.  This is evidence for a value-only
-density-ratio fit, not a capacity, boundary-domain, selection-power, null,
-or optimizer-health failure.  No physical training or sampling was run.
-
-The next controls-only experiment adds a function-step trust term in the
-Dirichlet energy geometry.  Let \(f_{\rm raw}\) and \(f_{\rm EMA}\) denote
-the normalized-head logit functions evaluated before an optimizer update and
-define the proximal increment
-\begin{equation}
-  d(s,\tau)
-  =f_{\rm raw}(s,\tau)
-   -\operatorname{stopgrad}\!\left[f_{\rm EMA}(s,\tau)\right].
-  \label{eq:density-ratio-h1-ema-increment}
-\end{equation}
-For the physical edge derivative \(r_e\), harmonic mobility \(\theta_e\),
-and \(N=784\), use the same carré-du-champ convention as the score operator,
-\(
-  \Gamma(d,d)=N\sum_e\theta_e r_e(d)^2,
-  \qquad
-  \overline\Gamma(d,d)=\frac{\Gamma(d,d)}{2N^2}
-    =\frac{1}{2N}\sum_e\theta_e r_e(d)^2
-\), and define
-\begin{equation}
-  \mathcal P(d)
-  =\E_{s\sim\nu}\!\left[
-       \frac{d(s,\tau)^2}{a_0^2}
-       +\frac{\overline\Gamma(d,d)(s,\tau)}{a_1^2}
-    \right].
-  \label{eq:density-ratio-h1-ema-penalty}
-\end{equation}
-The \(L^2\) term is required because \(\Gamma\) cannot detect a spatially
-constant logit displacement.  The gradient term is the mass-simplex
-Dirichlet energy, not image-space total variation.  Stopping gradients
-through the EMA branch makes the trust term proximal: it vanishes when raw
-and EMA functions agree and does not change the common fixed point merely by
-penalizing the Bayes log-ratio itself.
-
-The three scales are calibrated once from fresh training-only states.  Take
-one shadow Adam step from a fixed fresh initialization, compare its raw
-function with the pre-step EMA function, and set
-\begin{align}
-  a_0&=\operatorname{RMS}_{\nu}(d),
-  &a_1&=\sqrt{\E_{\nu}\overline\Gamma(d,d)},
-  \label{eq:density-ratio-h1-scales}\\
-  \lambda_{\rm base}
-  &=\frac{\left\|\nabla_\vartheta(c_{\rm BCE}R)\right\|_2}
-          {\left\|\nabla_\vartheta\mathcal P\right\|_2}.
-  \label{eq:density-ratio-h1-lambda}
-\end{align}
-Every calibrated value and gradient factor must be finite and strictly
-larger than \(10^{-8}\); the calibration fails closed instead of clamping.
-For \(q\in\{0,0.1,0.3,1\}\), two independent 32-state reference banks are
-drawn at every update and the optimized loss is
-\begin{equation}
-  \mathcal L_q
-  =c_{\rm BCE}R^{\rm pair}
-   +q\lambda_{\rm base}\frac{\mathcal P_A+\mathcal P_B}{2}.
-  \label{eq:density-ratio-h1-training-loss}
-\end{equation}
-All other coordinates remain frozen: width 32, body learning rate
-\(3\mathbin{\times}10^{-5}\), accumulation 8, EMA 0.99, global clipping at
-1, the paired balanced-BCE objective, and the normalized-head optimizer.
-
-The entry point is
-\nolinkurl{mnist.diag_d0_score_density_ratio_h1_trust_confirmation}, with
-stages \nolinkurl{preflight,pilot,confirm,report,all} and required gates
-\nolinkurl{none,preflight,pilot,controls}.  Preflight verifies the exact
-263-record parent registry; symmetry, non-negativity, orientation, and an
-analytic fixture for \(\Gamma\); zero penalty when raw equals EMA; constant
-shift detection by the \(L^2\) term; absence of EMA gradients; finite CUDA
-second derivatives and boundary behavior; stream isolation and order
-invariance; and exact agreement of \(q=0\) with a 25-step regression of the
-old runner.
-
-The pilot uses root seed 261001, model seed 261011, 4,000 updates, and fresh
-fixed 128-path A/B panels for each law.  Panel A nominates a checkpoint and
-sealed B evaluates it once.  The null family uses one global max--\(T\) rule
-over all four \(q\) candidates and both scopes.  A profile is eligible only
-if it passes the previous strict teacher and null rules, remains optimizer
-healthy, and reduces relative flux error by at least 10\% overall and at the
-data end relative to \(q=0\).  Eligible profiles are ranked by lowest worst
-overall/time-bin relative flux error, highest minimum-bin cosine, lowest
-sealed-B BCE, then smaller \(q\).
-
-Confirmation freezes the winning profile, uses paired seeds
-261021--261023 for 4,000 updates, and evaluates new disjoint 128-path A/B/C/D
-panels.  It retains every prior strict BCE, score-gain, flux-cosine,
-relative-flux-error, null, optimizer-health, and two-of-three teacher-seed
-threshold.  H1-specific health requires only finite calibration values,
-finite penalty components and second-order gradients, plus the unchanged
-clipping bound; no post-hoc trust cutoff is introduced.
-
-Closed decisions are
-\nolinkurl{control_provenance_invalid},
-\nolinkurl{h1_operator_invalid},
-\nolinkurl{h1_calibration_invalid},
-\nolinkurl{evidence_panel_underpowered},
-\nolinkurl{h1_optimizer_invalid},
-\nolinkurl{h1_overregularized},
-\nolinkurl{h1_function_step_unresolved},
-\nolinkurl{selection_false_discovery},
-\nolinkurl{classification_audit_inconclusive},
-\nolinkurl{h1_density_ratio_value_only}, and
-\nolinkurl{density_ratio_control_pipeline_repaired}.
-
-The production sequence is:
-\begin{Verbatim}[fontsize=\scriptsize,breaklines=true,breakanywhere=true]
-.\.venv\Scripts\python.exe -m mnist.diag_d0_score_density_ratio_h1_trust_confirmation `
-  --runs-root runs/experiment12_d0_score_density_ratio_h1_trust_confirmation `
-  --run-name production-h1-function-step-density-ratio-controls `
-  --device cuda `
-  --stage preflight `
-  --parent-multiplicity-run-dir runs/experiment12_d0_score_density_ratio_multiplicity_confirmation/20260721-000607_production-multiplicity-aware-density-ratio-controls `
-  --require-gate preflight
-
-$h1Run = "runs/experiment12_d0_score_density_ratio_h1_trust_confirmation/<timestamp>_production-h1-function-step-density-ratio-controls"
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_score_density_ratio_h1_trust_confirmation `
-  --device cuda `
-  --stage pilot `
-  --resume-run-dir $h1Run `
-  --parent-multiplicity-run-dir runs/experiment12_d0_score_density_ratio_multiplicity_confirmation/20260721-000607_production-multiplicity-aware-density-ratio-controls `
-  --require-gate pilot
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_score_density_ratio_h1_trust_confirmation `
-  --device cuda `
-  --stage confirm `
-  --resume-run-dir $h1Run `
-  --parent-multiplicity-run-dir runs/experiment12_d0_score_density_ratio_multiplicity_confirmation/20260721-000607_production-multiplicity-aware-density-ratio-controls `
-  --require-gate controls
-\end{Verbatim}
-
-This remains a controls-only experiment: every artifact records
-\nolinkurl{physical_training_performed: 0} and
-\nolinkurl{sampling_performed: 0}.  Only
-\nolinkurl{density_ratio_control_pipeline_repaired} authorizes planning a
-fresh physical one-image score experiment.  A pass establishes only that the
-bounded synthetic density-ratio control is value- and derivative-accurate
-under this EMA-proximal function-step coordinate; it does not establish
-physical-score learnability, reconstruction, a known prior, a time-zero
-density, an exact reverse kernel, sampling quality, or spatial
-Dirichlet--Ferguson convergence.
-
-\subsection{Failed fixed-coefficient pilot and online gradient-ratio control}
-\label{sec:density-ratio-h1-gradient-control}
-
-The completed fixed-coefficient H1 run
-\nolinkurl{20260721-114934_production-h1-function-step-density-ratio-controls}
-ended with decision \nolinkurl{h1_function_step_unresolved}.  Its exact
-301-record registry has SHA-256:
-\sha{26c42bc045903253c504a00499318292b3e5612f54b16e103b0872f8933fc6f4}
-Operator and calibration preflight, oracle panel power, all eight teacher/null
-tasks, optimizer health, and the simultaneous null family passed.  Every
-clipping window was zero, all nulls selected analytic step zero, and no
-confirmation, physical training, or sampling was performed.
-
-The fixed H1 term helped but remained too weak.  The \(q=0\) teacher selected
-step 3000, with overall/data-end score gains \(0.92538/0.94396\), overall
-flux cosine \(0.96584\), minimum-bin cosine \(0.94262\), overall/data-end
-relative flux errors \(0.26151/0.22549\), and worst-bin relative error
-\(0.33689\).  The \(q=1\) arm selected step 4000 and improved these values to
-\(0.94155/0.95497\), \(0.97444\), \(0.96223\),
-\(0.22745/0.19746\), and \(0.28084\), respectively.  Thus relative flux error
-fell by \(13.0\%\) overall and \(12.4\%\) at the data end, but the result still
-missed the frozen overall cosine threshold \(0.98\), overall relative-error
-threshold \(0.15\), and the per-bin relative-error threshold \(0.20\).
-
-The one-shadow-step calibration gave
-\(a_0=0.03735975761867785\), \(a_1=0.00541742970034323\), and
-\(\lambda_{\rm base}=5.620791829277054\mathbin{\times}10^{-8}\).
-During the \(q=1\) teacher run, the median realized H1-to-BCE gradient-norm
-ratio was only about \(0.0569\).  The coefficient therefore produced a useful
-but weak perturbation after its initial calibration.  Because \(q=0\) was
-evaluated at step 3000 while all nonzero arms were evaluated at step 4000,
-the saved comparison also contains a checkpoint-duration confound.  This
-result does not motivate a wider model or weaker derivative thresholds.
-
-The next additive controls-only experiment replaces the one-time coefficient
-by a deterministic online component-ratio controller while retaining the same
-H1 geometry and scales.  Write
-\begin{equation}
-  g_t=\nabla_\vartheta\!\left(c_{\rm BCE}L_{{\rm BCE},t}\right),
-  \qquad
-  h_t=\nabla_\vartheta H_t,
-  \label{eq:h1-gradient-control-components}
-\end{equation}
-where \(H_t\) is the mean of the two stopped-EMA H1 reference-bank losses.
-For \(\rho\in\{0,0.1,0.3,1\}\), define the frozen ramp and coefficient
-\begin{align}
-  \rho_t
-  &=\rho\min\!\left\{1,\max\!\left(0,\frac{t-1}{100}\right)\right\},
-  \label{eq:h1-gradient-control-ramp}\\
-  \lambda_t
-  &=\rho_t\frac{\lVert g_t\rVert_2}{\lVert h_t\rVert_2},
-  \qquad
-  g_t^{\rm total}
-  =g_t+\operatorname{stopgrad}(\lambda_t)h_t.
-  \label{eq:h1-gradient-control-vector-field}
-\end{align}
-The norms are accumulated in float64 normalized-head parameter coordinates,
-and global clipping at one is applied once after composition.  Step one has
-zero H1 contribution.  The norm floor is \(10^{-12}\): a post-ramp H1 floor
-hit or nonfinite coefficient fails closed, whereas a BCE-floor hit is a
-recorded stationary no-op.  The realized preclip component ratio must match
-\(\rho_t\) to relative error \(10^{-4}\), and at least \(99\%\) of post-ramp
-updates must be controller-active.  Positive rescaling of \(H_t\) leaves the
-composed vector field invariant.  This construction preserves the common BCE
-fixed point, but it is a finite-time optimizer vector field and is not claimed
-to be the gradient of one fixed scalar objective.  The old
-\(\lambda_{\rm base}\) is retained only as forensic provenance.
-
-The entry point is
-\nolinkurl{mnist.diag_d0_score_density_ratio_h1_gradient_control_confirmation}.
-Preflight checks the exact parent/transitive provenance, ratio algebra,
-stop-gradient semantics, rescaling invariance, ramp and floor branches,
-fixed-point behavior, exact 25-step \(\rho=0\) regression, boundary
-admissibility, finite CUDA second derivatives, stateless stream replay,
-candidate-order invariance, and exact restart during gradient composition.
-A matched-step parent replay at steps 3000 and 4000 is advisory only.
-
-The pilot fixes root seed 261041, model seed 261051, 4,000 updates, width 32,
-body learning rate \(3\mathbin{\times}10^{-5}\), accumulation 8, EMA 0.99,
-and fresh disjoint 128-path A/B panels.  All four ratios share initialization,
-BCE batches, and reference streams.  Step 4000 is the only scientific
-endpoint.  Panel A ranks one nonzero ratio; sealed B evaluates exactly that
-nominee and its matched \(\rho=0\) comparator once, without fallback.  In
-addition to the unchanged classification, derivative, null, and optimizer
-gates, the nominee must reduce relative flux error by at least \(10\%\)
-overall and at the data end, with positive simultaneous whole-path lower
-bounds.  The authorizing pilot null family contains the eight
-\(4\text{ ratios}\mathbin{\times}2\text{ scopes}\) sealed-B comparisons.
-
-Only a passing pilot unlocks confirmation.  It freezes only the ratio and
-uses seeds 261061--261063 with fresh 128-path A/B/C/D panels.  Each seed trains
-a selected-ratio teacher, a coupled \(\rho=0\) teacher, and a selected-ratio
-null, for nine tasks total.  At least two teacher seeds must pass the existing
-strict derivative gates.  One simultaneous 18-member matched-effect family
-contains \(3\text{ seeds}\mathbin{\times}\{B,C,D\}\mathbin{\times}
-\{\text{overall,data-end}\}\); at least two seeds must have all six positive
-bounds and point reductions of at least \(10\%\).  Every bound in the
-independent 18-member null family must be nonpositive, and all nine optimizer
-and controller trajectories must remain healthy.
-
-Closed decisions are
-\nolinkurl{control_provenance_invalid},
-\nolinkurl{h1_gradient_controller_invalid},
-\nolinkurl{evidence_panel_underpowered},
-\nolinkurl{h1_controller_optimizer_invalid},
-\nolinkurl{h1_controller_overregularized},
-\nolinkurl{h1_strength_grid_unresolved},
-\nolinkurl{selection_false_discovery},
-\nolinkurl{h1_causal_effect_unconfirmed},
-\nolinkurl{classification_audit_inconclusive},
-\nolinkurl{h1_effect_audit_inconclusive},
-\nolinkurl{h1_density_ratio_value_only}, and
-\nolinkurl{density_ratio_control_pipeline_repaired}.
-
-The production sequence is:
-\begin{Verbatim}[fontsize=\scriptsize,breaklines=true,breakanywhere=true]
-.\.venv\Scripts\python.exe -m mnist.diag_d0_score_density_ratio_h1_gradient_control_confirmation `
-  --runs-root runs/experiment12_d0_score_density_ratio_h1_gradient_control_confirmation `
-  --run-name production-gradient-controlled-h1-density-ratio-controls `
-  --device cuda `
-  --stage preflight `
-  --parent-h1-run-dir runs/experiment12_d0_score_density_ratio_h1_trust_confirmation/20260721-114934_production-h1-function-step-density-ratio-controls `
-  --require-gate preflight
-
-$gradientRun = "runs/experiment12_d0_score_density_ratio_h1_gradient_control_confirmation/<timestamp>_production-gradient-controlled-h1-density-ratio-controls"
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_score_density_ratio_h1_gradient_control_confirmation `
-  --device cuda `
-  --stage pilot `
-  --resume-run-dir $gradientRun `
-  --parent-h1-run-dir runs/experiment12_d0_score_density_ratio_h1_trust_confirmation/20260721-114934_production-h1-function-step-density-ratio-controls `
-  --require-gate pilot
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_score_density_ratio_h1_gradient_control_confirmation `
-  --device cuda `
-  --stage confirm `
-  --resume-run-dir $gradientRun `
-  --parent-h1-run-dir runs/experiment12_d0_score_density_ratio_h1_trust_confirmation/20260721-114934_production-h1-function-step-density-ratio-controls `
-  --require-gate controls
-\end{Verbatim}
-
-This remains a controls-only experiment.  Every artifact records
-\nolinkurl{physical_training_performed: 0} and
-\nolinkurl{sampling_performed: 0}.  Only
-\nolinkurl{density_ratio_control_pipeline_repaired} authorizes planning fresh
-physical one-image score training.  A pass establishes only optimizer-healthy,
-derivative-accurate bounded synthetic density-ratio controls under this
-fixed-grid controller.  It does not establish physical-score learnability,
-reconstruction, a known prior, a time-zero density, an exact reverse kernel,
-sampling quality, or spatial Dirichlet--Ferguson convergence.
-
-\subsection{Exact Jacobi-split denoising feasibility gate}
-\label{sec:d0-exact-jacobi-feasibility}
-
-The completed online gradient-ratio run
-\nolinkurl{20260722-000701_production-gradient-controlled-h1-density-ratio-controls}
-has an immutable 277-record registry with SHA-256:
-\sha{0341f1defa29029fce03c638d86b15db1565c2f4d488b7fce8413fa140dc71ab}
-Its saved decision \nolinkurl{selection_false_discovery} is a report-layer
-defect: no nonzero ratio was nominated, panel B was never opened, and the
-null family is explicitly \nolinkurl{not_evaluated} with size zero.  All
-eight tasks completed 4000 optimizer updates, were finite, boundary- and
-optimizer-healthy, and had zero clipping.  The additive adjudication used by
-the next workflow therefore records \nolinkurl{h1_strength_grid_unresolved}
-without modifying the historical run.
-
-The next target is the conditional score of the Eulerian reference
-semigroup itself.  For an oriented edge, set
-\(r=s_{\rm tail}+s_{\rm head}\) and
-\(x=s_{\rm head}/r\).  Conditional on \(r\), the edge generator is
-\begin{equation}
-  \mathcal L_e=
-  \frac{2\alpha+1}{\alpha h^2r}
-  \left[x(1-x)\partial_{xx}+\alpha(1-2x)\partial_x\right].
-  \label{eq:d0-jacobi-edge-generator}
-\end{equation}
-At \(\alpha=1\), its invariant conditional law is uniform and its transition
-density relative to that law is
-\begin{equation}
-  k_u(y\mid x)=\sum_{n=0}^{\infty}(2n+1)e^{-n(n+1)u}
-  P_n(2x-1)P_n(2y-1).
-  \label{eq:d0-alpha1-legendre-kernel}
-\end{equation}
-The implementation evaluates this series with explicit density, CDF, and
-score tail bounds.  It never repairs a negative partial sum by clamping.
-
-Under the standard Wright--Fisher clock \(t_{\rm WF}=2u\), the same
-transition has the ancestral mixture
-\begin{equation}
-  M\sim q^{2\alpha}(2u),\qquad
-  L\mid M,x\sim\operatorname{Bin}(M,x),\qquad
-  Y\mid M,L\sim\operatorname{Beta}(\alpha+L,\alpha+M-L).
-\end{equation}
-The exact denoising label is
-\begin{equation}
-  Z=L-MY,
-  \qquad
-  \mathbb E[Z\mid S_{\rm later},e]
-  =Y(1-Y)\partial_Y\log\frac{p_{\rm later}}{\nu}(S_{\rm later}).
-  \label{eq:d0-jacobi-denoising-label}
-\end{equation}
-Thus squared-error prediction of \(Z\) is the Jacobi analogue of DDPM noise
-prediction.  It is neither a reverse Euler residual nor a classifier or
-value-function surrogate.  In the fixed head-oriented convention, its
-physical Doob mass flux is
-\begin{equation}
-  J_e=\frac{2(2\alpha+1)a(t)}{\alpha h^2}
-  \mathbb E[Z\mid S_{\rm later},e].
-\end{equation}
-
-The torus edges are partitioned into horizontal-even, horizontal-odd,
-vertical-even, and vertical-odd perfect matchings.  One macrostep uses the
-self-adjoint composition
+\paragraph{Affine-flow failure.}
+The first reverse-controller implementation froze the conormal conditional
+mean $m$ during each learned substep and applied
 \[
-  H_0(\Delta t/2),H_1(\Delta t/2),V_0(\Delta t/2),V_1(\Delta t),
-  V_0(\Delta t/2),H_1(\Delta t/2),H_0(\Delta t/2).
+  y^+=y+2m\,\delta u.
 \]
-Every phase preserves pair mass and its conditional Beta law exactly, so no
-limiter, floor, projection, or renormalization belongs to this reference.
-Finite-\(K\) Strang splitting remains a controlled approximation to the full
-simultaneous generator and must pass weak-refinement checks.
+Although the exact Jacobi reference half-transition remained certified, it
+could put $y$ arbitrarily close to a facet. A nonzero frozen affine increment
+then left $[0,1]$ at $M=2,4,8$ (and in an advisory $M=16$ replay). This is a
+finite-step coordinate failure, not evidence against the exact Jacobi law or
+the Rao--Blackwell target.
 
-The implemented noncommuting-matrix Strang calculation is only an advisory
-check of the seven-stage composition algebra.  It is not admissible evidence
-for the state-dependent Eulerian split, since a crossing color changes the
-pair total appearing in the next phase speed.  Accordingly the authorizing
-\nolinkurl{actual_eulerian_refinement_pass} remains false until the certified
-small-time transition is fast enough to run the genuine exact-phase
-refinement study.  The workflow cannot reach a one-image authorization from
-the generic matrix fixture.
-As a non-authorizing implementation check, exact Jacobi eigenmoments are also
-differentiated at interior grid-28 states and compared with the true
-state-dependent color generator on Fourier-linear, quadratic-mass, and
-cubic-mass observables.  This detects the \(1/r_e\), orientation, and
-\(h^{-2}\) scalings but makes no finite-horizon refinement claim.
-
-The entry point is
-\nolinkurl{mnist.diag_d0_jacobi_denoising_feasibility}.  It first checks the
-immutable parent and the operator convention, then separately gates the
-spectral kernel, the alternating-series ancestral sampler over the actual
-28-by-28 support, the projected 64-path cache cost, mass/stationarity and
-Strang controls, and the analytic teacher
+\paragraph{Tangent parameterization and unchanged target.}
+For earlier and later head fractions $X,Y$, let $H=L-MY$ be the ancestral
+denoising variable and define the exact Rao--Blackwell label by
 \[
-  v_0(x)=1+\tfrac12(2x-1),\qquad
-  v_u(y)=1+\tfrac12e^{-2u}(2y-1).
+  \bar Z(X,Y,u)=\mathbb E[H\mid X,Y,u]
+  =Y(1-Y)\,\partial_Y\log k_u(Y\mid X).
 \]
-An ancestral count is returned only after an arbitrary-precision alternating
-CDF bracket decides the supplied uniform.  A term, refinement, or count cap
-is an uncertified failure; there is no small-time Gaussian fallback.
-
-The production sequence is:
-\begin{Verbatim}[fontsize=\scriptsize,breaklines=true,breakanywhere=true]
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_denoising_feasibility `
-  --runs-root runs/experiment12_d0_jacobi_denoising_feasibility `
-  --run-name production-exact-jacobi-feasibility `
-  --device cuda `
-  --stage preflight `
-  --parent-gradient-control-run-dir runs/experiment12_d0_score_density_ratio_h1_gradient_control_confirmation/20260722-000701_production-gradient-controlled-h1-density-ratio-controls `
-  --require-gate preflight
-
-$jacobiRun = (Get-ChildItem "runs/experiment12_d0_jacobi_denoising_feasibility" -Directory | Where-Object Name -Like "*_production-exact-jacobi-feasibility" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_denoising_feasibility `
-  --device cuda `
-  --stage kernel `
-  --resume-run-dir $jacobiRun `
-  --parent-gradient-control-run-dir runs/experiment12_d0_score_density_ratio_h1_gradient_control_confirmation/20260722-000701_production-gradient-controlled-h1-density-ratio-controls `
-  --require-gate kernel
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_denoising_feasibility `
-  --device cuda `
-  --stage controls `
-  --resume-run-dir $jacobiRun `
-  --parent-gradient-control-run-dir runs/experiment12_d0_score_density_ratio_h1_gradient_control_confirmation/20260722-000701_production-gradient-controlled-h1-density-ratio-controls `
-  --require-gate controls
-\end{Verbatim}
-
-Only \nolinkurl{exact_jacobi_denoising_feasible} authorizes a separate
-one-image \(Z\)-prediction patch.  This gate performs no physical training or
-reverse sampling.  It is a fixed-grid \(\alpha=1\) claim; the manuscript's
-spatial Dirichlet--Ferguson scaling \(\alpha_h=\beta h^d\) remains a later
-refinement problem.
-
-\subsection{Certified spectral Rao--Blackwell kernel repair}
-\label{sec:d0-jacobi-rb-kernel}
-
-The completed feasibility run
-\nolinkurl{20260722-142613_production-exact-jacobi-feasibility}
-ended at its kernel gate.  Its 16-record terminal registry has SHA-256:
-\sha{fd8695f463e1bd82f5d0be16059ab1be41fd9dbf727603264600881d5addc836}
-All reported Legendre-kernel identities, production spectral support,
-device comparisons, and transition-law controls passed.  The failure was
-confined to the ancestral representation: one resource-cap event, one
-invalid alternating-series certificate, fourteen uncertified support draws,
-and a projected cache time of 5080.942 hours.  The run performed neither
-split controls nor physical training nor reverse sampling.
-
-For the same exact phase kernel, define the Rao--Blackwellized target
-\begin{equation}
-  \overline Z(x,y,u)
-  :=y(1-y)\partial_y\log k_u(y\mid x)
-  =\E[L-MY\mid X=x,Y=y,u].
-  \label{eq:d0-jacobi-rb-target}
-\end{equation}
-Consequently
+For the permitted later-state information $W$, write
 \[
-  \E[\overline Z(X,Y,u)\mid S_{\rm later},e]
-  =\E[L-MY\mid S_{\rm later},e].
+  \mu(y)=y(1-y),\qquad
+  m(W)=\mathbb E[\bar Z\mid W]=\mu(y)q(W).
 \]
-Replacing the sampled ancestral label by \(\overline Z\) therefore removes
-conditional label variance without changing the DDPM-like population
-regression function.  In particular, it is not a density-ratio classifier,
-an Euler residual, a value target, or a Gaussian transition approximation.
-The eventual model is forbidden from observing the earlier fraction, the
-inverse-CDF uniform, or numerical-certificate fields.
-
-For stable evaluation near a simplex facet, the implementation forms the
-conormal numerator directly.  With \(z_x=2x-1\), \(z_y=2y-1\),
-\begin{align}
-  G_u(x,y)&:=y(1-y)\partial_y k_u(y\mid x)\\
-  &=\frac12\sum_{n\geq1}n(2n+1)e^{-n(n+1)u}P_n(z_x)
-       \bigl[P_{n-1}(z_y)-z_yP_n(z_y)\bigr],
-\end{align}
-and returns \(\overline Z=G_u/k_u\).  A separate CDF-only Legendre
-recurrence is inverted using outward interval bounds.  The pinned
-\nolinkurl{python-flint==0.9.0} Arb backend makes every authorizing ambiguous
-comparison, including the omitted-series radii.  A batched CUDA recurrence
-supplies an independent point/enclosure diagnostic, but the frozen
-authorizing profile bypasses its ordinary-float inverse proposal and sends
-every active transition to transition-local Arb certification.  It is never
-promoted to a numerical certificate merely because its point values agree.
-A transition and target are accepted
-only when their certified intervals lie in unique binary64 rounding cells.
-Cap hits fail closed.  Gaussian/Euler fallback, finite-\(M\) truncation,
-exposure binning, floors, limiters, projection, and target clipping remain
-forbidden.
-
-The additive entry point is
-\nolinkurl{mnist.diag_d0_jacobi_rb_denoising_feasibility}.  Its stages bind
-the immutable failed run, certify the spectral inverse over the complete
-fixed-grid support, and benchmark a state-dependent seven-phase path,
-including complete atomic shard I/O, before running phase-local controls.  A
-measured resource guard uses the projected 64-path cost and fails closed
-rather than extrapolating the non-authorizing CUDA diagnostic.  Thus a scalar
-implementation may correctly end
-\nolinkurl{spectral_inversion_computationally_infeasible}; passing requires a
-future batched implementation whose interval certificates, not only point
-values, satisfy the same contract.  The target stage then verifies phase-local
-teacher and stationary-null identities.  Only
-\nolinkurl{exact_jacobi_rb_kernel_feasible} authorizes a separate production
-state-dependent Strang-refinement experiment.  It does not authorize
-one-image training or reconstruction.
-
-The first production invocation of this repair completed its 294-row support
-panel but then exposed a precision-escalation defect in the resource probe at
-(x=0.03), (u=0.00011484375).  At low precision, a rigorous cancellation
-ball exceeded the range of binary64 diagnostic endpoints; the underlying Arb
-comparison was merely unresolved, not nonfinite.  Endpoint extraction is now
-diagnostic-only, so an unbounded diagnostic sentinel advances to the next
-frozen Arb precision.  The decisive comparison occurs at 1024 bits.  A fresh
-source-bound run may import the 270 certified shards from the immutable failed
-run, while its 24 obsolete early-abort rows are recomputed.  This import is
-bound to the failed run's terminal registry and never relaxes ordinary source
-fingerprint checks for resume.
-
-The production commands are below.  The target command is conditional: it is
-run only after a passing kernel gate.  A recorded computational-infeasibility
-result is terminal evidence for this implementation and must not be bypassed.
-
-\begin{Verbatim}[fontsize=\scriptsize,breaklines=true,breakanywhere=true]
-.\.venv\Scripts\python.exe -m pip install python-flint==0.9.0
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_denoising_feasibility `
-  --runs-root runs/experiment12_d0_jacobi_rb_denoising_feasibility `
-  --run-name production-certified-spectral-rb-kernel-retry `
-  --device cuda `
-  --stage preflight `
-  --parent-jacobi-feasibility-run-dir runs/experiment12_d0_jacobi_denoising_feasibility/20260722-142613_production-exact-jacobi-feasibility `
-  --require-gate preflight
-
-$rbRun = (Get-ChildItem "runs/experiment12_d0_jacobi_rb_denoising_feasibility" -Directory |
-  Where-Object Name -Like "*_production-certified-spectral-rb-kernel-retry" |
-  Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_denoising_feasibility `
-  --device cuda --stage kernel --resume-run-dir $rbRun `
-  --support-shard-source-run-dir runs/experiment12_d0_jacobi_rb_denoising_feasibility/20260722-165831_production-certified-spectral-rb-kernel `
-  --parent-jacobi-feasibility-run-dir runs/experiment12_d0_jacobi_denoising_feasibility/20260722-142613_production-exact-jacobi-feasibility `
-  --require-gate kernel
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_denoising_feasibility `
-  --device cuda --stage target --resume-run-dir $rbRun `
-  --parent-jacobi-feasibility-run-dir runs/experiment12_d0_jacobi_denoising_feasibility/20260722-142613_production-exact-jacobi-feasibility `
-  --require-gate target
-\end{Verbatim}
-
-\subsection{Fused CUDA double-double certification}
-\label{sec:d0-jacobi-rb-cuda}
-
-The completed retry
-\nolinkurl{20260722-203339_production-certified-spectral-rb-kernel-retry}
-has a 315-record terminal registry with SHA-256:
-\sha{309a4296691684f1cc7ce26bfc243accfb51b8dd2b9ea50a6c43d93dea164e9e}
-Its numerical evidence is positive: all 294 support transitions were certified
-and correctly rounded, and the spectral-law controls passed.  Its failure is
-computational.  Every active transition entered scalar Arb, giving an Arb
-fraction and cost fraction of one, only 0.6147 transitions per second, and a
-projected 40631.8 hours for the 64-path cache.  The full benchmark and target
-controls were therefore not evaluated.  This is re-adjudicated as a valid but
-computationally infeasible representation, without changing the immutable
-record.
-
-The additive fused backend preserves the same law and target.  Ordinary
-binary64 arithmetic first forms the analytic first/second-eigenmoment
-Cantelli bracket and performs 56 safeguarded inverse-CDF bisections, but this
-proposal has no authorizing role.  Let $y$ be the proposed binary64 value and
-let
-
+The boundary-tangent model predicts a finite coefficient
+$q_\theta=q_B+q_{\theta,\mathrm{res}}$ and returns
+$m_\theta=\mu q_\theta$. It minimizes the same direct, unweighted objective
 \[
- b_-=\frac{\operatorname{prev}(y)+y}{2},\qquad
- b_+=\frac{y+\operatorname{next}(y)}{2}
+  \mathcal L(\theta)
+  =\frac{\operatorname{mean}(\mu q_\theta-\bar Z)^2}{c^2},
+  \qquad c^2=\operatorname{mean}_{\mathrm{train}}\bar Z^2.
+\]
+In particular, no quotient target $\bar Z/\mu$ is formed. The training-only
+cellwise baseline is the direct least-squares coefficient
+\[
+  q_B=\frac{\sum \mu\bar Z}{\sum \mu^2}.
 \]
 
-be its exact rounding-cell boundaries.  If a dyadic random prefix encloses
-the exact uniform in $[U^-,U^+]$, the quantile is accepted only after the
-double-double ball recurrence proves the strict inequalities
-
-\begin{equation}
- F_u^+(b_-\mid x)<U^-,\qquad F_u^-(b_+\mid x)>U^+.
- \label{eq:d0-jacobi-cuda-cell}
-\end{equation}
-
-The same recurrence encloses $k_u(y\mid x)$ and the conormal numerator
-$G_u(x,y)$.  It requires a strictly positive density lower endpoint and
-accepts $G_u/k_u$ only when the quotient interval is contained strictly in
-one binary64 rounding cell.  Thus neither a close proposal nor pointwise CUDA
-agreement is itself a certificate.
-
-The authorizing arithmetic uses error-free two-sum and FMA two-product
-centres, explicit directed-rounding radii, and analytic omitted-mode tails.
-Direct interval propagation through Bonnet's recurrence is deliberately not
-used: repeated occurrences of the same Legendre value would lose their
-dependence and produce exponentially widening enclosures.  Instead, the
-kernel treats each double-double centre sequence as an exact real sequence,
-encloses the local recurrence residual $\epsilon_n$ with directed ball
-arithmetic, and applies the rigorous global perturbation bound
-
+\paragraph{Exact frozen-score logistic flow.}
+During a learned substep, freeze $q$ and solve
 \[
- \left|\widetilde P_n(x)-P_n(x)\right|
- \leq \frac{(n+1)(n+2)}{4}\max_{j<n}|\epsilon_j|,
- \qquad |x|\leq1.
+  \frac{dy}{du}=2q\,y(1-y).
 \]
-
-This is Proposition~5 of Johansson and Mezzarobba's fixed-point analysis of
-Bonnet's recurrence~\cite{johansson2018legendre}.  The resulting radius is an
-a posteriori theorem-bound, not an empirical ULP allowance; endpoint values
-$P_n(\pm1)=(\pm1)^n$ remain structural exact cases.
-The factor $q=e^{-2u}$ is enclosed once by double-double range reduction with
-a frozen degree-24 polynomial and rigorous remainder, rather than by an
-authorizing libdevice exponential.  All spectral decays are then generated
-by an outward-rounded recurrence in powers of $q$, with tail checks every 16
-modes from 128 through 4096; a strengthened pass may use 8192.  Remaining
-ambiguity escalates to candidate-local Arb evaluation of the two cell
-boundaries and the target quotient.  It does not restart the old scalar
-56-evaluation Arb inversion.  Gaussian or Euler transitions, finite
-ancestral-count truncation, exposure approximation, clipping, floors,
-limiters, projection, and target modification remain forbidden.
-
-The new random stream is stateless Philox4x32-10.  Its counter contains the
-canonical path, outer-step, phase, and edge identity, plus a
-transition-local refinement block and namespace.  Consequently chunking,
-parallel order, interruption, and resume cannot shift another transition's
-random bits.  Parent support replay injects the recorded first version-1
-dyadic words; where the immutable parent consumed a second word, it verifies
-the historical key against the saved first word before reconstructing that
-transition-local continuation.  It never claims bitwise RNG continuity
-across stream versions.
-
-The entry point is
-\nolinkurl{mnist.diag_d0_jacobi_rb_cuda_confirmation}.  Its certificate stage
-replays all 294 parent rows and independently recertifies 512 fresh
-four-colour, half/full-duration transitions with Arb.  Its kernel stage first
-runs a 4096-transition warm-up and three 65536-transition probes.  Only a
-passing probe starts three complete evolving seven-phase paths, each with
-1404928 transitions and atomic eight-outer-step shards.  CUDA launches are
-capped at 4096 transitions.  Passing requires certificate fraction one, Arb
-fallback at most $10^{-4}$, Arb time at most $0.10$, at least 1300
-transitions per second, projected 64-path time at most 20 hours, peak device
-memory at most $0.8$, and identical repeated output/final-state hashes.
-Only then are the Rao--Blackwell tower, legacy-mixture, bounded-teacher,
-stationary-null, orientation, pair-mass, spatial-scale, flux-sign, and
-later-state-only input controls run through the fused API.
-
-\begin{Verbatim}[fontsize=\scriptsize,breaklines=true,breakanywhere=true]
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_cuda_confirmation `
-  --runs-root runs/experiment12_d0_jacobi_rb_cuda_confirmation `
-  --run-name production-certified-cuda-dd-jacobi-rb `
-  --device cuda --stage preflight `
-  --parent-rb-kernel-run-dir runs/experiment12_d0_jacobi_rb_denoising_feasibility/20260722-203339_production-certified-spectral-rb-kernel-retry `
-  --require-gate preflight
-
-$cudaRbRun = (Get-ChildItem "runs/experiment12_d0_jacobi_rb_cuda_confirmation" -Directory |
-  Where-Object Name -Like "*_production-certified-cuda-dd-jacobi-rb" |
-  Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_cuda_confirmation `
-  --device cuda --stage certificate --resume-run-dir $cudaRbRun `
-  --parent-rb-kernel-run-dir runs/experiment12_d0_jacobi_rb_denoising_feasibility/20260722-203339_production-certified-spectral-rb-kernel-retry `
-  --require-gate certificate
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_cuda_confirmation `
-  --device cuda --stage kernel --resume-run-dir $cudaRbRun `
-  --parent-rb-kernel-run-dir runs/experiment12_d0_jacobi_rb_denoising_feasibility/20260722-203339_production-certified-spectral-rb-kernel-retry `
-  --require-gate kernel
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_cuda_confirmation `
-  --device cuda --stage target --resume-run-dir $cudaRbRun `
-  --parent-rb-kernel-run-dir runs/experiment12_d0_jacobi_rb_denoising_feasibility/20260722-203339_production-certified-spectral-rb-kernel-retry `
-  --require-gate target
-\end{Verbatim}
-
-Only
-\nolinkurl{exact_jacobi_rb_cuda_kernel_and_target_feasible}
-authorizes a separate state-dependent Strang-refinement experiment.  This is
-still a fixed-grid $\alpha=1$, controls-only claim; it authorizes neither
-model training nor reverse sampling nor spatial Dirichlet--Ferguson
-convergence.
-
-\subsection{Exact multi-path CUDA scheduling confirmation}
-\label{sec:d0-jacobi-rb-cuda-multipath}
-
-The immutable fused-CUDA run
-\nolinkurl{20260722-233246_codex-final-validation-certified-cuda-dd-jacobi-rb}
-has a 219-record terminal registry with SHA-256
-\sha{74a538caa33fbc5ef28e76e7feeedc77287fc0af36b8679c59e241ca3e43a757}
-and source fingerprint
-\sha{c6ab156d467cbf17bd804c1a204e91e11be637b23ba4aa15bd066994e8bba52f}.
-The preflight and all 806 transition-certificate cases passed.  Every
-full-path transition was certified, conservation and replay checks passed,
-and there were no fallbacks, cap hits, approximations, nonfinite values,
-floors, limiters, corrections, or renormalizations.  Its only failed checks
-were resource checks: the stateful single-path benchmark achieved
-$643.1408275980631<1300$ transitions per second and projected
-$38.835192396442096>20$ hours for 64 paths.  The target stage was therefore
-not evaluated.  We re-adjudicate this result as
-\nolinkurl{single_path_scheduling_resource_infeasible}; this does not alter
-the immutable record or any of its seven fingerprinted implementation files.
-
-The mathematical kernel already has substantially higher throughput when a
-launch contains close to 4096 independent transitions.  One path provides
-only 392 edges in a colour phase.  The additive scheduler therefore advances
-independent paths at the same phase in the frozen production partition
-
+For $0<y<1$ the exact solution is
 \[
-  (P_1,\ldots,P_7)=(10,10,10,10,10,10,4),
+  \operatorname{logit}(y^+)
+  =\operatorname{logit}(y)+2q\,\delta u,
 \]
-
-giving phase-launch sizes $10\cdot392=3920$ and $4\cdot392=1568$.
-For a fixed outer step and phase it gathers the pair variables into a
-$P\times392$ array, flattens path-major, invokes the unchanged certified
-transition API once, reshapes the result, and scatters each pair update back
-to its source path.  All seven phases and all 512 outer steps remain serial
-within each path.  Thus execution packing changes while the Jacobi law,
-Rao--Blackwell target, palindrome, and within-path dependence do not.
-
-Canonical transition identities remain functions of
-$(\mathrm{path},\mathrm{outer\ step},\mathrm{phase},\mathrm{edge})$ rather
-than cohort position.  Stateless Philox randomness consequently makes each
-path invariant under cohort permutation, regrouping, chunking, and resume.
-An eight-step shard retains states, pair updates, targets, certificate
-counters, and hashes on device and permits one host boundary only when the
-shard is committed.  Its identity is
-$(\mathrm{stage},P,\mathrm{repeat},\mathrm{start\ step})$; a corrupt tail
-invalidates only that group and repeat from that shard onward.
-
-Preflight compares $P=4$ and $P=10$ execution phase by phase with independent
-$P=1$ execution for eight steps and requires exact later fractions,
-Rao--Blackwell targets, certificate masks, final states, and per-path hashes.
-It additionally embeds parent path zero in a ten-path cohort and requires
-the immutable serial output and final-state hashes.  Canonical-ID uniqueness
-over $64\cdot512\cdot7\cdot392$ transitions, path isolation, regrouping and
-resume invariance, and the maximum launch size 4096 are fail-closed checks.
-
-The pilot uses disjoint identifiers, group sizes 10 and 4, 64 evolving
-outer steps, three deterministic repeats, and eight-step shards.  Both group
-sizes must sustain at least 1300 transitions per second.  With $t^{(P)}_r$
-the complete wall time for repeat $r$, its conservative production estimate
-is
-
-\begin{equation}
-  t_{\mathrm{pilot},64}
-  =8\left(6\max_r t^{(10)}_r+\max_r t^{(4)}_r\right).
-  \label{eq:d0-jacobi-multipath-pilot-projection}
-\end{equation}
-
-It must satisfy $t_{\mathrm{pilot},64}\leq20$ hours and
-$89915392/t_{\mathrm{pilot},64}\geq1300$ transitions per second.  Only a
-passing pilot starts the full gate.  That gate executes three complete
-$K=512$ repeats for each group size: 14049280 transitions per $P=10$
-repeat and 5619712 per $P=4$ repeat, or 59006976 executed transitions in
-total.  The authorizing projection is
-
-\begin{equation}
-  t_{64}=6\max_r t^{(10)}_r+\max_r t^{(4)}_r,
-  \qquad \frac{89915392}{t_{64}}\geq1300,
-  \label{eq:d0-jacobi-multipath-full-projection}
-\end{equation}
-
-with $t_{64}\leq20$ hours.  Certificate fraction one, the existing
-fallback and memory limits, identical repeated hashes, pair and simplex
-conservation, and every existing numerical-law threshold remain unchanged.
-Shared batch wall time is recorded once and is never duplicated across
-per-path rows.
-
-Only a passing kernel runs fresh target controls through the unchanged
-certified API: the Rao--Blackwell tower and legacy-mixture identities,
-bounded teacher and stationary null, all four colours and half/full phase
-durations, density positivity and unique target rounding, orientation,
-pair-mass, $h^{-2}$ scaling, invariant-Beta score, flux sign, and the
-later-state-only model-input contract.  A resource failure authorizes only
-an exact CUDA-graph or persistent-launch scheduling investigation; it does
-not authorize changing the transition law, target, or scientific threshold.
-
-\begin{Verbatim}[fontsize=\scriptsize,breaklines=true,breakanywhere=true]
-$cudaRoot = "runs/experiment12_d0_jacobi_rb_cuda_confirmation"
-$cudaRun = Join-Path $cudaRoot `
-  "20260722-233246_codex-final-validation-certified-cuda-dd-jacobi-rb"
-$multiRoot = "runs/experiment12_d0_jacobi_rb_cuda_multipath_confirmation"
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_cuda_multipath_confirmation `
-  --runs-root $multiRoot `
-  --run-name production-multipath-jacobi-rb `
-  --device cuda --stage preflight `
-  --parent-cuda-run-dir $cudaRun `
-  --require-gate preflight
-
-$multiRbRun = (Get-ChildItem $multiRoot -Directory |
-  Where-Object Name -Like "*_production-multipath-jacobi-rb" |
-  Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_cuda_multipath_confirmation `
-  --device cuda --stage pilot --resume-run-dir $multiRbRun `
-  --parent-cuda-run-dir $cudaRun `
-  --require-gate pilot
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_cuda_multipath_confirmation `
-  --device cuda --stage kernel --resume-run-dir $multiRbRun `
-  --parent-cuda-run-dir $cudaRun `
-  --require-gate kernel
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_cuda_multipath_confirmation `
-  --device cuda --stage target --resume-run-dir $multiRbRun `
-  --parent-cuda-run-dir $cudaRun `
-  --require-gate target
-\end{Verbatim}
-
-The final decision
-\nolinkurl{exact_jacobi_rb_multipath_kernel_and_target_feasible}
-authorizes only planning the state-dependent Strang-refinement experiment.
-This is still a fixed-grid $\alpha=1$, controls-only result: it establishes
-neither model training nor reverse sampling, reconstruction, a known prior,
-nor spatial Dirichlet--Ferguson convergence.
-
-\subsection{Exact state-dependent Strang-refinement gate}
-\label{sec:d0-jacobi-rb-strang-refinement}
-
-The completed multi-path run
-\nolinkurl{20260723-092105_production-multipath-jacobi-rb}
-has an immutable 891-record registry with SHA-256
-\sha{b1724cb1222baf315b3aff24858ac6d979a2ed36e0331995245220a5861545f5}.
-Its exact kernel and Rao--Blackwell target gates passed, including
-certification, conservation, throughput, the tower identity, and the
-later-state-only input contract.  It therefore authorizes the missing
-state-dependent split-refinement experiment, but not neural training.
-
-For a refinement level $K$, the new additive scheduler keeps the physical
-horizon $\tau_{\mathrm{eff}}=5\times10^{-5}$ fixed and recomputes, after
-every preceding colour phase, the exact exposure
-\begin{equation}
-  u_{k,p,e}^{(K)}
-  =
-  \frac{3(\tau_{\mathrm{eff}}/K)d_p}
-       {h^2 r_{k,p,e}},
-  \qquad h=1/28,
-  \label{eq:d0-jacobi-state-dependent-refinement-exposure}
-\end{equation}
-where $d_p\in\{1/2,1\}$ is the palindromic phase duration and
-$r_{k,p,e}$ is the current pair mass.  Thus no frozen-mobility or
-noncommuting-matrix surrogate enters the authorizing evidence.  Every phase
-still uses the certified exact Jacobi transition and carries its
-Rao--Blackwell certificate, even though this workflow evaluates state
-observables rather than fitting the denoising target.
-
-The levels $K\in\{128,256,512,1024\}$ are coupled by common quantiles.  A
-versioned identifier embeds every transition in a $K_{\max}=2048$ dyadic
-clock using the right-endpoint tick
+while $y=0$ and $y=1$ remain fixed. Hence the update stays on the closed
+pair simplex without clipping, flooring, limiting, projection, or
+renormalization. Its local expansion is
 \[
-  j_K(k)=(k+1)(2048/K)-1.
+  y^+=y+2\mu(y)q\,\delta u+O(\delta u^2)
+     =y+2m\,\delta u+O(\delta u^2),
 \]
-Aligned path, phase, and edge coordinates consequently share the same
-Philox uniform, while extra fine transitions receive independent
-identifiers.  This is a variance-reduction coupling only: every level keeps
-its exact marginal law.  The $K=2048$ level is reserved for the numerical
-generator-limit reference
-\begin{equation}
-  \mu_\star=\frac{4\mu_{2048}-\mu_{1024}}{3}.
-  \label{eq:d0-jacobi-richardson-reference}
-\end{equation}
-It is explicitly a high-resolution Richardson reference, not an analytic
-solution of a 784-dimensional Kolmogorov equation.  Independent local
-generator identities on linear, quadratic, and cubic observables prevent
-the extrapolation from being the sole consistency check.
+so it preserves the intended infinitesimal learned reverse generator.
 
-The nonstationary paths start from the same first label-3 MNIST measure used
-by the one-image program, with uniform mixing $\lambda=0.35$.  The
-authorizing observables are eight low Fourier modes and the centered,
-Dirichlet-normalized quantities $\sum_i s_i^2$ and $\sum_i s_i^3$, recorded
-at quarter-horizon checkpoints.  Each degree family and the pooled vector
-must show weak order at least $1.8$, a $K=512$ versus $K=1024$ discrepancy
-at most $0.005$, and a $K=512$ versus $\mu_\star$ discrepancy at most
-$0.01$.  The higher- and lower-resolution Richardson extrapolates must
-agree within $0.005$.  Whole path identifiers are resampled jointly across
-levels, times, and observables.
+\paragraph{Restricted claim.}
+Fresh training and confirmation must establish positive time-local risk
+improvement, and separate one/eight-phase controls must establish weak-law and
+microstep refinement bounds. Passing supports only a boundary-tangent
+time-local controller for one image under the certified fixed-$K=512$ split
+chain. It does not itself authorize a complete reverse path, reconstruction,
+known-prior claim, unsplit-generator limit, or spatial
+Dirichlet--Ferguson limit.
 
-Before the expensive study, a disjoint variance-only pilot freezes either
-32 or 64 production paths and a 16- or 32-path $K=2048$ subset.  It may use
-variances and timings but not pilot means to choose the design.  A design
-must meet the predeclared confidence-width targets and project to at most
-48 hours.  Production panels are generated only after this choice is
-sealed.
+\paragraph{Eager-prefix time-local confirmation.}
+The certified eager-prefix schedule changes only how the exact binary64
+Jacobi inverse-CDF certificate is executed. It is used for both the seven
+canonical phase transitions and the eight midpoint branches; it does not
+change the transition law, exposure, uniform stream, or Rao--Blackwell label.
+Fresh train and validation evidence uses 64 and 32 paths executed in cohorts
+$[10\mathbin{\times}9,6]$, while 64 sealed confirmation paths are streamed
+separately in cohorts $[10\mathbin{\times}6,4]$. A cohort that crosses the
+train/validation boundary is split by immutable role before persistence.
 
-The target-stage artifact also contained a nonauthorizing 16-path
-stationarity diagnostic whose degree-one interval missed zero.  The
-refinement preflight does not silently discard it: two fresh immutable
-128-path panels jointly test Legendre degrees one through eight and
-reversibility at 99\% simultaneous coverage.  Full palindromic sweeps at
-every refinement level additionally test exact Dirichlet moments,
-initial-to-terminal drift, and antisymmetric detailed-balance witnesses.
+Before physical labels are opened, an exact synthetic tangent teacher and an
+exact-baseline null must pass. All three physical seeds then compete with
+update zero. A nonzero checkpoint is eligible only if it lowers validation
+risk relative to the training-only baseline both overall and in the
+high-reverse-time quartile. The sealed authorizing family contains 224
+combined-versus-zero contrasts (four time quartiles, seven phase occurrences,
+and eight midpoint fractions) and four combined-versus-baseline quartile
+contrasts. Every one-sided 99.5\% simultaneous lower bound must be strictly
+positive.
 
-The additive entry point is
-\nolinkurl{mnist.diag_d0_jacobi_rb_strang_refinement}.  Its production
-sequence is:
-\begin{Verbatim}[fontsize=\scriptsize,breaklines=true,breakanywhere=true]
-$parentRoot = "runs/experiment12_d0_jacobi_rb_cuda_multipath_confirmation"
-$parentRun = Join-Path $parentRoot `
-  "20260723-092105_production-multipath-jacobi-rb"
-$refinementRoot = "runs/experiment12_d0_jacobi_rb_strang_refinement"
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_strang_refinement `
-  --runs-root $refinementRoot `
-  --run-name production-state-dependent-strang-refinement `
-  --device cuda --stage preflight `
-  --parent-multipath-run-dir $parentRun `
-  --require-gate preflight
-
-$strangRun = (Get-ChildItem $refinementRoot -Directory |
-  Where-Object Name -Like "*_production-state-dependent-strang-refinement" |
-  Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_strang_refinement `
-  --device cuda --stage power --resume-run-dir $strangRun `
-  --parent-multipath-run-dir $parentRun `
-  --require-gate power
-
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_strang_refinement `
-  --device cuda --stage refinement --resume-run-dir $strangRun `
-  --parent-multipath-run-dir $parentRun `
-  --require-gate refinement
-\end{Verbatim}
-
-Only
-\nolinkurl{exact_state_dependent_strang_refinement_feasible}
-authorizes a separate one-image, phase-conditioned regression experiment on
-the exact Rao--Blackwell label.  It still authorizes neither reverse
-sampling nor a spatial Dirichlet--Ferguson convergence claim.
-
-\section{Relation to the failed C0--C3 estimators}
-
-D0 changes where the conditional mean is estimated.
-
-\begin{itemize}[leftmargin=1.5em]
-  \item \textbf{C0 weighted innovations.}  C0 asked for a Brownian shift under a rare terminal event using free rollouts from a source.  Since free terminals were not digit-like, the useful conditional signal on visited states was nearly zero.  D0 directly samples forward paths from data and regresses \(\E[U_k\mid S_{k+1}=s,y]\), the realized reverse physical transfer after subtracting the known reference drift.
-  \item \textbf{C1 Girsanov proposals.}  C1 remained an importance-sampling correction for a rare terminal event, hence path weights collapsed in high dimension.  D0 has no terminal weights and no path-space ESS.
-  \item \textbf{C2/C2.1 branches.}  Branch continuations from off-data free states mostly selected among noise blobs.  D0 puts the branch point distribution on actual noised data states.
-  \item \textbf{C3 scalar value.}  Value MSE can be high-quality while spatial derivatives are poor.  D0 directly supervises the projected physical reverse residual rather than differentiating a fitted scalar value.
-\end{itemize}
-
-This explains why D0 is a natural fixed-grid Eulerian DDPM analogue: it moves the learning problem from a terminal rare-event estimator to a noising-process denoising estimator, while retaining the conservative finite-volume h-transform geometry.  The stronger Dirichlet--Ferguson and known-prior claims additionally require the manuscript \(\alpha_h=\beta h^d\) scaling, refinement evidence, and terminal mixing to a label-independent known law.
-
-\section{Reconnecting D0 to terminal preferences}
-
-D0 first learns the data-density h-transform.  After this generator reaches digit-like states, terminal preference conditioning can be layered on top.
-
-\paragraph{Guidance.}
-For a positive preference \(g_h(s)\), add a conservative guidance flux at sampling time:
-\begin{equation}\label{eq:d0-guidance-flux}
-  J_{\mathrm{guidance},e}(s)=\gamma\frac{2w_\sigma^2}{h}\theta_e(s)\partial_e^h\log g_h(s),
-\end{equation}
-or equivalently add the Brownian-coordinate shift
-\begin{equation}\label{eq:d0-guidance-brownian}
-  \eta_{\mathrm{guidance},e}(s)=\gamma w_\sigma\sqrt{2\theta_e(s)}\partial_e^h\log g_h(s).
-\end{equation}
-This is the conservative-flux analogue of classifier guidance.  It should be reported as an approximate h-transform of the learned data generator, not as the exact original terminal bridge unless corrected.
-
-\paragraph{Reviving C1.}
-Use the D0 generator as the proposal for Girsanov-corrected terminal tilting.  The proposal then has mass on digit-like paths, so ESS collapse should be substantially reduced.
-
-\paragraph{Reviving C3.}
-Estimate branch or value targets on-policy under the D0 generator's state distribution, with derivative regularization.  This addresses the C3 issue that value accuracy alone did not imply useful edge gradients.
-
-\section{Risks and open implementation items}
-
-\begin{enumerate}[leftmargin=2.0em]
-  \item \textbf{Sign and time conventions.}  The direct baseline predicts \(u_\theta=\E[\widetilde U_k\mid\text{later state}]\).  Reverse sampling adds the direct transfer \(b^{\mathrm{ref}}\Delta t+c_Uu_\theta+\sigma\sqrt{\Delta t}\,\zeta\) through the positive incidence convention.  Use \(\tau=T-t\) and reverse schedule indices consistently.
-  \item \textbf{Symmetry of the practical reference.}  The exact data-density h-transform theory requires the noising reference to be \(\nu_h\)-symmetric.  If the code decouples \(w_{\mathrm{free}}\) and \(w_\sigma\), D0 is still a valid reverse-kernel regression but is no longer exactly the symmetric h-transform above.
-  \item \textbf{Initial-law singularity.}  Empirical data is singular relative to \(\nu_h\).  The rigorous density statement uses a specified smoothed data density or starts at a positive noising time.  Uniform flooring alone does not remove this singularity.
-  \item \textbf{Conditional covariance.}  The finite-step conditional covariance given a later state is generally state-dependent and nonidentity; it need not be pointwise smaller than identity.  Fresh reference noise is the continuous-time reverse-diffusion prescription, not an exact conditional Euler-kernel covariance.  Log residual covariance on held-out forward steps.
-  \item \textbf{Block bias.}  The strict baseline uses exact substeps and \(r=1\).  A block target conditioned only on \(S_{k+r}\), or uniform redistribution of its mean, defines an additional coarse-kernel approximation.
-  \item \textbf{Limiter bias.}  A limiter or floor/renormalization changes the transition kernel.  Using the same implementation label forward and reverse does not establish Bayes reversal.  The physical target stores the applied transfer, but selecting the loss on a random no-intervention mask would introduce another conditional law.  Report interventions and verify that their rates vanish under refinement before making an h-transform claim.
-  \item \textbf{Lambda defines the target.}  The generated samples live on the \(\lambda\)-floored simplex.  Use the same \(\lambda\) everywhere.
-  \item \textbf{Grid scaling.}  Fixed \(\bar\alpha\) is a fixed-grid practical model.  A Dirichlet--Ferguson refinement claim requires fixed \(\beta\) and \(\alpha_h=\beta h^d\) across grids.
-  \item \textbf{Prior claim.}  The terminal bank exactly controls initialization for the chosen forward discretization, but is empirical and class-conditional.  It becomes replaceable by \(\nu_h\) or another known prior only after quantitative mixing and label-leakage tests.
-\end{enumerate}
-
-\appendix
-\section{Minimal D0 checklist}
-
-\begin{enumerate}[leftmargin=2.0em]
-  \item Forward rollouts start at \(S_0=(1-\lambda)a+\lambda\unif\), with learned weight exactly zero.
-  \item The symmetric reference relation \(w_{\mathrm{free}}=w_\sigma^2\) and the chosen \(\alpha_h\) convention are recorded; fixed-\(\bar\alpha\) runs are labelled fixed-grid.
-  \item Realized applied physical transfers and raw Gaussian edge innovations are both stored.
-  \item Limiter and low-mobility edge masks, aggregate floor-touched rates, and correction magnitudes are reported; the direct physical loss uses all finite projected transfers rather than conditioning on a random intervention mask.
-  \item Exact-substep cache slices are keyed at \(S_{k+1}\), not \(S_k\); the baseline stride is \(r=1\).
-  \item There are no terminal weights, no endpoint input, and no source \(z\) input in D0 mode.
-  \item The network sees only time, state, and label: \((\tau,S_{k+1},y)\) or the consistently chosen equivalent time convention.
-  \item Form \(U_k=-\Delta K_k^{\mathrm{app}}-b_k^{\mathrm{ref}}(S_{k+1})\Delta t\), where index \(k\) selects the same forward schedule interval, and train on \(\widetilde U_k=\Pi_{\mathrm{inc}}U_k/c_U\).
-  \item The exact baseline uses per-slice MSE with output penalty \(\lambda_m=0\).
-  \item Direct reverse sampling adds the known reference drift, learned residual, and fresh reference noise through the positive incidence convention.
-  \item First runs initialize from the matching empirical forward terminal bank, without calling it an analytic prior.
-  \item The zero-residual reference test and overfit-one-image test pass before any full dataset run.
-  \item Per-time-bin target RMS, residual RMS, learned/noise ratio, clip fraction, frozen-edge fraction, entropy, TV, and preview grids are logged at every cache refresh.
-\end{enumerate}
-
-\section{Suggested cache schema}
-
+This confirmation stops before any learned controller step. Its successful
+decision is
 \begin{center}
-\begin{tabular}{@{}p{0.36\textwidth}p{0.60\textwidth}@{}}
-\toprule
-Field & Meaning \\
-\midrule
-\texttt{state} & later state \(S_{k+1}\in\R^{n\times n}\) for the \(r=1\) baseline \\
-\texttt{time} & \(t_{k+1}\) or \(\tau_{k+1}=T-t_{k+1}\), fixed consistently \\
-\texttt{label} & class label \(y\) \\
-\texttt{realized\_reverse\_transfer} & stored \(R_k=-\Delta K_k^{\mathrm{app}}\) for \(r=1\) \\
-\texttt{physical\_residual} & derived \(U_k=R_k-b_k^{\mathrm{ref}}(S_{k+1})\Delta t\) \\
-\texttt{scaled\_residual} & derived \(\widetilde U_k=\Pi_{\mathrm{inc}}U_k/c_U\), one frozen run-level \(c_U>0\) \\
-\texttt{raw\_innovation} & optional raw \(\xi_k\), retained for diagnostics/full-kernel ablation \\
-\texttt{finite\_mask} & optional numerical finite-value mask, not an intervention-selection mask \\
-\texttt{start\_image} & optional diagnostic-only data image \(a\) \\
-\texttt{terminal\_state} & optional diagnostic-only final state for prior-bank checks \\
-\bottomrule
-\end{tabular}
+\texttt{exact\_rb\_boundary\_tangent\_}\newline
+\texttt{time\_local\_signal\_confirmed}.
 \end{center}
+It
+authorizes only planning a separate at-most-eight-phase controller-control
+experiment. It does not authorize a controller trajectory, complete reverse
+path, reconstruction, sampling, or a continuum claim.
 
-\section{Pseudocode}
+\paragraph{Frozen evidence contract.}
+Every fresh path executes all 512 outer steps of the certified grid-28,
+$\alpha=1$, $\tau_{\rm eff}=5\times10^{-5}$ chain. Evidence is recorded at
+outer steps $15,31,\ldots,511$, all seven split-phase occurrences, and the
+eight exact within-phase fractions $(2j+1)/16$, $j=0,\ldots,7$. The fresh
+train, validation, and confirmation roles contain 64, 32, and 64 whole paths,
+respectively. The training-only table $q_B$ therefore has shape
+$4\times7\times8\times392$.
 
-\paragraph{Cache generation.}
-\begin{verbatim}
-for path in range(cache_paths):
-    y = sample_label()
-    a = sample_training_image(label=y)
-    s0 = (1 - lambda_floor) * normalize(a) + lambda_floor * uniform_grid()
-    rollout = simulate_free_reference(
-        state=s0,
-        learned_weight=0.0,
-        store_states=True,
-        store_applied_edge_transfers=True,
-        store_raw_gaussian_xi=True,
-        store_limiter_validity_masks=True,
-        collect_floor_and_renorm_counters=True,
-    )
-    prior_bank.add(rollout.states[K])
-    for slice in range(time_slices_per_path):
-        k = sample_start_index(0, K - 1)  # theory baseline: r = 1
-        later = rollout.states[k+1]
-        reverse_transfer = -rollout.applied_edge_transfers[k]
-        cache.add(state=later,
-                  time=reverse_or_forward_time(k+1),
-                  label=y,
-                  realized_reverse_transfer=reverse_transfer,
-                  schedule_interval=k,
-                  raw_innovation=rollout.raw_xi[k],
-                  limiter_validity=rollout.limiter_validity_masks[k],
-                  start_image_for_diagnostics=a)
-initial_cache_residual_rms = rms_over_cache(
-    project_incidence_relevant_edges(
-        slice.realized_reverse_transfer
-        - b_ref(schedule_interval=slice.schedule_interval,
-                state=slice.state) * dt))
-cache.physical_target_scale = max(initial_cache_residual_rms, scale_floor)
-\end{verbatim}
+The residual model is the unchanged width-32 phase-conditioned
+local-affine CNN with three circular $3\times3$ convolutions, a four-color
+spatial head, and a local affine edge head. Its exclusive inputs are the later
+full state, reverse time, phase occurrence, matching color, phase duration,
+and digit label. Earlier states, outer-step and midpoint indices, targets, and
+certificates remain outside the model firewall. Training uses Adam with
+learning rate $10^{-3}$, batch size 32, zero weight decay, 4,000 updates,
+validation every 100 updates, unit gradient clipping, deterministic execution,
+and no mixed precision. An exact tangent teacher and exact-baseline null must
+pass before physical labels are opened.
 
-\paragraph{Training step.}
-\begin{verbatim}
-batch = sample_cache(batch_size)
-U_scaled = derive_projected_scaled_residual(
-    batch, run_config, cache.physical_target_scale)
-u_pred = project_incidence_relevant_edges(
-    model(time=batch.time, state=batch.state, label=batch.label))
-per_edge = (u_pred - U_scaled)**2
-per_slice = per_edge.mean(edge_dims)
-lambda_m = 0.0  # exact conditional-mean baseline
-loss = per_slice.mean()
-loss.backward()
-clip_grad_norm_(model.parameters(), 1.0)
-optimizer.step(); ema.update()
-\end{verbatim}
+The sealed confirmation is a one-sided 99.5\% whole-path studentized max-$T$
+family with 228 components. Of these, 224 compare the combined predictor
+against zero by quartile, phase, and midpoint; four compare it against the
+frozen baseline by quartile. A separate two-sided family has 784 components.
+It controls one-phase and eight-phase reverse laws at outer-step anchors
+$127,255,383,511$ and learned microstep counts $M=2,4,8$. It requires the
+normalized $M=8$ weak-law bias to be at most $0.10$ and the $M=8$ versus $M=4$
+discrepancy to be at most $0.05$. Both families use 50,000 deterministic
+whole-path bootstrap replicates. Only the terminal decision
+\begin{center}
+\texttt{exact\_rb\_boundary\_tangent\_controller\_controlled}
+\end{center}
+permits planning a separate conditional reconstruction control; it does not
+itself permit sampling.
 
-\paragraph{Reverse sampling, stride one.}
-\begin{verbatim}
-s = sample_from_prior_bank(label=y)
-for k in reversed(range(K)):
-    tau = T - t[k+1]
-    u = project_incidence_relevant_edges(ema_model(time=tau, state=s, label=y))
-    dK_rev = b_ref(schedule_interval=k, state=s) * dt \
-             + cache.physical_target_scale * u \
-             + sigma_ref(schedule_interval=k, state=s) * sqrt(dt) * randn_like(u)
-    s = s + incidence_divergence(dK_rev)
-    s = limiter_floor_renorm_substep(s)
-\end{verbatim}
+\section{Quartile-specialized exact-RB learnability gate}
 
-\begin{thebibliography}{9}
+\paragraph{Motivation and unchanged target.}
+The sealed v3 adjudication resolved the earliest forward-time quartile,
+found a positive but underpowered direction in the second quartile, and found
+positive alignment but excessive prediction energy in the final two
+quartiles.  The next experiment therefore replaces the single shared learner
+by four independent width-32 boundary-tangent experts.  Expert $q$ is trained
+only on rows in forward-time quartile $q$, but every expert retains the exact
+raw Jacobi/Rao--Blackwell label
+\[
+  \bar Z(X,Y,u)=Y(1-Y)\,\partial_Y\log k_u(Y\mid X)
+\]
+and minimizes plain, unweighted MSE within its quartile.  One positive
+training-only RMS constant per quartile merely normalizes optimizer units; it
+does not alter the population minimizer.
 
-\bibitem{main-manuscript}
-Internal manuscript.
-\newblock \emph{Conditioning a measure-valued diffusion on the Wasserstein space}.
-\newblock Project manuscript, \texttt{main.tex}, 2026.
-\newblock See especially Sec.~3 for the continuum Doob h-transform, Girsanov density, and drifted particle dynamics.
+\paragraph{Training-only amplitude calibration.}
+The first two experts have gain one.  For a frozen checkpoint in quartile
+$q\in\{2,3\}$, a disjoint gain panel computes
+\[
+  C_q=\operatorname{mean}(\bar Z m_q),\qquad
+  P_q=\operatorname{mean}(m_q^2),\qquad
+  \lambda_q=C_q/P_q.
+\]
+The candidate is admissible only when $C_q,P_q>0$ and
+$0<\lambda_q<1$; the gain is never clipped or fitted on selection evidence.
+All gains are sealed before a second disjoint training-only role ranks one
+checkpoint for each quartile.  Since the experts have disjoint temporal
+support, this independent ranking is the exact separable system-selection
+rule and does not search a Cartesian product on audit data.
 
-\bibitem{eulerian-manuscript}
-Draft manuscript.
-\newblock \emph{A renormalized finite-volume program for the Dirichlet--Ferguson diffusion on the torus}.
-\newblock Project manuscript, \texttt{eulerian\_approx.tex}, 2026.
-\newblock See especially Secs.~3--7 for the grid simplex, grid Dirichlet law, renormalized harmonic mobility, closed form, grid SDE, terminal h-transform, and simulation rule.
+\paragraph{Fresh evidence and authorization.}
+One sealed four-expert system is evaluated first on 384 fresh whole paths and,
+only after a pass, on 384 untouched confirmation paths.  Each audit uses the
+same one-sided 99.5\% studentized max-$T$ family of six pooled contrasts: four
+specialist-versus-zero quartile contrasts and two shrunken-versus-unit-gain
+contrasts for quartiles 2 and 3.  Fifty thousand precommitted Philox bootstrap
+replicates are shared across the six components.  Fixed phase, midpoint, and
+phase-by-midpoint directional screens test compatibility without selecting or
+modifying the system.
 
-\bibitem{c0-note}
-Internal note.
-\newblock \emph{Experiment C0: Weighted Free-Rollout Innovation Matching}.
-\newblock Theory and implementation note, 2026.
-\newblock See especially Secs.~6--9 for Brownian-shift coordinates, conditional innovation matching, and the weighted loss, and Sec.~11 for cache machinery.
-
-\bibitem{experiment11-report}
-Internal progress note.
-\newblock \emph{Experiment 11: Toward a DDPM-like Eulerian h-transform generator for MNIST}.
-\newblock Background, experiment log, and current failure diagnosis, 2026.
-\newblock See especially Secs.~4--8 for the C0--C3 experiments and failure interpretation.
-
-\bibitem{ho2020ddpm}
-Jonathan Ho, Ajay Jain, and Pieter Abbeel.
-\newblock Denoising diffusion probabilistic models.
-\newblock \emph{Advances in Neural Information Processing Systems}, 2020.
-
-\bibitem{anderson1982reverse}
-Brian D. O. Anderson.
-\newblock Reverse-time diffusion equation models.
-\newblock \emph{Stochastic Processes and their Applications}, 12(3):313--326, 1982.
-
-\bibitem{johansson2018legendre}
-Fredrik Johansson and Marc Mezzarobba.
-\newblock Fast and rigorous arbitrary-precision computation of
-Gauss--Legendre quadrature nodes and weights.
-\newblock \emph{SIAM Journal on Scientific Computing}, 40(4):C726--C747,
-2018.
-\newblock See Proposition~5 for the global Bonnet-recurrence perturbation
-bound used by the fused certificate.
-
-\end{thebibliography}
+Only
+\begin{center}
+\texttt{exact\_rb\_quartile\_specialist\_time\_local\_signal\_confirmed}
+\end{center}
+authorizes planning a separate reverse-controller control milestone.  It
+does not authorize controller execution, a reverse trajectory,
+reconstruction, sampling, full-data generalization, a continuum limit, or a
+claim about the unsplit generator.
 
 \end{document}

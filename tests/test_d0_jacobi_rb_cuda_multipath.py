@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,14 +9,19 @@ import numpy as np
 import pytest
 import torch
 
+from mnist import d0_jacobi_rb_cuda_controls as _controls
 from mnist.d0_jacobi_rb_cuda import JacobiRBCudaProfile
 from mnist.d0_jacobi_rb_cuda_controls import canonical_transition_ids
 from mnist.d0_jacobi_rb_cuda_multipath import (
+    CAPTURE_PAYLOAD_SCHEMA,
     EDGES_PER_PHASE,
+    ExactMultipathCapturePayload,
     FROZEN_PROJECTION_GROUP_SIZES,
     FROZEN_PROJECTION_PATH_COUNT,
     FROZEN_VALIDATION_GROUP_SIZES,
     MAX_PATHS_PER_GROUP,
+    PATH_STATE_SIZE,
+    PHASE_MATCHINGS,
     SHARD_STEPS,
     canonical_same_phase_transition_ids,
     run_exact_multipath_shard,
@@ -25,7 +32,7 @@ from mnist.d0_jacobi_rb_cuda_multipath import (
 class _RecordingSampler:
     def __init__(self, *, record_calls: bool = True) -> None:
         self.record_calls = bool(record_calls)
-        self.calls: list[dict[str, torch.Tensor]] = []
+        self.calls: list[dict[str, object]] = []
 
     def __call__(
         self,
@@ -41,6 +48,8 @@ class _RecordingSampler:
                     "x": x.detach().clone(),
                     "exposure": exposure.detach().clone(),
                     "ids": ids.detach().clone(),
+                    "profile": kwargs["profile"],
+                    "rng_key": kwargs["rng_key"],
                 }
             )
         count = int(x.numel())
@@ -140,6 +149,177 @@ def test_same_phase_ids_are_path_major_canonical_and_batch_invariant() -> None:
     )
 
 
+def test_capture_disabled_is_backward_compatible_and_absent_from_record() -> None:
+    result = run_exact_multipath_shard(
+        _states(1),
+        path_ids=(9,),
+        start_step=0,
+        root_seed=261131,
+        profile=JacobiRBCudaProfile(),
+        sampler=_RecordingSampler(record_calls=False),
+    )
+
+    assert CAPTURE_PAYLOAD_SCHEMA == "jacobi-rb-cuda-exact-multipath-capture-v1"
+    assert result.capture_payload is None
+    assert result.phase_state_records == ()
+    assert result.diagnostics["phase_state_trace_enabled"] == 0
+    assert result.to_record().keys() == {
+        "schema",
+        "schema_version",
+        "path_records",
+        "phase_state_records",
+        "batch_output_sha256",
+        "batch_final_state_sha256",
+        "batch_certificate_sha256",
+        "diagnostics",
+    }
+    assert "capture_payload" not in result.to_record()
+
+
+def test_training_capture_is_sampler_and_hash_neutral() -> None:
+    states = _states(2)
+    path_ids = (17, 3)
+    baseline_sampler = _RecordingSampler()
+    capture_sampler = _RecordingSampler()
+    baseline = run_exact_multipath_shard(
+        states,
+        path_ids=path_ids,
+        start_step=8,
+        root_seed=261131,
+        profile=JacobiRBCudaProfile(),
+        group_sizes=(2,),
+        sampler=baseline_sampler,
+    )
+    captured = run_exact_multipath_shard(
+        states,
+        path_ids=path_ids,
+        start_step=8,
+        root_seed=261131,
+        profile=JacobiRBCudaProfile(),
+        group_sizes=(2,),
+        sampler=capture_sampler,
+        capture_training_payload=True,
+    )
+
+    assert torch.equal(baseline.final_states, captured.final_states)
+    np.testing.assert_array_equal(
+        baseline.committed_final_states, captured.committed_final_states
+    )
+    assert baseline.path_records == captured.path_records
+    assert baseline.batch_output_sha256 == captured.batch_output_sha256
+    assert baseline.batch_final_state_sha256 == captured.batch_final_state_sha256
+    assert (
+        baseline.batch_certificate_sha256
+        == captured.batch_certificate_sha256
+    )
+    assert len(baseline_sampler.calls) == len(capture_sampler.calls) == 8 * 7
+    for baseline_call, capture_call in zip(
+        baseline_sampler.calls, capture_sampler.calls, strict=True
+    ):
+        assert baseline_call.keys() == capture_call.keys()
+        for name in ("x", "exposure", "ids"):
+            left = baseline_call[name]
+            right = capture_call[name]
+            assert isinstance(left, torch.Tensor)
+            assert isinstance(right, torch.Tensor)
+            assert torch.equal(left, right)
+        for name in ("profile", "rng_key"):
+            assert baseline_call[name] == capture_call[name]
+
+
+def test_training_capture_shapes_read_only_alignment_and_output_hashes() -> None:
+    path_ids = (17, 3)
+    result = run_exact_multipath_shard(
+        _states(2),
+        path_ids=path_ids,
+        start_step=8,
+        root_seed=261131,
+        profile=JacobiRBCudaProfile(),
+        group_sizes=(2,),
+        sampler=_RecordingSampler(record_calls=False),
+        capture_training_payload=True,
+    )
+    payload = result.capture_payload
+    assert isinstance(payload, ExactMultipathCapturePayload)
+    assert payload.path_ids == (3, 17)
+    assert payload.start_step == 8
+    assert payload.outer_steps == tuple(
+        outer_step
+        for outer_step in range(8, 16)
+        for _phase in range(len(PHASE_MATCHINGS))
+    )
+    assert payload.phases == tuple(
+        phase
+        for _local_step in range(SHARD_STEPS)
+        for phase in range(len(PHASE_MATCHINGS))
+    )
+    arrays = {
+        "later_head_fractions": (
+            payload.later_head_fractions,
+            (56, 2, EDGES_PER_PHASE),
+            np.dtype(np.float64),
+        ),
+        "denoising_targets": (
+            payload.denoising_targets,
+            (56, 2, EDGES_PER_PHASE),
+            np.dtype(np.float64),
+        ),
+        "certificate_codes": (
+            payload.certificate_codes,
+            (56, 2, EDGES_PER_PHASE),
+            np.dtype(np.uint8),
+        ),
+        "post_phase_states": (
+            payload.post_phase_states,
+            (56, 2, PATH_STATE_SIZE),
+            np.dtype(np.float64),
+        ),
+    }
+    for name, (array, shape, dtype) in arrays.items():
+        assert array.shape == shape
+        assert array.dtype == dtype
+        assert array.flags.c_contiguous
+        assert not array.flags.writeable
+        with pytest.raises(ValueError, match="read-only"):
+            array.flat[0] = 0
+        field = next(item for item in fields(payload) if item.name == name)
+        assert not field.repr
+        assert not field.compare
+
+    matching_arrays = _controls._matching_arrays()
+    for block, phase in enumerate(payload.phases):
+        tails, heads = matching_arrays[PHASE_MATCHINGS[phase]]
+        state = payload.post_phase_states[block]
+        pair_total = state[:, tails] + state[:, heads]
+        np.testing.assert_allclose(
+            state[:, heads],
+            pair_total * payload.later_head_fractions[block],
+            rtol=2.0e-15,
+            atol=2.0e-15,
+        )
+        np.testing.assert_allclose(
+            state[:, tails],
+            pair_total * (1.0 - payload.later_head_fractions[block]),
+            rtol=2.0e-15,
+            atol=2.0e-15,
+        )
+
+    records_by_id = {record.path_id: record for record in result.path_records}
+    for path_index, path_id in enumerate(payload.path_ids):
+        digest = hashlib.sha256()
+        for block in range(len(payload.phases)):
+            digest.update(
+                bytes.fromhex(
+                    _controls._digest_arrays(
+                        payload.later_head_fractions[block, path_index],
+                        payload.denoising_targets[block, path_index],
+                        payload.certificate_codes[block, path_index],
+                    )
+                )
+            )
+        assert digest.hexdigest() == records_by_id[path_id].output_sha256
+
+
 def test_batched_and_serial_group_schedules_are_bit_and_hash_identical() -> None:
     states = _states(3)
     paths = (2, 7, 11)
@@ -221,7 +401,7 @@ def test_batch_hashes_are_path_id_canonical_under_permutation_and_regrouping() -
         profile=JacobiRBCudaProfile(),
         group_sizes=(3,),
         sampler=_RecordingSampler(record_calls=False),
-        capture_phase_state_trace=True,
+        capture_training_payload=True,
     )
     permutation = torch.as_tensor((2, 0, 1), dtype=torch.int64)
     permuted_paths = tuple(original_paths[index] for index in permutation.tolist())
@@ -233,12 +413,29 @@ def test_batch_hashes_are_path_id_canonical_under_permutation_and_regrouping() -
         profile=JacobiRBCudaProfile(),
         group_sizes=(1, 2),
         sampler=_RecordingSampler(record_calls=False),
-        capture_phase_state_trace=True,
+        capture_training_payload=True,
     )
 
     assert original.batch_output_sha256 == permuted.batch_output_sha256
     assert original.batch_final_state_sha256 == permuted.batch_final_state_sha256
     assert original.phase_state_records == permuted.phase_state_records
+    assert original.capture_payload is not None
+    assert permuted.capture_payload is not None
+    assert original.capture_payload.path_ids == permuted.capture_payload.path_ids == (
+        2,
+        5,
+        8,
+    )
+    for name in (
+        "later_head_fractions",
+        "denoising_targets",
+        "certificate_codes",
+        "post_phase_states",
+    ):
+        np.testing.assert_array_equal(
+            getattr(original.capture_payload, name),
+            getattr(permuted.capture_payload, name),
+        )
     original_by_path = {record.path_id: record for record in original.path_records}
     permuted_by_path = {record.path_id: record for record in permuted.path_records}
     for path_id in original_paths:

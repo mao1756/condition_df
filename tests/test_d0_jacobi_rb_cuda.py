@@ -9,6 +9,16 @@ import torch
 
 import mnist.d0_jacobi_rb_cuda as rb_cuda
 import mnist.d0_jacobi_rb_cuda_fused as rb_fused
+from mnist.d0_jacobi_rb_boundary_tangent_cache import (
+    BOUNDARY_TANGENT_CACHE_VERSION,
+)
+from mnist.d0_jacobi_rb_boundary_tangent_prefix_schedule import (
+    eager_prefix_profile,
+)
+from mnist.d0_jacobi_rb_boundary_tangent_prefix_fallback import (
+    sample_alpha1_rb_transition_batch_cuda_eager,
+)
+from mnist.d0_jacobi_rb_boundary_tangent_schedule import ROOT_SEED
 from mnist.d0_jacobi_rb_cuda import (
     CertifiedRBCudaBatch,
     JacobiRBCudaProfile,
@@ -453,3 +463,33 @@ def test_parent_v1_keyed_continuation_refines_the_recorded_word(monkeypatch) -> 
     assert row["target"] == -2.6886007904383883e-05
     assert row["prefix_bits"] == 128
     assert row["certificate_code"] == 15
+
+
+@pytest.mark.skipif(not _frozen_cuda_available(), reason="frozen CUDA/Arb runtime unavailable")
+def test_eager_arb_escalation_certifies_small_exposure_branch_lane() -> None:
+    result = sample_alpha1_rb_transition_batch_cuda_eager(
+        torch.tensor([0.5], dtype=torch.float64, device="cuda"),
+        torch.tensor(
+            [7.1777343750000015e-06], dtype=torch.float64, device="cuda"
+        ),
+        rng_key=(
+            ROOT_SEED,
+            BOUNDARY_TANGENT_CACHE_VERSION,
+            "partial-phase-target-prefix",
+        ),
+        transition_ids=torch.tensor(
+            [7086446741318270976], dtype=torch.uint64, device="cuda"
+        ),
+        profile=eager_prefix_profile(),
+    )
+
+    assert result.fallback_mask.tolist() == [True]
+    assert result.strengthened_mask.tolist() == [True]
+    assert result.certificate_codes.tolist() == [15]
+    assert result.later_head_fraction.item() == 0.4996324195179097
+    assert result.denoising_target.item() == 25.60541796782855
+    assert result.prefix_bits.item() >= 128
+    assert result.quantile_lower.item() <= result.later_head_fraction.item()
+    assert result.later_head_fraction.item() <= result.quantile_upper.item()
+    assert result.target_lower.item() <= result.denoising_target.item()
+    assert result.denoising_target.item() <= result.target_upper.item()

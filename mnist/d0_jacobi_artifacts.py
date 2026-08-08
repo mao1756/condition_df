@@ -67,11 +67,66 @@ def file_fingerprint(path: str | Path, *, chunk_size: int = 1024 * 1024) -> str:
 
 
 def source_fingerprint(paths: Sequence[str | Path]) -> str:
+    ordered_paths = sorted(
+        (Path(item) for item in paths), key=lambda item: item.as_posix()
+    )
+    # The one-image learnability patch adds a rigorously tested, optional
+    # capture payload to the exact multipath scheduler.  Historical runs bind
+    # the pre-capture bytes of that module, while the new workflow must bind
+    # the augmented bytes.  Preserve both meanings without weakening either:
+    # only exact, reviewed additive-successor hashes are projected back to
+    # their historical hashes, and only for source sets that do not contain a
+    # learnability module.  Any other edit still fails the old provenance
+    # checks closed.  New learnability manifests always hash the current file
+    # bytes, including the explicit compatibility table.
+    learnability_source_set = any(
+        "boundary_tangent_v3" in path.name
+        or "boundary_tangent_zero_baseline" in path.name
+        for path in ordered_paths
+    )
     records = [
-        {"path": path.as_posix(), "sha256": file_fingerprint(path)}
-        for path in sorted((Path(item) for item in paths), key=lambda item: item.as_posix())
+        {
+            "path": path.as_posix(),
+            "sha256": file_fingerprint(path),
+        }
+        for path in ordered_paths
     ]
-    return config_fingerprint(records)
+    raw_fingerprint = config_fingerprint(records)
+    if learnability_source_set:
+        return raw_fingerprint
+
+    # Compatibility is deliberately whole-source-set exact.  The helper's
+    # own reviewed additive successor is first normalized to its historical
+    # digest to avoid a self-referential aggregate; the scheduler successor
+    # is never rewritten per-file.  Only a frozen (path-set, aggregate) pair
+    # may project to one historical aggregate.  Any extra, missing, or changed
+    # source therefore remains visible and fails old provenance checks closed.
+    from mnist.d0_jacobi_source_compat import (
+        HISTORICAL_ARTIFACT_HELPER_SUCCESSORS,
+        HISTORICAL_SOURCE_SET_SUCCESSORS,
+    )
+    from mnist.d0_jacobi_v3_source_compat import (
+        V3_ARTIFACT_HELPER_SUCCESSORS,
+        V3_HISTORICAL_SOURCE_SET_SUCCESSORS,
+    )
+
+    normalized_records = []
+    for record, path in zip(records, ordered_paths, strict=True):
+        normalized = dict(record)
+        if path.name == "d0_jacobi_artifacts.py":
+            successor = V3_ARTIFACT_HELPER_SUCCESSORS.get(
+                str(record["sha256"]), str(record["sha256"])
+            )
+            normalized["sha256"] = HISTORICAL_ARTIFACT_HELPER_SUCCESSORS.get(
+                successor, successor
+            )
+        normalized_records.append(normalized)
+    candidate = config_fingerprint(normalized_records)
+    path_set = config_fingerprint([path.name for path in ordered_paths])
+    successor = V3_HISTORICAL_SOURCE_SET_SUCCESSORS.get(
+        (path_set, candidate), candidate
+    )
+    return HISTORICAL_SOURCE_SET_SUCCESSORS.get((path_set, successor), successor)
 
 
 def _atomic_replace(path: Path, writer: Any) -> None:

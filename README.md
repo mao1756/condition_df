@@ -3,6 +3,27 @@
 Research code for conditioning measure-valued diffusions on Wasserstein space,
 with small numerical examples and MNIST weighted-point-cloud experiments.
 
+## Active D0 gate: exact Jacobi/RB boundary-tangent controller
+
+The active D0 route keeps the certified fixed-grid Jacobi transition and the
+raw Rao--Blackwell denoising label. It fits a boundary-tangent conditional mean
+`m=y(1-y)q` on one frozen MNIST image, then tests only time-local and
+at-most-eight-phase reverse-controller behavior. It does not run a complete
+reverse path or generate an image.
+
+The staged production commands and the exact claim boundary are in
+[`docs/jacobi_rb_boundary_tangent_controller_confirmation.md`](docs/jacobi_rb_boundary_tangent_controller_confirmation.md).
+The entry point is:
+
+```powershell
+.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_boundary_tangent_controller_confirmation --help
+```
+
+Only the terminal decision
+`exact_rb_boundary_tangent_controller_controlled` authorizes planning a
+separate conditional reconstruction control. D0-v0 and D0-v1 remain available
+as historical diagnostics, not as the current scientific route.
+
 ## Layout
 
 - `core/`: shared numerical helpers and manuscript-level algorithms.
