@@ -68,6 +68,8 @@ def test_runpod_launcher_requires_durable_storage_before_delete() -> None:
         'mkdir "${LOCK_DIR}"'
     )
     assert "timeout --signal=TERM" in worker
+    assert "ruff check --select I --fix" in worker
+    assert "sed -i 's/\\r$//'" in launcher
     assert "/stop" in lifecycle
     assert "--request DELETE" in lifecycle
     assert "runpodctl stop pod" in lifecycle
@@ -171,3 +173,10 @@ def test_runpod_network_volume_stop_falls_back_to_delete(tmp_path: Path) -> None
     calls = record.read_text().splitlines()
     assert any(call == "stop pod test-pod" for call in calls)
     assert any(call == "remove pod test-pod" for call in calls)
+
+
+def test_runpod_shell_scripts_are_lf_only() -> None:
+    root = Path(__file__).resolve().parents[1] / "tools" / "runpod_weighted_e2e"
+    for script in sorted(root.glob("*.sh")):
+        raw = script.read_bytes()
+        assert b"\r\n" not in raw, f"{script.name} contains CRLF line endings"

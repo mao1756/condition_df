@@ -41,7 +41,6 @@ from mnist.d0_jacobi_rb_learnability import (
     matching_indices,
 )
 
-
 LARGE_GLOBAL_VERSION = "d0-jacobi-rb-global-large-v1"
 LARGE_GLOBAL_WIDTH = 128
 LARGE_GLOBAL_DILATIONS = (1, 2, 4, 8, 1, 2, 4, 8)

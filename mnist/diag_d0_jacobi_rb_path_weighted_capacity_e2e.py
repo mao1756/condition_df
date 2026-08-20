@@ -61,7 +61,6 @@ from mnist.eulerian_jacobi_ddpm_candidate import (
     reverse_sample_candidate,
 )
 
-
 VERSION = "d0-jacobi-rb-path-weighted-capacity-e2e-v1"
 DEFAULT_ANCHORS = (0, 8, 16, 128, 256, 384, 512)
 CONTROLLER_ROWS = (

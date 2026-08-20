@@ -43,7 +43,6 @@ from mnist.eulerian_jacobi_ddpm_candidate import (
     finish_candidate_outer_step,
 )
 
-
 CANDIDATE_PREFIX_CACHE_VERSION = "d0-jacobi-rb-candidate-prefix-cache-v1"
 M8_PREFIX_FRACTIONS = tuple((2 * index + 1) / 16 for index in range(8))
 K512_RECORD_OUTER_STEPS = tuple(range(15, 512, 16))

@@ -27,7 +27,6 @@ from torch import Tensor
 
 from mnist.d0_jacobi_rb_learnability import EDGES_PER_PHASE
 
-
 PATH_WEIGHTED_LOSS_VERSION = "d0-jacobi-rb-path-weighted-loss-v1"
 DEFAULT_MOBILITY_FLOOR = 1.0e-4
 

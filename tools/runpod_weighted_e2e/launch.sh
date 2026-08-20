@@ -20,6 +20,13 @@ if [[ "${RUNPOD_FINAL_ACTION}" == "delete" && "${RUNPOD_RESULTS_DURABLE}" != "1"
   echo "Use an attached network volume at /workspace or a verified RESULTS_URI export." >&2
   exit 1
 fi
+
+# Windows checkouts can silently convert helper scripts to CRLF.  launch.sh is
+# already running under bash here, so normalize the scripts that will be invoked
+# later before starting the detached worker.
+for helper in worker.sh finalize.sh install_environment.sh pod_lifecycle.sh; do
+  sed -i 's/\r$//' "${REPO_ROOT}/tools/runpod_weighted_e2e/${helper}"
+done
 mkdir -p "$(dirname "${RUN_DIR}")"
 if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
   echo "This run has already been launched: ${RUN_DIR}" >&2

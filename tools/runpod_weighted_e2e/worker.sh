@@ -73,6 +73,19 @@ for relative, expected in PROTECTED_SOURCE_HASHES.items():
         path.write_bytes(crlf)
 PY
 
+# Ruff import sorting is formatting-only and safe to repair in the disposable
+# RunPod checkout.  The second command remains the strict E/F/I gate.
+python -m ruff check --select I --fix \
+  mnist/d0_jacobi_rb_path_weighted_loss.py \
+  mnist/d0_jacobi_rb_global_large.py \
+  mnist/d0_jacobi_rb_candidate_training_cache.py \
+  mnist/d0_jacobi_rb_path_weighted_training.py \
+  mnist/diag_d0_jacobi_rb_path_weighted_capacity_e2e.py \
+  tests/test_d0_jacobi_rb_path_weighted_loss.py \
+  tests/test_d0_jacobi_rb_global_large.py \
+  tests/test_d0_jacobi_rb_candidate_training_cache.py \
+  tests/test_diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
+
 python -m ruff check \
   mnist/d0_jacobi_rb_path_weighted_loss.py \
   mnist/d0_jacobi_rb_global_large.py \

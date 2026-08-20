@@ -27,7 +27,6 @@ from mnist.d0_jacobi_rb_path_weighted_loss import (
     path_weighted_raw_target_mse,
 )
 
-
 PATH_WEIGHTED_TRAINING_VERSION = "d0-jacobi-rb-path-weighted-training-v1"
 ArchitectureName = Literal["small", "large"]
 LossName = Literal["old", "path-weighted"]
