@@ -48,8 +48,8 @@ temporary.replace(path)
 PY
 
 if [[ "${FINAL_ACTION}" == "delete" ]]; then
-  "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" delete || \
-    "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" stop
+  bash "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" delete || \
+    bash "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" stop
 else
-  "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" stop
+  bash "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" stop
 fi

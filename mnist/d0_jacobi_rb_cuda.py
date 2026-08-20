@@ -22,7 +22,6 @@ import json
 import math
 import multiprocessing
 import os
-from pathlib import Path
 import threading
 import time
 from typing import Any, Mapping
@@ -44,14 +43,18 @@ from mnist.d0_jacobi_rb_cuda_fused import (
     launch_fused_cuda_authorizer_with_neighbors,
     probe_fused_cuda_authorizer,
 )
+from mnist.d0_jacobi_rb_nvrtc_compat import compile_cuda_kernels
 
 
-_CUDA_VERSION = "alpha1-jacobi-rb-nvrtc-candidate-arb-certificate-v1"
+_CUDA_VERSION = "alpha1-jacobi-rb-nvrtc-candidate-arb-certificate-v2-multiruntime"
 _RNG_VERSION = "philox4x32-10-canonical-transition-v2"
 _KERNEL_NAME = "jacobi_rb_candidate_v1"
 _FROZEN_TORCH_VERSION = "2.11.0+cu128"
 _FROZEN_CUDA_VERSION = "12.8"
 _FROZEN_COMPUTE_CAPABILITY = "12.0"
+_H100_TORCH_VERSION = "2.8.0+cu128"
+_H100_CUDA_VERSION = "12.8"
+_H100_COMPUTE_CAPABILITY = "9.0"
 _COMPILE_FLAGS = (
     "--std=c++17",
     "--fmad=false",
@@ -89,7 +92,7 @@ class JacobiRBCudaProfile:
     compile_flags: tuple[str, ...] = _COMPILE_FLAGS
 
     def __post_init__(self) -> None:
-        if int(self.schema_version) != 1:
+        if int(self.schema_version) not in {1, 2}:
             raise ValueError("unsupported Jacobi RB CUDA profile schema_version")
         if not 2 <= int(self.candidate_modes) <= 4096:
             raise ValueError("candidate_modes must lie in [2,4096]")
@@ -107,14 +110,44 @@ class JacobiRBCudaProfile:
             raise ValueError("unresolved certificate lanes require the Arb fallback")
         if self.certificate_effort not in {"adaptive", "strengthened"}:
             raise ValueError("certificate_effort must be adaptive or strengthened")
-        if str(self.frozen_torch_version) != _FROZEN_TORCH_VERSION:
-            raise ValueError("frozen_torch_version is immutable in schema version 1")
-        if str(self.frozen_cuda_version) != _FROZEN_CUDA_VERSION:
-            raise ValueError("frozen_cuda_version is immutable in schema version 1")
-        if str(self.frozen_compute_capability) != _FROZEN_COMPUTE_CAPABILITY:
-            raise ValueError("frozen_compute_capability is immutable in schema version 1")
+        if int(self.schema_version) == 1:
+            expected_runtime = (
+                _FROZEN_TORCH_VERSION,
+                _FROZEN_CUDA_VERSION,
+                _FROZEN_COMPUTE_CAPABILITY,
+            )
+        else:
+            expected_runtime = (
+                _H100_TORCH_VERSION,
+                _H100_CUDA_VERSION,
+                _H100_COMPUTE_CAPABILITY,
+            )
+        observed_runtime = (
+            str(self.frozen_torch_version),
+            str(self.frozen_cuda_version),
+            str(self.frozen_compute_capability),
+        )
+        if observed_runtime != expected_runtime:
+            raise ValueError(
+                "frozen Torch/CUDA/device runtime does not match the selected "
+                f"Jacobi RB profile schema {self.schema_version}: "
+                f"expected={expected_runtime}, observed={observed_runtime}"
+            )
         if tuple(self.compile_flags) != _COMPILE_FLAGS:
-            raise ValueError("compile_flags are immutable in schema version 1")
+            raise ValueError("compile_flags are immutable in Jacobi RB CUDA profiles")
+
+    @classmethod
+    def h100_pytorch28(cls, **overrides: Any) -> "JacobiRBCudaProfile":
+        """Return the explicitly frozen H100 / PyTorch 2.8 RunPod profile."""
+
+        values: dict[str, Any] = {
+            "schema_version": 2,
+            "frozen_torch_version": _H100_TORCH_VERSION,
+            "frozen_cuda_version": _H100_CUDA_VERSION,
+            "frozen_compute_capability": _H100_COMPUTE_CAPABILITY,
+        }
+        values.update(overrides)
+        return cls(**values)
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -581,8 +614,12 @@ def _cuda_driver_version() -> int | None:
 
 
 def _runtime_report(
-    device: Any | None = None, *, probe_authorizer: bool = True
+    device: Any | None = None,
+    *,
+    profile: JacobiRBCudaProfile | None = None,
+    probe_authorizer: bool = True,
 ) -> dict[str, Any]:
+    selected = profile if profile is not None else JacobiRBCudaProfile()
     report: dict[str, Any] = {
         "backend_version": _CUDA_VERSION,
         "rng_version": _RNG_VERSION,
@@ -593,9 +630,10 @@ def _runtime_report(
         "fused_cuda_authorizer_available": False,
         "fused_cuda_authorizer_unavailable_reason": "runtime arithmetic self-test not run",
         "fused_cuda_version": FUSED_CUDA_VERSION,
-        "frozen_torch_version": _FROZEN_TORCH_VERSION,
-        "frozen_cuda_version": _FROZEN_CUDA_VERSION,
-        "frozen_compute_capability": _FROZEN_COMPUTE_CAPABILITY,
+        "frozen_torch_version": str(selected.frozen_torch_version),
+        "frozen_cuda_version": str(selected.frozen_cuda_version),
+        "frozen_compute_capability": str(selected.frozen_compute_capability),
+        "runtime_profile_schema": int(selected.schema_version),
         "compile_flags": list(_COMPILE_FLAGS),
         "compile_options_sha256": hashlib.sha256(
             "\0".join(_COMPILE_FLAGS).encode("utf-8")
@@ -615,8 +653,8 @@ def _runtime_report(
         cuda_available=bool(torch.cuda.is_available()),
         loader_available=callable(getattr(torch.cuda, "_compile_kernel", None)),
         frozen_runtime_match=(
-            str(torch.__version__) == _FROZEN_TORCH_VERSION
-            and str(torch.version.cuda) == _FROZEN_CUDA_VERSION
+            str(torch.__version__) == str(selected.frozen_torch_version)
+            and str(torch.version.cuda) == str(selected.frozen_cuda_version)
         ),
     )
     if device is not None and bool(torch.cuda.is_available()):
@@ -631,7 +669,7 @@ def _runtime_report(
             device_uuid=str(properties.uuid),
         )
         if probe_authorizer and report.get("frozen_runtime_match") and (
-            report.get("compute_capability") == _FROZEN_COMPUTE_CAPABILITY
+            report.get("compute_capability") == str(selected.frozen_compute_capability)
         ):
             _bundle, fused = probe_fused_cuda_authorizer(
                 device,
@@ -654,7 +692,7 @@ def _runtime_report(
 
 
 def _load_cuda_kernel(device: Any, profile: JacobiRBCudaProfile) -> tuple[Any, str]:
-    report = _runtime_report(device, probe_authorizer=False)
+    report = _runtime_report(device, profile=profile, probe_authorizer=False)
     if not report.get("cuda_available") or not report.get("loader_available"):
         raise RuntimeError(f"Jacobi RB CUDA backend unavailable: {report}")
     if not report.get("frozen_runtime_match"):
@@ -683,32 +721,15 @@ def _load_cuda_kernel(device: Any, profile: JacobiRBCudaProfile) -> tuple[Any, s
         if cached is not None:
             return cached
         try:
-            # PyTorch 2.11's bundled NVRTC wrapper unconditionally asks
-            # ``cpp_extension`` for CUDA include flags.  A toolkit-less wheel
-            # consequently needs a harmless CUDA_HOME for that lookup even
-            # when, as here, the source is header-free.  The torch package
-            # itself has an ``include`` directory; restore the process-global
-            # hint immediately after compilation while holding our lock.
-            from torch.utils import cpp_extension
-
-            previous_cuda_home = cpp_extension.CUDA_HOME
-            if previous_cuda_home is None:
-                cpp_extension.CUDA_HOME = str(Path(torch.__file__).resolve().parent)
-            with torch.cuda.device(device_index):
-                try:
-                    from torch.cuda._utils import _cuda_load_module, _nvrtc_compile
-
-                    binary, lowered_name = _nvrtc_compile(
-                        _CUDA_SOURCE,
-                        _KERNEL_NAME,
-                        compute_capability=f"{props.major}{props.minor}",
-                        nvcc_options=list(profile.compile_flags),
-                    )
-                    loaded = _cuda_load_module(binary, [lowered_name])
-                    kernel = loaded[lowered_name]
-                    binary_sha256 = hashlib.sha256(binary).hexdigest()
-                finally:
-                    cpp_extension.CUDA_HOME = previous_cuda_home
+            loaded, binary_sha256, lowered_name = compile_cuda_kernels(
+                _CUDA_SOURCE,
+                primary_name=_KERNEL_NAME,
+                kernel_names=(_KERNEL_NAME,),
+                device_index=int(device_index),
+                compute_capability=f"{props.major}{props.minor}",
+                compile_flags=tuple(profile.compile_flags),
+            )
+            kernel = loaded[lowered_name]
         except Exception as exc:
             raise RuntimeError(
                 "Jacobi RB CUDA NVRTC compilation failed closed; no candidate "
@@ -1384,7 +1405,9 @@ def _sample_alpha1_rb_transition_batch_cuda_core(
             fallback_modes.max() if count else _device_count(0, device).to(torch.int32)
         ),
     }
-    runtime = _runtime_report(device, probe_authorizer=bool(active_count))
+    runtime = _runtime_report(
+        device, profile=selected, probe_authorizer=bool(active_count)
+    )
     runtime["profile"] = selected.to_dict()
     runtime["candidate_kernel_sha256"] = _KERNEL_SHA256
     runtime["candidate_binary_sha256"] = binary_sha256
@@ -1399,7 +1422,7 @@ def _sample_alpha1_rb_transition_batch_cuda_core(
     runtime["compile_flags_exact_pass"] = tuple(selected.compile_flags) == _COMPILE_FLAGS
     runtime["runtime_contract_pass"] = bool(runtime.get("frozen_runtime_match", False))
     runtime["device_contract_pass"] = (
-        runtime.get("compute_capability") == _FROZEN_COMPUTE_CAPABILITY
+        runtime.get("compute_capability") == str(selected.frozen_compute_capability)
     )
     runtime["rng_contract"] = str(_rng_contract)
     return CertifiedRBCudaBatch(

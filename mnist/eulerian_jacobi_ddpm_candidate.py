@@ -264,13 +264,14 @@ def prepare_candidate_runtime(
     *,
     device: str | torch.device,
     rng_keys: Sequence[tuple[Any, ...]],
+    profile: JacobiRBCudaProfile | None = None,
 ) -> CandidateRuntime:
     """Prepare the proposal kernel and the complete finite RNG-key bank."""
 
     selected_device = torch.device(device)
     if selected_device.type != "cuda":
         raise CandidatePilotError("candidate production runtime requires CUDA")
-    profile = JacobiRBCudaProfile()
+    profile = JacobiRBCudaProfile() if profile is None else profile
     _require_profile(profile)
     prepared = prepare_alpha1_rb_transition_batch_cuda_candidate(
         device=selected_device, profile=profile

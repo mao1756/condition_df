@@ -38,7 +38,10 @@ from mnist.d0_jacobi_rb_candidate_training_cache import (
     CandidatePrefixCacheSpec,
     build_candidate_prefix_cache,
 )
-from mnist.d0_jacobi_rb_cuda import sample_alpha1_rb_transition_batch_cuda
+from mnist.d0_jacobi_rb_cuda import (
+    JacobiRBCudaProfile,
+    sample_alpha1_rb_transition_batch_cuda,
+)
 from mnist.d0_jacobi_rb_cuda_deferred import (
     CandidateRBCudaBatch,
     enqueue_alpha1_rb_transition_batch_cuda_candidate,
@@ -61,7 +64,7 @@ from mnist.eulerian_jacobi_ddpm_candidate import (
     reverse_sample_candidate,
 )
 
-VERSION = "d0-jacobi-rb-path-weighted-capacity-e2e-v1"
+VERSION = "d0-jacobi-rb-path-weighted-capacity-e2e-v2-h100"
 DEFAULT_ANCHORS = (0, 8, 16, 128, 256, 384, 512)
 CONTROLLER_ROWS = (
     "zero",
@@ -782,7 +785,12 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     _atomic_json(run_dir / "source" / "source.json", source_record)
     _complete_stage(run_dir, "01_source", label=label, index=config.mnist_index)
 
-    runtime = prepare_candidate_runtime(device=device, rng_keys=_candidate_rng_keys(config))
+    runtime_profile = JacobiRBCudaProfile.h100_pytorch28()
+    runtime = prepare_candidate_runtime(
+        device=device,
+        rng_keys=_candidate_rng_keys(config),
+        profile=runtime_profile,
+    )
     _atomic_json(
         run_dir / "candidate_backend.json",
         {
@@ -792,6 +800,7 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
             "candidate_binary_sha256": runtime.candidate_binary_sha256,
             "candidate_modes": int(runtime.profile.candidate_modes),
             "candidate_bisection_steps": int(runtime.profile.candidate_bisection_steps),
+            "runtime_profile": runtime.profile.to_dict(),
             "supported_outer_steps": [128, 512],
         },
     )

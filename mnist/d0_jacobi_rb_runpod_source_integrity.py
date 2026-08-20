@@ -1,7 +1,8 @@
 """Cross-platform protected-source integrity checks for RunPod preflight.
 
-The historical candidate pilot stores exact byte hashes for 27 protected source
-files.  One of those files uses mixed LF/CRLF newlines, so a normal Git/ZIP
+The historical candidate pilot stores exact byte hashes for 27 historical protected source
+files.  This RunPod inventory additionally fingerprints the H100 NVRTC
+compatibility adapter and candidate dispatcher.  One of those files uses mixed LF/CRLF newlines, so a normal Git/ZIP
 checkout can preserve the Python source while changing its byte hash.  This
 module keeps a second, RunPod-only inventory whose hashes are computed after
 canonical newline normalization.  It therefore accepts newline-only checkout
@@ -30,10 +31,12 @@ PROTECTED_SOURCE_CANONICAL_LF_HASHES: dict[str, str] = {
     "mnist/d0_jacobi_rb_boundary_tangent_zero_baseline.py": "5aa6fdfe7f6e23a92ef37fa86deeca317760c1ca90abdffee059bcf06b09235c",
     "mnist/d0_jacobi_rb_coarse_residual.py": "b3157a81cad5dcb257cb5deb09054b515e659023e44a4546edd61d58659826b3",
     "mnist/d0_jacobi_rb_controls.py": "3186c3321a4f48bda6b7a2a28a600812b7686d0b68aa499ca9fe6735bc7a7d17",
-    "mnist/d0_jacobi_rb_cuda.py": "94b95db6c93510c97c36b7cd67b2dec3b1f13a62b3077299e6edd6b97f0ba97a",
+    "mnist/d0_jacobi_rb_cuda.py": "0c687a6793f7e165a28901461f70f3b5cdcd45a95bf3a895d094546f0f046c61",
     "mnist/d0_jacobi_rb_cuda_certificate.py": "f43bd0459a3200bbead706cf7def1cca17e344bbccd7ae4de5cfb26b1eb9aced",
     "mnist/d0_jacobi_rb_cuda_controls.py": "a834445afa5f4003931254a13fbe1e0838904bf9e47726abeaf3faa5955f01ff",
-    "mnist/d0_jacobi_rb_cuda_fused.py": "184a3e9e8e476b835e808de4f1b5b7d641d33997448968539ab240a54f91204d",
+    "mnist/d0_jacobi_rb_cuda_fused.py": "a67b8f167cdd51ec48c34d7528e243fa437292a89278b4f0af40cad58756f2bf",
+    "mnist/d0_jacobi_rb_nvrtc_compat.py": "913b52f84b27f33f57154e7f56da96d1a54c52cc50341b45d1a4bd66eae5168c",
+    "mnist/eulerian_jacobi_ddpm_candidate.py": "df4a08c2124815d765f12f2c30bb4d4c563ac2121153ec0333a368ea7cc0b098",
     "mnist/d0_jacobi_rb_cuda_multipath.py": "5949dc794085cde340b42133a4a2102815ac85dece4e6799b23762de62507f77",
     "mnist/d0_jacobi_rb_global_dilated.py": "2ea368bc0d001803ce8e8c5f9862feefe01aa88ada395f0279636e8ce6e4135a",
     "mnist/d0_jacobi_rb_learnability.py": "081c9dfa7414c3c9fda80b262162eb3ad6c84ddaff905a058896580c1f1d50b2",

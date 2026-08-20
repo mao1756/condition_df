@@ -26,7 +26,7 @@ mkdir -p "${RUN_DIR}"
 (
   sleep "$((HARD_WALL_SECONDS + WATCHDOG_GRACE_SECONDS))"
   echo "RunPod hard-wall watchdog fired" >&2
-  "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" stop
+  bash "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" stop
 ) &
 WATCHDOG_PID=$!
 export WATCHDOG_PID
@@ -39,13 +39,13 @@ finalize_once() {
   if [[ "${finalized}" == "0" ]]; then
     finalized=1
     export EXPORT_VERIFIED ARCHIVE_PATH WATCHDOG_PID
-    "${REPO_ROOT}/tools/runpod_weighted_e2e/finalize.sh" || true
+    bash "${REPO_ROOT}/tools/runpod_weighted_e2e/finalize.sh" || true
   fi
 }
 trap finalize_once EXIT INT TERM
 
 cd "${REPO_ROOT}"
-"${REPO_ROOT}/tools/runpod_weighted_e2e/install_environment.sh"
+bash "${REPO_ROOT}/tools/runpod_weighted_e2e/install_environment.sh"
 # shellcheck disable=SC1091
 source "${REPO_ROOT}/.venv-runpod-weighted/bin/activate"
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
@@ -62,11 +62,13 @@ python -m mnist.d0_jacobi_rb_runpod_source_integrity \
 python -m ruff check --select I --fix \
   mnist/d0_jacobi_rb_path_weighted_loss.py \
   mnist/d0_jacobi_rb_runpod_source_integrity.py \
+  mnist/d0_jacobi_rb_nvrtc_compat.py \
   mnist/d0_jacobi_rb_global_large.py \
   mnist/d0_jacobi_rb_candidate_training_cache.py \
   mnist/d0_jacobi_rb_path_weighted_training.py \
   mnist/diag_d0_jacobi_rb_path_weighted_capacity_e2e.py \
   tests/test_d0_jacobi_rb_path_weighted_loss.py \
+  tests/test_d0_jacobi_rb_nvrtc_compat.py \
   tests/test_d0_jacobi_rb_global_large.py \
   tests/test_d0_jacobi_rb_candidate_training_cache.py \
   tests/test_diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
@@ -74,17 +76,20 @@ python -m ruff check --select I --fix \
 python -m ruff check \
   mnist/d0_jacobi_rb_path_weighted_loss.py \
   mnist/d0_jacobi_rb_runpod_source_integrity.py \
+  mnist/d0_jacobi_rb_nvrtc_compat.py \
   mnist/d0_jacobi_rb_global_large.py \
   mnist/d0_jacobi_rb_candidate_training_cache.py \
   mnist/d0_jacobi_rb_path_weighted_training.py \
   mnist/diag_d0_jacobi_rb_path_weighted_capacity_e2e.py \
   tests/test_d0_jacobi_rb_path_weighted_loss.py \
+  tests/test_d0_jacobi_rb_nvrtc_compat.py \
   tests/test_d0_jacobi_rb_global_large.py \
   tests/test_d0_jacobi_rb_candidate_training_cache.py \
   tests/test_diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
 
 python -m pytest -q \
   tests/test_d0_jacobi_rb_path_weighted_loss.py \
+  tests/test_d0_jacobi_rb_nvrtc_compat.py \
   tests/test_d0_jacobi_rb_global_large.py \
   tests/test_d0_jacobi_rb_candidate_training_cache.py \
   tests/test_diag_d0_jacobi_rb_path_weighted_capacity_e2e.py

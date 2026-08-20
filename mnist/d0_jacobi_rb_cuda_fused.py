@@ -27,10 +27,10 @@ from dataclasses import dataclass
 from fractions import Fraction
 import hashlib
 import math
-from pathlib import Path
 import threading
 from typing import Any, Mapping
 
+from mnist.d0_jacobi_rb_nvrtc_compat import compile_cuda_kernels
 from mnist.d0_jacobi_rb_cuda_certificate import (
     EXP24_REMAINDER_BOUND,
     LN2_LOWER,
@@ -886,44 +886,38 @@ def _compile(device: Any, compile_flags: tuple[str, ...]) -> FusedCudaBundle:
         cached = _CACHE.get(key)
         if cached is not None:
             return cached
-        from torch.utils import cpp_extension
-        from torch.cuda._utils import _cuda_load_module, _nvrtc_compile
-
-        previous_cuda_home = cpp_extension.CUDA_HOME
-        if previous_cuda_home is None:
-            cpp_extension.CUDA_HOME = str(Path(torch.__file__).resolve().parent)
-        try:
-            with torch.cuda.device(index):
-                binary, lowered = _nvrtc_compile(
-                    _CUDA_SOURCE,
-                    FUSED_KERNEL_NAME,
-                    compute_capability=f"{properties.major}{properties.minor}",
-                    nvcc_options=list(compile_flags),
-                )
-                loaded = _cuda_load_module(
-                    binary,
-                    [lowered, SELFTEST_KERNEL_NAME, LEGENDRE_PROBE_KERNEL_NAME],
-                )
-                selftest_output = torch.zeros(1, dtype=torch.uint64, device=device)
-                loaded[SELFTEST_KERNEL_NAME](
-                    grid=(1, 1, 1), block=(1, 1, 1), args=[selftest_output],
-                    stream=torch.cuda.current_stream(device),
-                )
-                torch.cuda.synchronize(device)
-                observed = int(selftest_output.item())
-                if observed != REQUIRED_SELFTEST_MASK:
-                    raise RuntimeError(
-                        "fused CUDA arithmetic self-test failed: "
-                        f"observed=0x{observed:x}, required=0x{REQUIRED_SELFTEST_MASK:x}"
-                    )
-                result = FusedCudaBundle(
-                    authorizer=loaded[lowered],
-                    legendre_probe=loaded[LEGENDRE_PROBE_KERNEL_NAME],
-                    selftest_mask=observed,
-                    binary_sha256=hashlib.sha256(binary).hexdigest(),
-                )
-        finally:
-            cpp_extension.CUDA_HOME = previous_cuda_home
+        loaded, binary_sha256, lowered = compile_cuda_kernels(
+            _CUDA_SOURCE,
+            primary_name=FUSED_KERNEL_NAME,
+            kernel_names=(
+                FUSED_KERNEL_NAME,
+                SELFTEST_KERNEL_NAME,
+                LEGENDRE_PROBE_KERNEL_NAME,
+            ),
+            device_index=int(index),
+            compute_capability=f"{properties.major}{properties.minor}",
+            compile_flags=tuple(compile_flags),
+        )
+        selftest_output = torch.zeros(1, dtype=torch.uint64, device=device)
+        loaded[SELFTEST_KERNEL_NAME](
+            grid=(1, 1, 1),
+            block=(1, 1, 1),
+            args=[selftest_output],
+            stream=torch.cuda.current_stream(device),
+        )
+        torch.cuda.synchronize(device)
+        observed = int(selftest_output.item())
+        if observed != REQUIRED_SELFTEST_MASK:
+            raise RuntimeError(
+                "fused CUDA arithmetic self-test failed: "
+                f"observed=0x{observed:x}, required=0x{REQUIRED_SELFTEST_MASK:x}"
+            )
+        result = FusedCudaBundle(
+            authorizer=loaded[lowered],
+            legendre_probe=loaded[LEGENDRE_PROBE_KERNEL_NAME],
+            selftest_mask=observed,
+            binary_sha256=binary_sha256,
+        )
         _CACHE[key] = result
         return result
 

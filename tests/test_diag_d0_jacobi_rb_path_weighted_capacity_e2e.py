@@ -7,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
+from mnist.d0_jacobi_rb_cuda import JacobiRBCudaProfile
+
 from mnist.d0_jacobi_rb_runpod_source_integrity import (
     PROTECTED_SOURCE_CANONICAL_LF_HASHES,
     canonicalize_newlines,
@@ -19,6 +21,30 @@ from mnist.diag_d0_jacobi_rb_path_weighted_capacity_e2e import (
     _parser,
     _scientific_interpretation,
 )
+
+
+
+def test_h100_runtime_profile_is_explicit_and_does_not_change_historical_default() -> None:
+    historical = JacobiRBCudaProfile()
+    assert historical.schema_version == 1
+    assert historical.frozen_torch_version == "2.11.0+cu128"
+    assert historical.frozen_cuda_version == "12.8"
+    assert historical.frozen_compute_capability == "12.0"
+
+    h100 = JacobiRBCudaProfile.h100_pytorch28()
+    assert h100.schema_version == 2
+    assert h100.frozen_torch_version == "2.8.0+cu128"
+    assert h100.frozen_cuda_version == "12.8"
+    assert h100.frozen_compute_capability == "9.0"
+
+
+def test_weighted_runner_selects_h100_runtime_profile() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "mnist"
+        / "diag_d0_jacobi_rb_path_weighted_capacity_e2e.py"
+    ).read_text()
+    assert "JacobiRBCudaProfile.h100_pytorch28()" in source
 
 
 def test_cli_defaults_define_full_unattended_experiment() -> None:
@@ -190,7 +216,7 @@ def test_runpod_shell_scripts_are_lf_only() -> None:
 
 def test_runpod_protected_source_integrity_is_newline_portable(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
-    assert len(PROTECTED_SOURCE_CANONICAL_LF_HASHES) == 27
+    assert len(PROTECTED_SOURCE_CANONICAL_LF_HASHES) == 29
     verify_protected_sources(root)
 
     mixed = b"first\r\nsecond\nthird\r\n"
