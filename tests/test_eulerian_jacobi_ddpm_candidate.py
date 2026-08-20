@@ -4354,3 +4354,57 @@ def test_run_never_auto_launches_full_population(
         "maximum_cuda_fraction": 0.75,
     }
     assert _config()["populations"]["automatic_full_scale_launches"] == 0
+
+
+def test_candidate_forward_phase_supports_k512(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeCandidateEnqueue()
+    monkeypatch.setattr(candidate, "enqueue_alpha1_rb_transition_batch_cuda_candidate", fake)
+    runtime = _fake_runtime(123)
+    state = torch.as_tensor(_simplex_rows(1), dtype=torch.float64)
+    output, target, _health = candidate.candidate_forward_phase(
+        state,
+        [7],
+        outer_step=511,
+        phase=6,
+        root_seed=123,
+        sample_steps=512,
+        runtime=runtime,
+    )
+    assert output.shape == state.shape
+    assert target.shape == (1, core.EDGES_PER_PHASE)
+    assert len(fake.calls) == 1
+    expected = core.canonical_refinement_transition_ids(
+        [7], sample_steps=512, outer_step=511, phase=6, device=state.device
+    ).reshape(1, core.EDGES_PER_PHASE)
+    assert torch.equal(fake.calls[0]["transition_ids"], expected)
+
+
+def test_candidate_eager_prefixes_share_uniform_ids_and_scale_exposure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeCandidateEnqueue()
+    monkeypatch.setattr(candidate, "enqueue_alpha1_rb_transition_batch_cuda_candidate", fake)
+    runtime = _fake_runtime(321)
+    state = torch.as_tensor(_simplex_rows(1), dtype=torch.float64)
+    fractions = (1 / 16, 3 / 16, 15 / 16)
+    outputs = candidate.candidate_forward_phase_prefixes(
+        state,
+        [9],
+        outer_step=15,
+        phase=2,
+        root_seed=321,
+        sample_steps=512,
+        prefix_fractions=fractions,
+        runtime=runtime,
+    )
+    assert len(outputs) == len(fractions) == len(fake.calls)
+    first_ids = fake.calls[0]["transition_ids"]
+    first_key = fake.calls[0]["rng_key"]
+    for call in fake.calls:
+        assert torch.equal(call["transition_ids"], first_ids)
+        assert call["rng_key"] == first_key == (321, "forward")
+    full_exposure = fake.calls[-1]["exposure"] / fractions[-1]
+    for call, fraction in zip(fake.calls, fractions, strict=True):
+        assert torch.allclose(call["exposure"], full_exposure * fraction)

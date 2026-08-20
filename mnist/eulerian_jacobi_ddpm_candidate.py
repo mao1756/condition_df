@@ -1,4 +1,4 @@
-"""Approximate-candidate CUDA adapter for the bounded K=128 objective pilot.
+"""Approximate-candidate CUDA adapter for bounded K=128/K=512 experiments.
 
 This module is deliberately narrow.  It changes only the transition proposal
 used by the immutable Eulerian Jacobi DDPM core: every active edge is sampled
@@ -44,11 +44,12 @@ from mnist.d0_jacobi_rb_strang_refinement import (
 )
 
 
-CANDIDATE_PILOT_VERSION = "eulerian-jacobi-ddpm-candidate-k128-v1"
+CANDIDATE_PILOT_VERSION = "eulerian-jacobi-ddpm-candidate-k128-k512-v2"
 CANDIDATE_BACKEND_NAME = "cuda-approximate-candidate-128m-56b"
 CANDIDATE_TARGET_SEMANTICS = "approximate-candidate Rao--Blackwell target"
 
-_SAMPLE_STEPS = 128
+_DEFAULT_SAMPLE_STEPS = 128
+_SUPPORTED_SAMPLE_STEPS = (128, 512)
 _MAX_PATHS = 8
 _MAX_LANES = 4096
 _MASS_TOLERANCE = 2e-12
@@ -112,10 +113,12 @@ class CandidateRuntime:
     candidate_binary_sha256: str
 
 
-def _require_k128(sample_steps: int) -> int:
+def _require_sample_steps(sample_steps: int) -> int:
     steps = int(sample_steps)
-    if steps != _SAMPLE_STEPS:
-        raise CandidatePilotError("candidate pilot requires exactly K=128")
+    if steps not in _SUPPORTED_SAMPLE_STEPS:
+        raise CandidatePilotError(
+            f"candidate runtime supports sample_steps in {_SUPPORTED_SAMPLE_STEPS}"
+        )
     return steps
 
 
@@ -378,13 +381,13 @@ def candidate_forward_phase(
 ) -> tuple[torch.Tensor, torch.Tensor, Mapping[str, Any]]:
     """Enqueue one forward phase without materializing device diagnostics."""
 
-    _require_k128(sample_steps)
+    steps = _require_sample_steps(sample_steps)
     _require_profile(runtime.profile)
     _require_state_static(state, runtime)
     ids = _path_ids(path_ids, int(state.shape[0]))
     step = int(outer_step)
     phase_index = int(phase)
-    if not 0 <= step < _SAMPLE_STEPS or not 0 <= phase_index < len(PHASE_MATCHINGS):
+    if not 0 <= step < steps or not 0 <= phase_index < len(PHASE_MATCHINGS):
         raise CandidatePilotError("candidate forward phase index is out of range")
     lane_count = int(state.shape[0]) * EDGES_PER_PHASE
     if lane_count > _MAX_LANES:
@@ -399,12 +402,12 @@ def candidate_forward_phase(
     fraction[active] = state[:, heads][active] / pair[active]
     exposure = refinement_phase_exposure(
         pair,
-        sample_steps=_SAMPLE_STEPS,
+        sample_steps=steps,
         duration_fraction=float(PHASE_DURATIONS[phase_index]),
     )
     transition_ids = canonical_refinement_transition_ids(
         ids,
-        sample_steps=_SAMPLE_STEPS,
+        sample_steps=steps,
         outer_step=step,
         phase=phase_index,
         device=state.device,
@@ -434,6 +437,97 @@ def candidate_forward_phase(
         runtime=runtime,
     )
     return output, batch.denoising_target.to(dtype=torch.float64), health
+
+
+def candidate_forward_phase_prefixes(
+    state: torch.Tensor,
+    path_ids: Sequence[int],
+    *,
+    outer_step: int,
+    phase: int,
+    root_seed: int,
+    sample_steps: int,
+    prefix_fractions: Sequence[float] = tuple((2 * index + 1) / 16 for index in range(8)),
+    runtime: CandidateRuntime,
+) -> tuple[tuple[torch.Tensor, torch.Tensor, Mapping[str, Any]], ...]:
+    """Evaluate eager within-phase prefixes without advancing ``state``.
+
+    Every prefix reuses the same RNG key and canonical transition IDs as the
+    full phase.  The candidate inverse-CDF kernel therefore sees the same
+    underlying uniform stream at each exposure; only the exposure duration is
+    changed.  This mirrors the eager-prefix evidence contract while keeping
+    the production forward transition itself untouched.
+    """
+
+    steps = _require_sample_steps(sample_steps)
+    _require_profile(runtime.profile)
+    _require_state_static(state, runtime)
+    ids = _path_ids(path_ids, int(state.shape[0]))
+    step = int(outer_step)
+    phase_index = int(phase)
+    if not 0 <= step < steps or not 0 <= phase_index < len(PHASE_MATCHINGS):
+        raise CandidatePilotError("candidate prefix phase index is out of range")
+    fractions = tuple(float(value) for value in prefix_fractions)
+    if (
+        not fractions
+        or len(set(fractions)) != len(fractions)
+        or any(not math.isfinite(value) or not 0.0 < value < 1.0 for value in fractions)
+        or tuple(sorted(fractions)) != fractions
+    ):
+        raise CandidatePilotError(
+            "prefix_fractions must be finite, unique, increasing, and in (0,1)"
+        )
+
+    tails_all, heads_all = matching_indices(device=state.device)
+    color = int(PHASE_MATCHINGS[phase_index])
+    tails, heads = tails_all[color], heads_all[color]
+    pair = state[:, tails] + state[:, heads]
+    earlier_fraction = torch.zeros_like(pair)
+    active = pair > 0.0
+    earlier_fraction[active] = state[:, heads][active] / pair[active]
+    full_exposure = refinement_phase_exposure(
+        pair,
+        sample_steps=steps,
+        duration_fraction=float(PHASE_DURATIONS[phase_index]),
+    )
+    transition_ids = canonical_refinement_transition_ids(
+        ids,
+        sample_steps=steps,
+        outer_step=step,
+        phase=phase_index,
+        device=state.device,
+    ).reshape_as(earlier_fraction)
+    key = (int(root_seed), "forward")
+    prepared_seed = _prepared_seed(runtime, key)
+    results: list[tuple[torch.Tensor, torch.Tensor, Mapping[str, Any]]] = []
+    for prefix_fraction in fractions:
+        batch = enqueue_alpha1_rb_transition_batch_cuda_candidate(
+            earlier_fraction,
+            full_exposure * prefix_fraction,
+            rng_key=key,
+            transition_ids=transition_ids,
+            prepared=runtime.prepared,
+            prepared_rng_seed=prepared_seed,
+        )
+        if not isinstance(batch, CandidateRBCudaBatch):
+            raise CandidatePilotError("candidate prefix dispatch returned a non-candidate batch")
+        later_fraction = batch.later_head_fraction.to(dtype=torch.float64)
+        output = state.clone()
+        output[:, heads] = pair * later_fraction
+        output[:, tails] = pair * (1.0 - later_fraction)
+        health = _phase_health(
+            state_before=state,
+            state_after=output,
+            pair_before=pair,
+            tails=tails,
+            heads=heads,
+            batch=batch,
+            runtime=runtime,
+        )
+        results.append(
+            (output, batch.denoising_target.to(dtype=torch.float64), health)
+        )
+    return tuple(results)
 
 
 def _aggregate_phase_health(parts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -498,6 +592,25 @@ def _finish_outer_step(
     return record
 
 
+def finish_candidate_outer_step(
+    parts: Sequence[Mapping[str, Any]],
+    *,
+    runtime: CandidateRuntime,
+    direction: str,
+    outer_step: int,
+    elapsed_started: float,
+) -> dict[str, Any]:
+    """Materialize and validate one outer step after deferred phase work."""
+
+    return _finish_outer_step(
+        parts,
+        runtime=runtime,
+        direction=direction,
+        outer_step=outer_step,
+        elapsed_started=elapsed_started,
+    )
+
+
 def _unit_mass_rows(values: np.ndarray, *, name: str) -> np.ndarray:
     rows = np.asarray(values, dtype=np.float64)
     if rows.ndim != 2 or rows.shape[1] != core.STATE_SIZE or not rows.shape[0]:
@@ -520,7 +633,7 @@ def _forward_records_one_cohort(
     record_outer_steps: Sequence[int],
     outer_step_callback: Callable[[Mapping[str, Any]], None] | None,
 ) -> core.ForwardRecordDataset:
-    steps = _require_k128(sample_steps)
+    steps = _require_sample_steps(sample_steps)
     rows = _unit_mass_rows(initial_states, name="initial states")
     label_values = np.asarray(labels, dtype=np.int64).reshape(-1)
     ids = _path_ids(path_ids, rows.shape[0])
@@ -627,7 +740,7 @@ def iter_forward_record_batches_candidate(
     record_outer_steps: Sequence[int] = (15, 47, 79, 111),
     outer_step_callback: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> Iterator[core.ForwardRecordDataset]:
-    """Yield bounded forward-record cohorts with four records per path."""
+    """Yield bounded forward-record cohorts with the requested records per path."""
 
     rows = np.asarray(initial_states)
     label_values = np.asarray(labels).reshape(-1)
@@ -656,9 +769,9 @@ def forward_terminal_states_candidate(
     sample_steps: int = 128,
     outer_step_callback: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[np.ndarray, Mapping[str, Any]]:
-    """Run one bounded candidate forward cohort to its K=128 terminal state."""
+    """Run one bounded candidate forward cohort to its configured terminal state."""
 
-    steps = _require_k128(sample_steps)
+    steps = _require_sample_steps(sample_steps)
     rows = _unit_mass_rows(initial_states, name="forward starts")
     ids = _path_ids(path_ids, rows.shape[0])
     state = torch.as_tensor(rows, dtype=torch.float64, device=runtime.device)
@@ -720,6 +833,7 @@ def _reverse_candidate_half(
     micro: int,
     side: str,
     exposure: torch.Tensor,
+    sample_steps: int,
     root_seed: int,
     runtime: CandidateRuntime,
     tails: torch.Tensor,
@@ -732,7 +846,7 @@ def _reverse_candidate_half(
     fraction[active] = state[:, heads][active] / pair[active]
     transition_ids = canonical_refinement_transition_ids(
         ids,
-        sample_steps=_SAMPLE_STEPS,
+        sample_steps=sample_steps,
         outer_step=outer_step,
         phase=phase,
         device=state.device,
@@ -775,14 +889,16 @@ def candidate_reverse_outer_step(
     runtime: CandidateRuntime,
     model: core.EulerianJacobiDDPMModel | None = None,
     oracle_targets: torch.Tensor | None = None,
+    sample_steps: int = _DEFAULT_SAMPLE_STEPS,
 ) -> tuple[torch.Tensor, Mapping[str, Any]]:
     """Apply one complete reverse outer step and materialize health once."""
 
     _require_state_static(state, runtime)
     ids = _path_ids(path_ids, int(state.shape[0]))
+    steps = _require_sample_steps(sample_steps)
     step = int(outer_step)
-    if not 0 <= step < _SAMPLE_STEPS:
-        raise CandidatePilotError("reverse outer step is outside K=128")
+    if not 0 <= step < steps:
+        raise CandidatePilotError("reverse outer step is outside the configured chain")
     if controller not in {"null", "learned", "oracle"}:
         raise CandidatePilotError("controller must be null, learned, or oracle")
     if labels.device != state.device or labels.ndim != 1 or labels.shape[0] != state.shape[0]:
@@ -801,7 +917,7 @@ def candidate_reverse_outer_step(
     started = time.perf_counter()
     health_parts: list[Mapping[str, Any]] = []
     tails_all, heads_all = matching_indices(device=state.device)
-    quarter = min(3, (4 * step) // _SAMPLE_STEPS)
+    quarter = min(3, (4 * step) // steps)
     score_squares = torch.zeros((), dtype=torch.float64, device=state.device)
     score_count = 0
     maximum_score = torch.zeros((), dtype=torch.float64, device=state.device)
@@ -817,7 +933,7 @@ def candidate_reverse_outer_step(
         pair = state[:, tails] + state[:, heads]
         full_exposure = refinement_phase_exposure(
             pair,
-            sample_steps=_SAMPLE_STEPS,
+            sample_steps=steps,
             duration_fraction=float(PHASE_DURATIONS[phase]),
         )
         delta = full_exposure / core.CONTROLLER_MICROSTEPS
@@ -832,6 +948,7 @@ def candidate_reverse_outer_step(
                     micro=micro,
                     side=side,
                     exposure=delta / 2.0,
+                    sample_steps=steps,
                     root_seed=root_seed,
                     runtime=runtime,
                     tails=tails,
@@ -847,7 +964,7 @@ def candidate_reverse_outer_step(
                 elif controller == "learned":
                     assert model is not None
                     reverse_time = core.reverse_midpoint_time(
-                        step, phase, micro, sample_steps=_SAMPLE_STEPS
+                        step, phase, micro, sample_steps=steps
                     )
                     inputs = ModelInputs(
                         later_full_state=state.to(torch.float32),
@@ -967,7 +1084,7 @@ def reverse_sample_candidate(
 ) -> core.SamplingResult:
     """Run the immutable reverse composition with candidate reference halves."""
 
-    steps = _require_k128(sample_steps)
+    steps = _require_sample_steps(sample_steps)
     rows = _unit_mass_rows(starts, name="reverse starts")
     label_values = np.asarray(labels, dtype=np.int64).reshape(-1)
     ids = _path_ids(path_ids, rows.shape[0])
@@ -986,7 +1103,7 @@ def reverse_sample_candidate(
     if 0 not in anchor_set or steps not in anchor_set or any(
         not 0 <= value <= steps for value in anchor_set
     ):
-        raise CandidatePilotError("anchors must lie in [0,128] and include both ends")
+        raise CandidatePilotError("anchors must lie in the configured interval and include both ends")
 
     state = torch.as_tensor(rows, dtype=torch.float64, device=runtime.device)
     labels_tensor = torch.as_tensor(label_values, dtype=torch.long, device=runtime.device)
@@ -1011,6 +1128,7 @@ def reverse_sample_candidate(
             runtime=runtime,
             model=model,
             oracle_targets=target_tensor,
+            sample_steps=steps,
         )
         completed += 1
         if completed in anchor_set:
@@ -1203,7 +1321,9 @@ __all__ = [
     "CandidatePilotError",
     "CandidateRuntime",
     "candidate_forward_phase",
+    "candidate_forward_phase_prefixes",
     "candidate_reverse_outer_step",
+    "finish_candidate_outer_step",
     "forward_terminal_sample_candidate",
     "forward_terminal_states_candidate",
     "iter_forward_record_batches_candidate",
