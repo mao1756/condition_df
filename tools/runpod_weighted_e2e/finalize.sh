@@ -14,8 +14,13 @@ fi
 sync || true
 
 if [[ "${EXPORT_VERIFIED}" != "1" ]]; then
-  echo "Durable export was not verified; stopping rather than deleting the Pod" >&2
-  FINAL_ACTION="stop"
+  if [[ "${RUNPOD_RESULTS_DURABLE:-0}" == "1" && "${RUN_DIR}" == /workspace/* ]]; then
+    echo "Archive export was not verified, but /workspace is declared durable; deleting the Pod to stop GPU billing" >&2
+    FINAL_ACTION="delete"
+  else
+    echo "Durable export was not verified; stopping rather than deleting the Pod" >&2
+    FINAL_ACTION="stop"
+  fi
 fi
 
 mkdir -p "${RUN_DIR}"

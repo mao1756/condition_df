@@ -20,11 +20,11 @@ if [[ "${RUNPOD_FINAL_ACTION}" == "delete" && "${RUNPOD_RESULTS_DURABLE}" != "1"
   echo "Use an attached network volume at /workspace or a verified RESULTS_URI export." >&2
   exit 1
 fi
+mkdir -p "$(dirname "${RUN_DIR}")"
 if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
   echo "This run has already been launched: ${RUN_DIR}" >&2
   exit 1
 fi
-mkdir -p "$(dirname "${RUN_DIR}")"
 
 export REPO_ROOT RUN_DIR
 nohup setsid env \

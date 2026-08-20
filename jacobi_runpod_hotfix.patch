@@ -1,0 +1,1030 @@
+diff --git a/mnist/d0_jacobi_rb_candidate_training_cache.py b/mnist/d0_jacobi_rb_candidate_training_cache.py
+index 6a1aa65..f827da2 100644
+--- a/mnist/d0_jacobi_rb_candidate_training_cache.py
++++ b/mnist/d0_jacobi_rb_candidate_training_cache.py
+@@ -13,14 +13,14 @@ The main forward state advances only through the full phase transition.
+ 
+ from __future__ import annotations
+ 
+-from dataclasses import asdict, dataclass
+ import hashlib
+ import json
+ import math
+ import os
+-from pathlib import Path
+ import shutil
+ import time
++from dataclasses import asdict, dataclass
++from pathlib import Path
+ from typing import Any, Callable, Iterator, Mapping, Sequence
+ 
+ import numpy as np
+@@ -296,6 +296,29 @@ def _allocate_arrays(root: Path, count: int) -> dict[str, np.memmap]:
+     }
+ 
+ 
++def _flush_and_close_memmaps(values: Mapping[str, np.memmap]) -> None:
++    """Flush and close NumPy memmaps without masking the original failure."""
++
++    for value in values.values():
++        try:
++            value.flush()
++        finally:
++            mapping = getattr(value, "_mmap", None)
++            if mapping is not None:
++                mapping.close()
++
++
++def _flush_and_close_memmap(value: np.memmap | None) -> None:
++    if value is None:
++        return
++    try:
++        value.flush()
++    finally:
++        mapping = getattr(value, "_mmap", None)
++        if mapping is not None:
++            mapping.close()
++
++
+ def build_candidate_prefix_cache(
+     root: str | Path,
+     source_state: np.ndarray,
+@@ -325,17 +348,19 @@ def build_candidate_prefix_cache(
+     temporary.mkdir(parents=True, exist_ok=False)
+ 
+     record_count = len(paths) * active_spec.records_per_path
+-    arrays = _allocate_arrays(temporary, record_count)
+-    terminal = np.lib.format.open_memmap(
+-        temporary / "terminal_states.npy",
+-        mode="w+",
+-        dtype=np.float64,
+-        shape=(len(paths), STATE_SIZE),
+-    )
++    arrays: dict[str, np.memmap] = {}
++    terminal: np.memmap | None = None
+     selected_steps = set(active_spec.record_outer_steps)
+     cursor = 0
+     telemetry_rows: list[dict[str, Any]] = []
+     try:
++        arrays = _allocate_arrays(temporary, record_count)
++        terminal = np.lib.format.open_memmap(
++            temporary / "terminal_states.npy",
++            mode="w+",
++            dtype=np.float64,
++            shape=(len(paths), STATE_SIZE),
++        )
+         for cohort_start in range(0, len(paths), 8):
+             cohort_paths = paths[cohort_start : cohort_start + 8]
+             state = torch.as_tensor(
+@@ -423,11 +448,10 @@ def build_candidate_prefix_cache(
+             raise CandidatePrefixCacheError(
+                 f"cache population is incomplete: {cursor} != {record_count}"
+             )
+-        for array in arrays.values():
+-            array.flush()
+-        terminal.flush()
+-        del arrays
+-        del terminal
++        _flush_and_close_memmaps(arrays)
++        arrays = {}
++        _flush_and_close_memmap(terminal)
++        terminal = None
+ 
+         array_sha256 = {
+             name: _sha256_file(temporary / f"{name}.npy")
+@@ -482,11 +506,14 @@ def build_candidate_prefix_cache(
+         os.replace(temporary, target_root)
+         return CandidatePrefixCache(target_root)
+     except Exception:
+-        for value in arrays.values() if "arrays" in locals() else ():
+-            try:
+-                value.flush()
+-            except Exception:
+-                pass
++        try:
++            _flush_and_close_memmaps(arrays)
++        except Exception:
++            pass
++        try:
++            _flush_and_close_memmap(terminal)
++        except Exception:
++            pass
+         raise
+ 
+ 
+diff --git a/mnist/d0_jacobi_rb_global_large.py b/mnist/d0_jacobi_rb_global_large.py
+index 6272ba8..7b280cf 100644
+--- a/mnist/d0_jacobi_rb_global_large.py
++++ b/mnist/d0_jacobi_rb_global_large.py
+@@ -14,15 +14,15 @@ the 28 by 28 torus.
+ 
+ from __future__ import annotations
+ 
+-from dataclasses import asdict, dataclass
+ import hashlib
+ import math
++from dataclasses import asdict, dataclass
+ from typing import Any
+ 
+ import numpy as np
+ import torch
+-from torch import Tensor, nn
+ import torch.nn.functional as F
++from torch import Tensor, nn
+ 
+ from mnist.d0_jacobi_rb_boundary_tangent import edge_pair_geometry
+ from mnist.d0_jacobi_rb_boundary_tangent_frequency1_coordinate import (
+diff --git a/mnist/d0_jacobi_rb_path_weighted_loss.py b/mnist/d0_jacobi_rb_path_weighted_loss.py
+index 804aaf8..3df78ec 100644
+--- a/mnist/d0_jacobi_rb_path_weighted_loss.py
++++ b/mnist/d0_jacobi_rb_path_weighted_loss.py
+@@ -17,8 +17,8 @@ exactly zero.
+ 
+ from __future__ import annotations
+ 
+-from dataclasses import asdict, dataclass
+ import math
++from dataclasses import asdict, dataclass
+ from typing import Any
+ 
+ import numpy as np
+diff --git a/mnist/d0_jacobi_rb_path_weighted_training.py b/mnist/d0_jacobi_rb_path_weighted_training.py
+index e36c777..7134c1d 100644
+--- a/mnist/d0_jacobi_rb_path_weighted_training.py
++++ b/mnist/d0_jacobi_rb_path_weighted_training.py
+@@ -2,11 +2,11 @@
+ 
+ from __future__ import annotations
+ 
+-from dataclasses import asdict, dataclass
+ import hashlib
+ import json
+ import math
+ import os
++from dataclasses import asdict, dataclass
+ from pathlib import Path
+ from typing import Any, Literal, Mapping, MutableMapping
+ 
+diff --git a/mnist/diag_d0_jacobi_rb_path_weighted_capacity_e2e.py b/mnist/diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
+index 53f90c3..78214cc 100644
+--- a/mnist/diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
++++ b/mnist/diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
+@@ -18,16 +18,16 @@ read-only verification manifest at completion.
+ from __future__ import annotations
+ 
+ import argparse
+-from dataclasses import asdict, dataclass
+-from datetime import datetime, timezone
+ import hashlib
+ import json
+ import math
+ import os
+-from pathlib import Path
+ import platform
+ import sys
+ import time
++from dataclasses import asdict, dataclass
++from datetime import datetime, timezone
++from pathlib import Path
+ from typing import Any, Mapping, Sequence
+ 
+ import numpy as np
+diff --git a/tests/test_d0_jacobi_rb_global_large.py b/tests/test_d0_jacobi_rb_global_large.py
+index 4ca2256..fb9a681 100644
+--- a/tests/test_d0_jacobi_rb_global_large.py
++++ b/tests/test_d0_jacobi_rb_global_large.py
+@@ -11,9 +11,9 @@ from mnist.d0_jacobi_rb_global_large import (
+     large_global_parameter_count,
+ )
+ from mnist.d0_jacobi_rb_learnability import (
+-    ModelInputs,
+     PHASE_DURATIONS,
+     PHASE_MATCHINGS,
++    ModelInputs,
+ )
+ 
+ 
+diff --git a/tests/test_diag_d0_jacobi_rb_path_weighted_capacity_e2e.py b/tests/test_diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
+index fc5e5bf..7017a9a 100644
+--- a/tests/test_diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
++++ b/tests/test_diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
+@@ -1,6 +1,8 @@
+ from __future__ import annotations
+ 
+ import json
++import os
++import subprocess
+ from pathlib import Path
+ 
+ import numpy as np
+@@ -62,9 +64,14 @@ def test_runpod_launcher_requires_durable_storage_before_delete() -> None:
+     lifecycle = (root / "pod_lifecycle.sh").read_text()
+     assert "RUNPOD_RESULTS_DURABLE" in launcher
+     assert "Refusing unattended Pod deletion" in launcher
++    assert launcher.index('mkdir -p "$(dirname "${RUN_DIR}")"') < launcher.index(
++        'mkdir "${LOCK_DIR}"'
++    )
+     assert "timeout --signal=TERM" in worker
+     assert "/stop" in lifecycle
+     assert "--request DELETE" in lifecycle
++    assert "runpodctl stop pod" in lifecycle
++    assert "runpodctl remove pod" in lifecycle
+     assert "EXPORT_VERIFIED" in finalizer
+ 
+ 
+@@ -87,3 +94,80 @@ def test_config_is_json_serializable() -> None:
+         seed=1,
+     )
+     json.dumps(config.to_record(), sort_keys=True)
++
++
++
++def test_runpod_lifecycle_falls_back_to_legacy_cli(tmp_path: Path) -> None:
++    root = Path(__file__).resolve().parents[1] / "tools" / "runpod_weighted_e2e"
++    fake_bin = tmp_path / "bin"
++    fake_bin.mkdir()
++    record = tmp_path / "calls.txt"
++    fake = fake_bin / "runpodctl"
++    fake.write_text(
++        "#!/usr/bin/env bash\n"
++        "set -eu\n"
++        "echo \"$*\" >> \"${FAKE_RUNPOD_RECORD}\"\n"
++        "if [[ \"${1:-}\" == \"pod\" ]]; then exit 1; fi\n"
++        "if [[ \"${1:-}\" == \"remove\" && \"${2:-}\" == \"pod\" ]]; then exit 0; fi\n"
++        "exit 1\n"
++    )
++    fake.chmod(0o755)
++    env = os.environ.copy()
++    env.update(
++        {
++            "PATH": f"{fake_bin}:{env.get('PATH', '')}",
++            "RUNPOD_POD_ID": "test-pod",
++            "RUNPOD_API_KEY": "",
++            "RUNPOD_RESULTS_DURABLE": "1",
++            "FAKE_RUNPOD_RECORD": str(record),
++        }
++    )
++    subprocess.run(
++        ["bash", str(root / "pod_lifecycle.sh"), "delete"],
++        check=True,
++        env=env,
++        capture_output=True,
++        text=True,
++    )
++    calls = record.read_text().splitlines()
++    assert any(call == "pod --help" for call in calls)
++    assert any(call == "remove pod test-pod" for call in calls)
++
++
++
++def test_runpod_network_volume_stop_falls_back_to_delete(tmp_path: Path) -> None:
++    root = Path(__file__).resolve().parents[1] / "tools" / "runpod_weighted_e2e"
++    fake_bin = tmp_path / "bin"
++    fake_bin.mkdir()
++    record = tmp_path / "calls.txt"
++    fake = fake_bin / "runpodctl"
++    fake.write_text(
++        "#!/usr/bin/env bash\n"
++        "set -eu\n"
++        "echo \"$*\" >> \"${FAKE_RUNPOD_RECORD}\"\n"
++        "if [[ \"${1:-}\" == \"pod\" ]]; then exit 1; fi\n"
++        "if [[ \"${1:-}\" == \"stop\" ]]; then exit 1; fi\n"
++        "if [[ \"${1:-}\" == \"remove\" && \"${2:-}\" == \"pod\" ]]; then exit 0; fi\n"
++        "exit 1\n"
++    )
++    fake.chmod(0o755)
++    env = os.environ.copy()
++    env.update(
++        {
++            "PATH": f"{fake_bin}:{env.get('PATH', '')}",
++            "RUNPOD_POD_ID": "test-pod",
++            "RUNPOD_API_KEY": "",
++            "RUNPOD_RESULTS_DURABLE": "1",
++            "FAKE_RUNPOD_RECORD": str(record),
++        }
++    )
++    subprocess.run(
++        ["bash", str(root / "pod_lifecycle.sh"), "stop"],
++        check=True,
++        env=env,
++        capture_output=True,
++        text=True,
++    )
++    calls = record.read_text().splitlines()
++    assert any(call == "stop pod test-pod" for call in calls)
++    assert any(call == "remove pod test-pod" for call in calls)
+diff --git a/tools/runpod_weighted_e2e/finalize.sh b/tools/runpod_weighted_e2e/finalize.sh
+index ac07725..7f0181f 100755
+--- a/tools/runpod_weighted_e2e/finalize.sh
++++ b/tools/runpod_weighted_e2e/finalize.sh
+@@ -1,50 +1,55 @@
+-#!/usr/bin/env bash
+-set -euo pipefail
+-
+-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+-RUN_DIR="${RUN_DIR:?RUN_DIR is required}"
+-ARCHIVE_PATH="${ARCHIVE_PATH:-${RUN_DIR}.tar.zst}"
+-FINAL_ACTION="${RUNPOD_FINAL_ACTION:-delete}"
+-EXPORT_VERIFIED="${EXPORT_VERIFIED:-0}"
+-WATCHDOG_PID="${WATCHDOG_PID:-}"
+-
+-if [[ -n "${WATCHDOG_PID}" ]]; then
+-  kill "${WATCHDOG_PID}" 2>/dev/null || true
+-fi
+-sync || true
+-
+-if [[ "${EXPORT_VERIFIED}" != "1" ]]; then
+-  echo "Durable export was not verified; stopping rather than deleting the Pod" >&2
+-  FINAL_ACTION="stop"
+-fi
+-
+-mkdir -p "${RUN_DIR}"
+-export ARCHIVE_PATH EXPORT_VERIFIED FINAL_ACTION
+-python3 - "${RUN_DIR}/runpod_finalization.json" <<'PY'
+-import datetime
+-import json
+-import os
+-import pathlib
+-import sys
+-
+-path = pathlib.Path(sys.argv[1])
+-payload = {
+-    "schema": "d0-jacobi-rb-path-weighted-runpod-finalization-v1",
+-    "written_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+-    "pod_id": os.environ.get("RUNPOD_POD_ID"),
+-    "archive_path": os.environ.get("ARCHIVE_PATH"),
+-    "export_verified": int(os.environ.get("EXPORT_VERIFIED", "0")),
+-    "requested_final_action": os.environ.get("RUNPOD_FINAL_ACTION", "delete"),
+-    "effective_final_action": os.environ.get("FINAL_ACTION", "stop"),
+-}
+-temporary = path.with_suffix(path.suffix + ".tmp")
+-temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n")
+-temporary.replace(path)
+-PY
+-
+-if [[ "${FINAL_ACTION}" == "delete" ]]; then
+-  "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" delete || \
+-    "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" stop
+-else
+-  "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" stop
+-fi
++#!/usr/bin/env bash
++set -euo pipefail
++
++REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
++RUN_DIR="${RUN_DIR:?RUN_DIR is required}"
++ARCHIVE_PATH="${ARCHIVE_PATH:-${RUN_DIR}.tar.zst}"
++FINAL_ACTION="${RUNPOD_FINAL_ACTION:-delete}"
++EXPORT_VERIFIED="${EXPORT_VERIFIED:-0}"
++WATCHDOG_PID="${WATCHDOG_PID:-}"
++
++if [[ -n "${WATCHDOG_PID}" ]]; then
++  kill "${WATCHDOG_PID}" 2>/dev/null || true
++fi
++sync || true
++
++if [[ "${EXPORT_VERIFIED}" != "1" ]]; then
++  if [[ "${RUNPOD_RESULTS_DURABLE:-0}" == "1" && "${RUN_DIR}" == /workspace/* ]]; then
++    echo "Archive export was not verified, but /workspace is declared durable; deleting the Pod to stop GPU billing" >&2
++    FINAL_ACTION="delete"
++  else
++    echo "Durable export was not verified; stopping rather than deleting the Pod" >&2
++    FINAL_ACTION="stop"
++  fi
++fi
++
++mkdir -p "${RUN_DIR}"
++export ARCHIVE_PATH EXPORT_VERIFIED FINAL_ACTION
++python3 - "${RUN_DIR}/runpod_finalization.json" <<'PY'
++import datetime
++import json
++import os
++import pathlib
++import sys
++
++path = pathlib.Path(sys.argv[1])
++payload = {
++    "schema": "d0-jacobi-rb-path-weighted-runpod-finalization-v1",
++    "written_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
++    "pod_id": os.environ.get("RUNPOD_POD_ID"),
++    "archive_path": os.environ.get("ARCHIVE_PATH"),
++    "export_verified": int(os.environ.get("EXPORT_VERIFIED", "0")),
++    "requested_final_action": os.environ.get("RUNPOD_FINAL_ACTION", "delete"),
++    "effective_final_action": os.environ.get("FINAL_ACTION", "stop"),
++}
++temporary = path.with_suffix(path.suffix + ".tmp")
++temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n")
++temporary.replace(path)
++PY
++
++if [[ "${FINAL_ACTION}" == "delete" ]]; then
++  "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" delete || \
++    "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" stop
++else
++  "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" stop
++fi
+diff --git a/tools/runpod_weighted_e2e/install_environment.sh b/tools/runpod_weighted_e2e/install_environment.sh
+index d07e83d..8449606 100755
+--- a/tools/runpod_weighted_e2e/install_environment.sh
++++ b/tools/runpod_weighted_e2e/install_environment.sh
+@@ -1,27 +1,27 @@
+-#!/usr/bin/env bash
+-set -euo pipefail
+-
+-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+-VENV_DIR="${VENV_DIR:-${REPO_ROOT}/.venv-runpod-weighted}"
+-
+-if [[ ! -d "${VENV_DIR}" ]]; then
+-  python3 -m venv --system-site-packages "${VENV_DIR}"
+-fi
+-# shellcheck disable=SC1091
+-source "${VENV_DIR}/bin/activate"
+-python -m pip install --upgrade pip setuptools wheel
+-python -m pip install -r "${REPO_ROOT}/tools/runpod_weighted_e2e/requirements.lock"
+-
+-python - <<'PY'
+-import torch
+-import torchvision
+-if not torch.cuda.is_available():
+-    raise SystemExit("CUDA is unavailable in the selected RunPod image")
+-print({
+-    "torch": torch.__version__,
+-    "torchvision": torchvision.__version__,
+-    "cuda_runtime": torch.version.cuda,
+-    "gpu": torch.cuda.get_device_name(0),
+-    "memory_bytes": torch.cuda.get_device_properties(0).total_memory,
+-})
+-PY
++#!/usr/bin/env bash
++set -euo pipefail
++
++REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
++VENV_DIR="${VENV_DIR:-${REPO_ROOT}/.venv-runpod-weighted}"
++
++if [[ ! -d "${VENV_DIR}" ]]; then
++  python3 -m venv --system-site-packages "${VENV_DIR}"
++fi
++# shellcheck disable=SC1091
++source "${VENV_DIR}/bin/activate"
++python -m pip install --upgrade pip setuptools wheel
++python -m pip install -r "${REPO_ROOT}/tools/runpod_weighted_e2e/requirements.lock"
++
++python - <<'PY'
++import torch
++import torchvision
++if not torch.cuda.is_available():
++    raise SystemExit("CUDA is unavailable in the selected RunPod image")
++print({
++    "torch": torch.__version__,
++    "torchvision": torchvision.__version__,
++    "cuda_runtime": torch.version.cuda,
++    "gpu": torch.cuda.get_device_name(0),
++    "memory_bytes": torch.cuda.get_device_properties(0).total_memory,
++})
++PY
+diff --git a/tools/runpod_weighted_e2e/launch.sh b/tools/runpod_weighted_e2e/launch.sh
+index fbe7d3e..4c21eed 100755
+--- a/tools/runpod_weighted_e2e/launch.sh
++++ b/tools/runpod_weighted_e2e/launch.sh
+@@ -1,57 +1,57 @@
+-#!/usr/bin/env bash
+-set -euo pipefail
+-
+-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+-RESULTS_ROOT="${RESULTS_ROOT:-/workspace/results/jacobi-path-weighted-capacity}"
+-RUN_NAME="${RUN_NAME:-run-$(date -u +%Y%m%d-%H%M%S)}"
+-RUN_DIR="${RUN_DIR:-${RESULTS_ROOT}/${RUN_NAME}}"
+-LOG_PATH="${LOG_PATH:-${RUN_DIR}.log}"
+-LOCK_DIR="${RUN_DIR}.launch-lock"
+-RUNPOD_FINAL_ACTION="${RUNPOD_FINAL_ACTION:-delete}"
+-RUNPOD_RESULTS_DURABLE="${RUNPOD_RESULTS_DURABLE:-0}"
+-RUNPOD_DRY_RUN="${RUNPOD_DRY_RUN:-0}"
+-
+-if [[ "${RUNPOD_DRY_RUN}" != "1" && -z "${RUNPOD_POD_ID:-}" ]]; then
+-  echo "RUNPOD_POD_ID is required for an unattended RunPod launch" >&2
+-  exit 1
+-fi
+-if [[ "${RUNPOD_FINAL_ACTION}" == "delete" && "${RUNPOD_RESULTS_DURABLE}" != "1" ]]; then
+-  echo "Refusing unattended Pod deletion without RUNPOD_RESULTS_DURABLE=1" >&2
+-  echo "Use an attached network volume at /workspace or a verified RESULTS_URI export." >&2
+-  exit 1
+-fi
+-if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
+-  echo "This run has already been launched: ${RUN_DIR}" >&2
+-  exit 1
+-fi
+-mkdir -p "$(dirname "${RUN_DIR}")"
+-
+-export REPO_ROOT RUN_DIR
+-nohup setsid env \
+-  REPO_ROOT="${REPO_ROOT}" \
+-  RUN_DIR="${RUN_DIR}" \
+-  DATA_DIR="${DATA_DIR:-/workspace/mnist_data}" \
+-  DEVICE="${DEVICE:-cuda:0}" \
+-  SMALL_UPDATES="${SMALL_UPDATES:-12000}" \
+-  LARGE_UPDATES="${LARGE_UPDATES:-12000}" \
+-  TRAIN_PATHS="${TRAIN_PATHS:-64}" \
+-  VALIDATION_PATHS="${VALIDATION_PATHS:-32}" \
+-  BATCH_SIZE="${BATCH_SIZE:-32}" \
+-  VALIDATION_INTERVAL="${VALIDATION_INTERVAL:-250}" \
+-  MNIST_INDEX="${MNIST_INDEX:-0}" \
+-  MOBILITY_FLOOR="${MOBILITY_FLOOR:-1e-4}" \
+-  HARD_WALL_SECONDS="${HARD_WALL_SECONDS:-21600}" \
+-  WATCHDOG_GRACE_SECONDS="${WATCHDOG_GRACE_SECONDS:-900}" \
+-  RESULTS_URI="${RESULTS_URI:-}" \
+-  RUNPOD_RESULTS_DURABLE="${RUNPOD_RESULTS_DURABLE}" \
+-  RUNPOD_FINAL_ACTION="${RUNPOD_FINAL_ACTION}" \
+-  RUNPOD_DRY_RUN="${RUNPOD_DRY_RUN}" \
+-  bash "${REPO_ROOT}/tools/runpod_weighted_e2e/worker.sh" \
+-  >"${LOG_PATH}" 2>&1 </dev/null &
+-worker_pid=$!
+-
+-echo "Run launched in a detached session."
+-echo "  PID: ${worker_pid}"
+-echo "  Run directory: ${RUN_DIR}"
+-echo "  Log: ${LOG_PATH}"
+-echo "  Follow: tail -f '${LOG_PATH}'"
++#!/usr/bin/env bash
++set -euo pipefail
++
++REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
++RESULTS_ROOT="${RESULTS_ROOT:-/workspace/results/jacobi-path-weighted-capacity}"
++RUN_NAME="${RUN_NAME:-run-$(date -u +%Y%m%d-%H%M%S)}"
++RUN_DIR="${RUN_DIR:-${RESULTS_ROOT}/${RUN_NAME}}"
++LOG_PATH="${LOG_PATH:-${RUN_DIR}.log}"
++LOCK_DIR="${RUN_DIR}.launch-lock"
++RUNPOD_FINAL_ACTION="${RUNPOD_FINAL_ACTION:-delete}"
++RUNPOD_RESULTS_DURABLE="${RUNPOD_RESULTS_DURABLE:-0}"
++RUNPOD_DRY_RUN="${RUNPOD_DRY_RUN:-0}"
++
++if [[ "${RUNPOD_DRY_RUN}" != "1" && -z "${RUNPOD_POD_ID:-}" ]]; then
++  echo "RUNPOD_POD_ID is required for an unattended RunPod launch" >&2
++  exit 1
++fi
++if [[ "${RUNPOD_FINAL_ACTION}" == "delete" && "${RUNPOD_RESULTS_DURABLE}" != "1" ]]; then
++  echo "Refusing unattended Pod deletion without RUNPOD_RESULTS_DURABLE=1" >&2
++  echo "Use an attached network volume at /workspace or a verified RESULTS_URI export." >&2
++  exit 1
++fi
++mkdir -p "$(dirname "${RUN_DIR}")"
++if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
++  echo "This run has already been launched: ${RUN_DIR}" >&2
++  exit 1
++fi
++
++export REPO_ROOT RUN_DIR
++nohup setsid env \
++  REPO_ROOT="${REPO_ROOT}" \
++  RUN_DIR="${RUN_DIR}" \
++  DATA_DIR="${DATA_DIR:-/workspace/mnist_data}" \
++  DEVICE="${DEVICE:-cuda:0}" \
++  SMALL_UPDATES="${SMALL_UPDATES:-12000}" \
++  LARGE_UPDATES="${LARGE_UPDATES:-12000}" \
++  TRAIN_PATHS="${TRAIN_PATHS:-64}" \
++  VALIDATION_PATHS="${VALIDATION_PATHS:-32}" \
++  BATCH_SIZE="${BATCH_SIZE:-32}" \
++  VALIDATION_INTERVAL="${VALIDATION_INTERVAL:-250}" \
++  MNIST_INDEX="${MNIST_INDEX:-0}" \
++  MOBILITY_FLOOR="${MOBILITY_FLOOR:-1e-4}" \
++  HARD_WALL_SECONDS="${HARD_WALL_SECONDS:-21600}" \
++  WATCHDOG_GRACE_SECONDS="${WATCHDOG_GRACE_SECONDS:-900}" \
++  RESULTS_URI="${RESULTS_URI:-}" \
++  RUNPOD_RESULTS_DURABLE="${RUNPOD_RESULTS_DURABLE}" \
++  RUNPOD_FINAL_ACTION="${RUNPOD_FINAL_ACTION}" \
++  RUNPOD_DRY_RUN="${RUNPOD_DRY_RUN}" \
++  bash "${REPO_ROOT}/tools/runpod_weighted_e2e/worker.sh" \
++  >"${LOG_PATH}" 2>&1 </dev/null &
++worker_pid=$!
++
++echo "Run launched in a detached session."
++echo "  PID: ${worker_pid}"
++echo "  Run directory: ${RUN_DIR}"
++echo "  Log: ${LOG_PATH}"
++echo "  Follow: tail -f '${LOG_PATH}'"
+diff --git a/tools/runpod_weighted_e2e/pod_lifecycle.sh b/tools/runpod_weighted_e2e/pod_lifecycle.sh
+index 622de5b..8925357 100755
+--- a/tools/runpod_weighted_e2e/pod_lifecycle.sh
++++ b/tools/runpod_weighted_e2e/pod_lifecycle.sh
+@@ -1,47 +1,81 @@
+-#!/usr/bin/env bash
+-set -euo pipefail
+-
+-action="${1:?usage: pod_lifecycle.sh <stop|delete>}"
+-pod_id="${RUNPOD_POD_ID:-}"
+-
+-if [[ "${RUNPOD_DRY_RUN:-0}" == "1" ]]; then
+-  echo "DRY RUN: would ${action} RunPod Pod ${pod_id:-<missing>}"
+-  exit 0
+-fi
+-if [[ -z "${pod_id}" ]]; then
+-  echo "RUNPOD_POD_ID is absent; no Pod lifecycle request was sent" >&2
+-  exit 1
+-fi
+-
+-if command -v runpodctl >/dev/null 2>&1; then
+-  case "${action}" in
+-    stop) runpodctl pod stop "${pod_id}" ;;
+-    delete) runpodctl pod delete "${pod_id}" ;;
+-    *) echo "unsupported Pod action: ${action}" >&2; exit 2 ;;
+-  esac
+-  exit 0
+-fi
+-
+-api_key="${RUNPOD_API_KEY:-}"
+-if [[ -z "${api_key}" ]]; then
+-  echo "Neither runpodctl nor RUNPOD_API_KEY is available" >&2
+-  exit 1
+-fi
+-case "${action}" in
+-  stop)
+-    curl --fail --show-error --silent \
+-      --request POST \
+-      --url "https://rest.runpod.io/v1/pods/${pod_id}/stop" \
+-      --header "Authorization: Bearer ${api_key}"
+-    ;;
+-  delete)
+-    curl --fail --show-error --silent \
+-      --request DELETE \
+-      --url "https://rest.runpod.io/v1/pods/${pod_id}" \
+-      --header "Authorization: Bearer ${api_key}"
+-    ;;
+-  *)
+-    echo "unsupported Pod action: ${action}" >&2
+-    exit 2
+-    ;;
+-esac
++#!/usr/bin/env bash
++set -euo pipefail
++
++action="${1:?usage: pod_lifecycle.sh <stop|delete>}"
++pod_id="${RUNPOD_POD_ID:-}"
++api_key="${RUNPOD_API_KEY:-}"
++durable="${RUNPOD_RESULTS_DURABLE:-0}"
++
++case "${action}" in
++  stop|delete) ;;
++  *) echo "unsupported Pod action: ${action}" >&2; exit 2 ;;
++esac
++
++if [[ "${RUNPOD_DRY_RUN:-0}" == "1" ]]; then
++  echo "DRY RUN: would ${action} RunPod Pod ${pod_id:-<missing>}"
++  exit 0
++fi
++if [[ -z "${pod_id}" ]]; then
++  echo "RUNPOD_POD_ID is absent; no Pod lifecycle request was sent" >&2
++  exit 1
++fi
++
++modern_cli_action() {
++  command -v runpodctl >/dev/null 2>&1 || return 1
++  runpodctl pod --help >/dev/null 2>&1 || return 1
++  case "$1" in
++    stop) runpodctl pod stop "${pod_id}" ;;
++    delete) runpodctl pod delete "${pod_id}" ;;
++  esac
++}
++
++legacy_cli_action() {
++  command -v runpodctl >/dev/null 2>&1 || return 1
++  case "$1" in
++    stop) runpodctl stop pod "${pod_id}" ;;
++    delete) runpodctl remove pod "${pod_id}" ;;
++  esac
++}
++
++rest_action() {
++  [[ -n "${api_key}" ]] || return 1
++  command -v curl >/dev/null 2>&1 || return 1
++  case "$1" in
++    stop)
++      curl --fail --show-error --silent \
++        --request POST \
++        --url "https://rest.runpod.io/v1/pods/${pod_id}/stop" \
++        --header "Authorization: Bearer ${api_key}"
++      ;;
++    delete)
++      curl --fail --show-error --silent \
++        --request DELETE \
++        --url "https://rest.runpod.io/v1/pods/${pod_id}" \
++        --header "Authorization: Bearer ${api_key}"
++      ;;
++  esac
++}
++
++perform_action() {
++  modern_cli_action "$1" && return 0
++  legacy_cli_action "$1" && return 0
++  rest_action "$1" && return 0
++  return 1
++}
++
++if perform_action "${action}"; then
++  exit 0
++fi
++
++# RunPod does not allow stopping a Pod with a network volume attached.  For
++# this experiment RUNPOD_RESULTS_DURABLE=1 explicitly asserts that /workspace
++# is durable, so deletion is the safe budget fuse if a requested stop fails.
++if [[ "${action}" == "stop" && "${durable}" == "1" ]]; then
++  echo "Pod stop failed; durable storage is declared, trying Pod deletion instead" >&2
++  if perform_action delete; then
++    exit 0
++  fi
++fi
++
++echo "Unable to ${action} RunPod Pod ${pod_id} automatically" >&2
++exit 1
+diff --git a/tools/runpod_weighted_e2e/worker.sh b/tools/runpod_weighted_e2e/worker.sh
+index c3fdbf7..22e19e2 100755
+--- a/tools/runpod_weighted_e2e/worker.sh
++++ b/tools/runpod_weighted_e2e/worker.sh
+@@ -1,133 +1,156 @@
+-#!/usr/bin/env bash
+-set -euo pipefail
+-
+-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+-RUN_DIR="${RUN_DIR:?RUN_DIR is required}"
+-DATA_DIR="${DATA_DIR:-/workspace/mnist_data}"
+-DEVICE="${DEVICE:-cuda:0}"
+-SMALL_UPDATES="${SMALL_UPDATES:-12000}"
+-LARGE_UPDATES="${LARGE_UPDATES:-12000}"
+-TRAIN_PATHS="${TRAIN_PATHS:-64}"
+-VALIDATION_PATHS="${VALIDATION_PATHS:-32}"
+-BATCH_SIZE="${BATCH_SIZE:-32}"
+-VALIDATION_INTERVAL="${VALIDATION_INTERVAL:-250}"
+-MNIST_INDEX="${MNIST_INDEX:-0}"
+-MOBILITY_FLOOR="${MOBILITY_FLOOR:-1e-4}"
+-HARD_WALL_SECONDS="${HARD_WALL_SECONDS:-21600}"
+-WATCHDOG_GRACE_SECONDS="${WATCHDOG_GRACE_SECONDS:-900}"
+-RESULTS_URI="${RESULTS_URI:-}"
+-RUNPOD_RESULTS_DURABLE="${RUNPOD_RESULTS_DURABLE:-0}"
+-RUNPOD_FINAL_ACTION="${RUNPOD_FINAL_ACTION:-delete}"
+-export REPO_ROOT RUN_DIR RUNPOD_RESULTS_DURABLE RUNPOD_FINAL_ACTION
+-
+-mkdir -p "${RUN_DIR}"
+-
+-# Independent GPU-cost fuse: even if Python or this shell wedges, the Pod is stopped.
+-(
+-  sleep "$((HARD_WALL_SECONDS + WATCHDOG_GRACE_SECONDS))"
+-  echo "RunPod hard-wall watchdog fired" >&2
+-  "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" stop
+-) &
+-WATCHDOG_PID=$!
+-export WATCHDOG_PID
+-
+-EXPORT_VERIFIED=0
+-ARCHIVE_PATH="${RUN_DIR}.tar.zst"
+-export EXPORT_VERIFIED ARCHIVE_PATH
+-finalized=0
+-finalize_once() {
+-  if [[ "${finalized}" == "0" ]]; then
+-    finalized=1
+-    export EXPORT_VERIFIED ARCHIVE_PATH WATCHDOG_PID
+-    "${REPO_ROOT}/tools/runpod_weighted_e2e/finalize.sh" || true
+-  fi
+-}
+-trap finalize_once EXIT INT TERM
+-
+-cd "${REPO_ROOT}"
+-"${REPO_ROOT}/tools/runpod_weighted_e2e/install_environment.sh"
+-# shellcheck disable=SC1091
+-source "${REPO_ROOT}/.venv-runpod-weighted/bin/activate"
+-export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+-
+-python -m ruff check \
+-  mnist/d0_jacobi_rb_path_weighted_loss.py \
+-  mnist/d0_jacobi_rb_global_large.py \
+-  mnist/d0_jacobi_rb_candidate_training_cache.py \
+-  mnist/d0_jacobi_rb_path_weighted_training.py \
+-  mnist/diag_d0_jacobi_rb_path_weighted_capacity_e2e.py \
+-  tests/test_d0_jacobi_rb_path_weighted_loss.py \
+-  tests/test_d0_jacobi_rb_global_large.py \
+-  tests/test_d0_jacobi_rb_candidate_training_cache.py \
+-  tests/test_diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
+-
+-python -m pytest -q \
+-  tests/test_d0_jacobi_rb_path_weighted_loss.py \
+-  tests/test_d0_jacobi_rb_global_large.py \
+-  tests/test_d0_jacobi_rb_candidate_training_cache.py \
+-  tests/test_diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
+-python -m pytest -q tests/test_eulerian_jacobi_ddpm_candidate.py \
+-  -k 'protected_source_hashes_are_unchanged or candidate_dispatch_uses_only_candidate_prepare_and_enqueue or candidate_phase_preserves_orientation_ids_pair_totals_and_simplex or candidate_forward_phase_supports_k512 or candidate_eager_prefixes_share_uniform_ids_and_scale_exposure'
+-
+-set +e
+-timeout --signal=TERM --kill-after=120 "${HARD_WALL_SECONDS}" \
+-  python -m mnist.diag_d0_jacobi_rb_path_weighted_capacity_e2e run \
+-    --run-dir "${RUN_DIR}" \
+-    --device "${DEVICE}" \
+-    --data-dir "${DATA_DIR}" \
+-    --mnist-index "${MNIST_INDEX}" \
+-    --train-paths "${TRAIN_PATHS}" \
+-    --validation-paths "${VALIDATION_PATHS}" \
+-    --small-updates "${SMALL_UPDATES}" \
+-    --large-updates "${LARGE_UPDATES}" \
+-    --batch-size "${BATCH_SIZE}" \
+-    --validation-interval "${VALIDATION_INTERVAL}" \
+-    --mobility-floor "${MOBILITY_FLOOR}" \
+-    --hard-wall-seconds "${HARD_WALL_SECONDS}"
+-experiment_status=$?
+-set -e
+-
+-# A failed scientific run is still valuable if its terminal bundle is intact.
+-python -m mnist.diag_d0_jacobi_rb_path_weighted_capacity_e2e verify \
+-  --run-dir "${RUN_DIR}" || true
+-
+-if command -v zstd >/dev/null 2>&1; then
+-  tar --zstd -cf "${ARCHIVE_PATH}" -C "$(dirname "${RUN_DIR}")" "$(basename "${RUN_DIR}")"
+-else
+-  ARCHIVE_PATH="${RUN_DIR}.tar.gz"
+-  export ARCHIVE_PATH
+-  tar -czf "${ARCHIVE_PATH}" -C "$(dirname "${RUN_DIR}")" "$(basename "${RUN_DIR}")"
+-fi
+-sha256sum "${ARCHIVE_PATH}" > "${ARCHIVE_PATH}.sha256"
+-local_archive_sha=$(sha256sum "${ARCHIVE_PATH}" | awk '{print $1}')
+-sync
+-readback_archive_sha=$(sha256sum "${ARCHIVE_PATH}" | awk '{print $1}')
+-ARCHIVE_LOCAL_VERIFIED=0
+-if [[ "${local_archive_sha}" == "${readback_archive_sha}" ]]; then
+-  ARCHIVE_LOCAL_VERIFIED=1
+-fi
+-
+-if [[ -n "${RESULTS_URI}" ]]; then
+-  if [[ "${RESULTS_URI}" != s3://* ]]; then
+-    echo "RESULTS_URI currently supports only s3:// destinations" >&2
+-  elif ! command -v aws >/dev/null 2>&1; then
+-    echo "aws CLI is required for RESULTS_URI export" >&2
+-  else
+-    destination="${RESULTS_URI%/}/$(basename "${ARCHIVE_PATH}")"
+-    aws s3 cp "${ARCHIVE_PATH}" "${destination}"
+-    remote_sha=$(aws s3 cp "${destination}" - | sha256sum | awk '{print $1}')
+-    if [[ "${remote_sha}" == "${local_archive_sha}" && "${ARCHIVE_LOCAL_VERIFIED}" == "1" ]]; then
+-      aws s3 cp "${ARCHIVE_PATH}.sha256" "${destination}.sha256"
+-      EXPORT_VERIFIED=1
+-    fi
+-  fi
+-elif [[ "${RUNPOD_RESULTS_DURABLE}" == "1" && "${RUN_DIR}" == /workspace/* && "${ARCHIVE_LOCAL_VERIFIED}" == "1" ]]; then
+-  # RUNPOD_RESULTS_DURABLE=1 is an explicit assertion that /workspace is backed
+-  # by a network volume which survives Pod deletion.
+-  EXPORT_VERIFIED=1
+-else
+-  echo "No verified network volume or S3 destination; preserving the Pod volume by stopping" >&2
+-fi
+-export EXPORT_VERIFIED
+-
+-exit "${experiment_status}"
++#!/usr/bin/env bash
++set -euo pipefail
++
++REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
++RUN_DIR="${RUN_DIR:?RUN_DIR is required}"
++DATA_DIR="${DATA_DIR:-/workspace/mnist_data}"
++DEVICE="${DEVICE:-cuda:0}"
++SMALL_UPDATES="${SMALL_UPDATES:-12000}"
++LARGE_UPDATES="${LARGE_UPDATES:-12000}"
++TRAIN_PATHS="${TRAIN_PATHS:-64}"
++VALIDATION_PATHS="${VALIDATION_PATHS:-32}"
++BATCH_SIZE="${BATCH_SIZE:-32}"
++VALIDATION_INTERVAL="${VALIDATION_INTERVAL:-250}"
++MNIST_INDEX="${MNIST_INDEX:-0}"
++MOBILITY_FLOOR="${MOBILITY_FLOOR:-1e-4}"
++HARD_WALL_SECONDS="${HARD_WALL_SECONDS:-21600}"
++WATCHDOG_GRACE_SECONDS="${WATCHDOG_GRACE_SECONDS:-900}"
++RESULTS_URI="${RESULTS_URI:-}"
++RUNPOD_RESULTS_DURABLE="${RUNPOD_RESULTS_DURABLE:-0}"
++RUNPOD_FINAL_ACTION="${RUNPOD_FINAL_ACTION:-delete}"
++export REPO_ROOT RUN_DIR RUNPOD_RESULTS_DURABLE RUNPOD_FINAL_ACTION
++
++mkdir -p "${RUN_DIR}"
++
++# Independent GPU-cost fuse: even if Python or this shell wedges, the Pod is stopped.
++(
++  sleep "$((HARD_WALL_SECONDS + WATCHDOG_GRACE_SECONDS))"
++  echo "RunPod hard-wall watchdog fired" >&2
++  "${REPO_ROOT}/tools/runpod_weighted_e2e/pod_lifecycle.sh" stop
++) &
++WATCHDOG_PID=$!
++export WATCHDOG_PID
++
++EXPORT_VERIFIED=0
++ARCHIVE_PATH="${RUN_DIR}.tar.zst"
++export EXPORT_VERIFIED ARCHIVE_PATH
++finalized=0
++finalize_once() {
++  if [[ "${finalized}" == "0" ]]; then
++    finalized=1
++    export EXPORT_VERIFIED ARCHIVE_PATH WATCHDOG_PID
++    "${REPO_ROOT}/tools/runpod_weighted_e2e/finalize.sh" || true
++  fi
++}
++trap finalize_once EXIT INT TERM
++
++cd "${REPO_ROOT}"
++"${REPO_ROOT}/tools/runpod_weighted_e2e/install_environment.sh"
++# shellcheck disable=SC1091
++source "${REPO_ROOT}/.venv-runpod-weighted/bin/activate"
++export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
++
++# Repair checkout-only newline conversion before the strict historical-source
++# integrity test.  The protected inventory contains both LF and CRLF historical
++# files.  We rewrite a file only when changing newline convention alone makes
++# its SHA-256 exactly match the frozen expected hash; genuine edits still fail.
++python - <<'PY'
++import hashlib
++from pathlib import Path
++
++from mnist.diag_eulerian_jacobi_ddpm_candidate_pilot import PROTECTED_SOURCE_HASHES
++
++for relative, expected in PROTECTED_SOURCE_HASHES.items():
++    path = Path(relative)
++    raw = path.read_bytes()
++    if hashlib.sha256(raw).hexdigest() == expected:
++        continue
++    lf = raw.replace(b"\r\n", b"\n")
++    crlf = lf.replace(b"\n", b"\r\n")
++    if hashlib.sha256(lf).hexdigest() == expected:
++        path.write_bytes(lf)
++    elif hashlib.sha256(crlf).hexdigest() == expected:
++        path.write_bytes(crlf)
++PY
++
++python -m ruff check \
++  mnist/d0_jacobi_rb_path_weighted_loss.py \
++  mnist/d0_jacobi_rb_global_large.py \
++  mnist/d0_jacobi_rb_candidate_training_cache.py \
++  mnist/d0_jacobi_rb_path_weighted_training.py \
++  mnist/diag_d0_jacobi_rb_path_weighted_capacity_e2e.py \
++  tests/test_d0_jacobi_rb_path_weighted_loss.py \
++  tests/test_d0_jacobi_rb_global_large.py \
++  tests/test_d0_jacobi_rb_candidate_training_cache.py \
++  tests/test_diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
++
++python -m pytest -q \
++  tests/test_d0_jacobi_rb_path_weighted_loss.py \
++  tests/test_d0_jacobi_rb_global_large.py \
++  tests/test_d0_jacobi_rb_candidate_training_cache.py \
++  tests/test_diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
++python -m pytest -q tests/test_eulerian_jacobi_ddpm_candidate.py \
++  -k 'protected_source_hashes_are_unchanged or candidate_dispatch_uses_only_candidate_prepare_and_enqueue or candidate_phase_preserves_orientation_ids_pair_totals_and_simplex or candidate_forward_phase_supports_k512 or candidate_eager_prefixes_share_uniform_ids_and_scale_exposure'
++
++set +e
++timeout --signal=TERM --kill-after=120 "${HARD_WALL_SECONDS}" \
++  python -m mnist.diag_d0_jacobi_rb_path_weighted_capacity_e2e run \
++    --run-dir "${RUN_DIR}" \
++    --device "${DEVICE}" \
++    --data-dir "${DATA_DIR}" \
++    --mnist-index "${MNIST_INDEX}" \
++    --train-paths "${TRAIN_PATHS}" \
++    --validation-paths "${VALIDATION_PATHS}" \
++    --small-updates "${SMALL_UPDATES}" \
++    --large-updates "${LARGE_UPDATES}" \
++    --batch-size "${BATCH_SIZE}" \
++    --validation-interval "${VALIDATION_INTERVAL}" \
++    --mobility-floor "${MOBILITY_FLOOR}" \
++    --hard-wall-seconds "${HARD_WALL_SECONDS}"
++experiment_status=$?
++set -e
++
++# A failed scientific run is still valuable if its terminal bundle is intact.
++python -m mnist.diag_d0_jacobi_rb_path_weighted_capacity_e2e verify \
++  --run-dir "${RUN_DIR}" || true
++
++if command -v zstd >/dev/null 2>&1; then
++  tar --zstd -cf "${ARCHIVE_PATH}" -C "$(dirname "${RUN_DIR}")" "$(basename "${RUN_DIR}")"
++else
++  ARCHIVE_PATH="${RUN_DIR}.tar.gz"
++  export ARCHIVE_PATH
++  tar -czf "${ARCHIVE_PATH}" -C "$(dirname "${RUN_DIR}")" "$(basename "${RUN_DIR}")"
++fi
++sha256sum "${ARCHIVE_PATH}" > "${ARCHIVE_PATH}.sha256"
++local_archive_sha=$(sha256sum "${ARCHIVE_PATH}" | awk '{print $1}')
++sync
++readback_archive_sha=$(sha256sum "${ARCHIVE_PATH}" | awk '{print $1}')
++ARCHIVE_LOCAL_VERIFIED=0
++if [[ "${local_archive_sha}" == "${readback_archive_sha}" ]]; then
++  ARCHIVE_LOCAL_VERIFIED=1
++fi
++
++if [[ -n "${RESULTS_URI}" ]]; then
++  if [[ "${RESULTS_URI}" != s3://* ]]; then
++    echo "RESULTS_URI currently supports only s3:// destinations" >&2
++  elif ! command -v aws >/dev/null 2>&1; then
++    echo "aws CLI is required for RESULTS_URI export" >&2
++  else
++    destination="${RESULTS_URI%/}/$(basename "${ARCHIVE_PATH}")"
++    aws s3 cp "${ARCHIVE_PATH}" "${destination}"
++    remote_sha=$(aws s3 cp "${destination}" - | sha256sum | awk '{print $1}')
++    if [[ "${remote_sha}" == "${local_archive_sha}" && "${ARCHIVE_LOCAL_VERIFIED}" == "1" ]]; then
++      aws s3 cp "${ARCHIVE_PATH}.sha256" "${destination}.sha256"
++      EXPORT_VERIFIED=1
++    fi
++  fi
++elif [[ "${RUNPOD_RESULTS_DURABLE}" == "1" && "${RUN_DIR}" == /workspace/* && "${ARCHIVE_LOCAL_VERIFIED}" == "1" ]]; then
++  # RUNPOD_RESULTS_DURABLE=1 is an explicit assertion that /workspace is backed
++  # by a network volume which survives Pod deletion.
++  EXPORT_VERIFIED=1
++else
++  echo "No verified network volume or S3 destination; preserving the Pod volume by stopping" >&2
++fi
++export EXPORT_VERIFIED
++
++exit "${experiment_status}"

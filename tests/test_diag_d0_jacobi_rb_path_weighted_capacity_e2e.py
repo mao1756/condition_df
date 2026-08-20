@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -62,9 +64,14 @@ def test_runpod_launcher_requires_durable_storage_before_delete() -> None:
     lifecycle = (root / "pod_lifecycle.sh").read_text()
     assert "RUNPOD_RESULTS_DURABLE" in launcher
     assert "Refusing unattended Pod deletion" in launcher
+    assert launcher.index('mkdir -p "$(dirname "${RUN_DIR}")"') < launcher.index(
+        'mkdir "${LOCK_DIR}"'
+    )
     assert "timeout --signal=TERM" in worker
     assert "/stop" in lifecycle
     assert "--request DELETE" in lifecycle
+    assert "runpodctl stop pod" in lifecycle
+    assert "runpodctl remove pod" in lifecycle
     assert "EXPORT_VERIFIED" in finalizer
 
 
@@ -87,3 +94,80 @@ def test_config_is_json_serializable() -> None:
         seed=1,
     )
     json.dumps(config.to_record(), sort_keys=True)
+
+
+
+def test_runpod_lifecycle_falls_back_to_legacy_cli(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1] / "tools" / "runpod_weighted_e2e"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    record = tmp_path / "calls.txt"
+    fake = fake_bin / "runpodctl"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "echo \"$*\" >> \"${FAKE_RUNPOD_RECORD}\"\n"
+        "if [[ \"${1:-}\" == \"pod\" ]]; then exit 1; fi\n"
+        "if [[ \"${1:-}\" == \"remove\" && \"${2:-}\" == \"pod\" ]]; then exit 0; fi\n"
+        "exit 1\n"
+    )
+    fake.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env.get('PATH', '')}",
+            "RUNPOD_POD_ID": "test-pod",
+            "RUNPOD_API_KEY": "",
+            "RUNPOD_RESULTS_DURABLE": "1",
+            "FAKE_RUNPOD_RECORD": str(record),
+        }
+    )
+    subprocess.run(
+        ["bash", str(root / "pod_lifecycle.sh"), "delete"],
+        check=True,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    calls = record.read_text().splitlines()
+    assert any(call == "pod --help" for call in calls)
+    assert any(call == "remove pod test-pod" for call in calls)
+
+
+
+def test_runpod_network_volume_stop_falls_back_to_delete(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1] / "tools" / "runpod_weighted_e2e"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    record = tmp_path / "calls.txt"
+    fake = fake_bin / "runpodctl"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "echo \"$*\" >> \"${FAKE_RUNPOD_RECORD}\"\n"
+        "if [[ \"${1:-}\" == \"pod\" ]]; then exit 1; fi\n"
+        "if [[ \"${1:-}\" == \"stop\" ]]; then exit 1; fi\n"
+        "if [[ \"${1:-}\" == \"remove\" && \"${2:-}\" == \"pod\" ]]; then exit 0; fi\n"
+        "exit 1\n"
+    )
+    fake.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env.get('PATH', '')}",
+            "RUNPOD_POD_ID": "test-pod",
+            "RUNPOD_API_KEY": "",
+            "RUNPOD_RESULTS_DURABLE": "1",
+            "FAKE_RUNPOD_RECORD": str(record),
+        }
+    )
+    subprocess.run(
+        ["bash", str(root / "pod_lifecycle.sh"), "stop"],
+        check=True,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    calls = record.read_text().splitlines()
+    assert any(call == "stop pod test-pod" for call in calls)
+    assert any(call == "remove pod test-pod" for call in calls)

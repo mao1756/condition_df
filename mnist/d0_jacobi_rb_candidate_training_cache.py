@@ -13,14 +13,14 @@ The main forward state advances only through the full phase transition.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import shutil
 import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import numpy as np
@@ -296,6 +296,29 @@ def _allocate_arrays(root: Path, count: int) -> dict[str, np.memmap]:
     }
 
 
+def _flush_and_close_memmaps(values: Mapping[str, np.memmap]) -> None:
+    """Flush and close NumPy memmaps without masking the original failure."""
+
+    for value in values.values():
+        try:
+            value.flush()
+        finally:
+            mapping = getattr(value, "_mmap", None)
+            if mapping is not None:
+                mapping.close()
+
+
+def _flush_and_close_memmap(value: np.memmap | None) -> None:
+    if value is None:
+        return
+    try:
+        value.flush()
+    finally:
+        mapping = getattr(value, "_mmap", None)
+        if mapping is not None:
+            mapping.close()
+
+
 def build_candidate_prefix_cache(
     root: str | Path,
     source_state: np.ndarray,
@@ -325,17 +348,19 @@ def build_candidate_prefix_cache(
     temporary.mkdir(parents=True, exist_ok=False)
 
     record_count = len(paths) * active_spec.records_per_path
-    arrays = _allocate_arrays(temporary, record_count)
-    terminal = np.lib.format.open_memmap(
-        temporary / "terminal_states.npy",
-        mode="w+",
-        dtype=np.float64,
-        shape=(len(paths), STATE_SIZE),
-    )
+    arrays: dict[str, np.memmap] = {}
+    terminal: np.memmap | None = None
     selected_steps = set(active_spec.record_outer_steps)
     cursor = 0
     telemetry_rows: list[dict[str, Any]] = []
     try:
+        arrays = _allocate_arrays(temporary, record_count)
+        terminal = np.lib.format.open_memmap(
+            temporary / "terminal_states.npy",
+            mode="w+",
+            dtype=np.float64,
+            shape=(len(paths), STATE_SIZE),
+        )
         for cohort_start in range(0, len(paths), 8):
             cohort_paths = paths[cohort_start : cohort_start + 8]
             state = torch.as_tensor(
@@ -423,11 +448,10 @@ def build_candidate_prefix_cache(
             raise CandidatePrefixCacheError(
                 f"cache population is incomplete: {cursor} != {record_count}"
             )
-        for array in arrays.values():
-            array.flush()
-        terminal.flush()
-        del arrays
-        del terminal
+        _flush_and_close_memmaps(arrays)
+        arrays = {}
+        _flush_and_close_memmap(terminal)
+        terminal = None
 
         array_sha256 = {
             name: _sha256_file(temporary / f"{name}.npy")
@@ -482,11 +506,14 @@ def build_candidate_prefix_cache(
         os.replace(temporary, target_root)
         return CandidatePrefixCache(target_root)
     except Exception:
-        for value in arrays.values() if "arrays" in locals() else ():
-            try:
-                value.flush()
-            except Exception:
-                pass
+        try:
+            _flush_and_close_memmaps(arrays)
+        except Exception:
+            pass
+        try:
+            _flush_and_close_memmap(terminal)
+        except Exception:
+            pass
         raise
 
 

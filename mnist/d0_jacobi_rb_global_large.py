@@ -14,15 +14,15 @@ the 28 by 28 torus.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import hashlib
 import math
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
 import torch
-from torch import Tensor, nn
 import torch.nn.functional as F
+from torch import Tensor, nn
 
 from mnist.d0_jacobi_rb_boundary_tangent import edge_pair_geometry
 from mnist.d0_jacobi_rb_boundary_tangent_frequency1_coordinate import (

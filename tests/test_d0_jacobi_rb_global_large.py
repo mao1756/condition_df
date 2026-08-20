@@ -11,9 +11,9 @@ from mnist.d0_jacobi_rb_global_large import (
     large_global_parameter_count,
 )
 from mnist.d0_jacobi_rb_learnability import (
-    ModelInputs,
     PHASE_DURATIONS,
     PHASE_MATCHINGS,
+    ModelInputs,
 )
 
 

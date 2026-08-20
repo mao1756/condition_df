@@ -50,6 +50,29 @@ cd "${REPO_ROOT}"
 source "${REPO_ROOT}/.venv-runpod-weighted/bin/activate"
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
+# Repair checkout-only newline conversion before the strict historical-source
+# integrity test.  The protected inventory contains both LF and CRLF historical
+# files.  We rewrite a file only when changing newline convention alone makes
+# its SHA-256 exactly match the frozen expected hash; genuine edits still fail.
+python - <<'PY'
+import hashlib
+from pathlib import Path
+
+from mnist.diag_eulerian_jacobi_ddpm_candidate_pilot import PROTECTED_SOURCE_HASHES
+
+for relative, expected in PROTECTED_SOURCE_HASHES.items():
+    path = Path(relative)
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() == expected:
+        continue
+    lf = raw.replace(b"\r\n", b"\n")
+    crlf = lf.replace(b"\n", b"\r\n")
+    if hashlib.sha256(lf).hexdigest() == expected:
+        path.write_bytes(lf)
+    elif hashlib.sha256(crlf).hexdigest() == expected:
+        path.write_bytes(crlf)
+PY
+
 python -m ruff check \
   mnist/d0_jacobi_rb_path_weighted_loss.py \
   mnist/d0_jacobi_rb_global_large.py \
