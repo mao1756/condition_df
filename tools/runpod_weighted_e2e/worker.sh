@@ -50,33 +50,18 @@ cd "${REPO_ROOT}"
 source "${REPO_ROOT}/.venv-runpod-weighted/bin/activate"
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
-# Repair checkout-only newline conversion before the strict historical-source
-# integrity test.  The protected inventory contains both LF and CRLF historical
-# files.  We rewrite a file only when changing newline convention alone makes
-# its SHA-256 exactly match the frozen expected hash; genuine edits still fail.
-python - <<'PY'
-import hashlib
-from pathlib import Path
-
-from mnist.diag_eulerian_jacobi_ddpm_candidate_pilot import PROTECTED_SOURCE_HASHES
-
-for relative, expected in PROTECTED_SOURCE_HASHES.items():
-    path = Path(relative)
-    raw = path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() == expected:
-        continue
-    lf = raw.replace(b"\r\n", b"\n")
-    crlf = lf.replace(b"\n", b"\r\n")
-    if hashlib.sha256(lf).hexdigest() == expected:
-        path.write_bytes(lf)
-    elif hashlib.sha256(crlf).hexdigest() == expected:
-        path.write_bytes(crlf)
-PY
+# Verify protected historical source by canonical source content.  The frozen
+# byte-level inventory includes a mixed-newline file, so exact byte hashes are
+# not portable across Git/ZIP checkouts.  Canonical hashing permits newline-only
+# conversion and still rejects every other source edit.
+python -m mnist.d0_jacobi_rb_runpod_source_integrity \
+  --repository-root "${REPO_ROOT}"
 
 # Ruff import sorting is formatting-only and safe to repair in the disposable
 # RunPod checkout.  The second command remains the strict E/F/I gate.
 python -m ruff check --select I --fix \
   mnist/d0_jacobi_rb_path_weighted_loss.py \
+  mnist/d0_jacobi_rb_runpod_source_integrity.py \
   mnist/d0_jacobi_rb_global_large.py \
   mnist/d0_jacobi_rb_candidate_training_cache.py \
   mnist/d0_jacobi_rb_path_weighted_training.py \
@@ -88,6 +73,7 @@ python -m ruff check --select I --fix \
 
 python -m ruff check \
   mnist/d0_jacobi_rb_path_weighted_loss.py \
+  mnist/d0_jacobi_rb_runpod_source_integrity.py \
   mnist/d0_jacobi_rb_global_large.py \
   mnist/d0_jacobi_rb_candidate_training_cache.py \
   mnist/d0_jacobi_rb_path_weighted_training.py \
@@ -103,7 +89,7 @@ python -m pytest -q \
   tests/test_d0_jacobi_rb_candidate_training_cache.py \
   tests/test_diag_d0_jacobi_rb_path_weighted_capacity_e2e.py
 python -m pytest -q tests/test_eulerian_jacobi_ddpm_candidate.py \
-  -k 'protected_source_hashes_are_unchanged or candidate_dispatch_uses_only_candidate_prepare_and_enqueue or candidate_phase_preserves_orientation_ids_pair_totals_and_simplex or candidate_forward_phase_supports_k512 or candidate_eager_prefixes_share_uniform_ids_and_scale_exposure'
+  -k 'candidate_dispatch_uses_only_candidate_prepare_and_enqueue or candidate_phase_preserves_orientation_ids_pair_totals_and_simplex or candidate_forward_phase_supports_k512 or candidate_eager_prefixes_share_uniform_ids_and_scale_exposure'
 
 set +e
 timeout --signal=TERM --kill-after=120 "${HARD_WALL_SECONDS}" \

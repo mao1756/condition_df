@@ -7,6 +7,12 @@ from pathlib import Path
 
 import numpy as np
 
+from mnist.d0_jacobi_rb_runpod_source_integrity import (
+    PROTECTED_SOURCE_CANONICAL_LF_HASHES,
+    canonicalize_newlines,
+    verify_protected_sources,
+)
+
 from mnist.diag_d0_jacobi_rb_path_weighted_capacity_e2e import (
     ExperimentConfig,
     _controller_metric,
@@ -180,3 +186,25 @@ def test_runpod_shell_scripts_are_lf_only() -> None:
     for script in sorted(root.glob("*.sh")):
         raw = script.read_bytes()
         assert b"\r\n" not in raw, f"{script.name} contains CRLF line endings"
+
+
+def test_runpod_protected_source_integrity_is_newline_portable(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    assert len(PROTECTED_SOURCE_CANONICAL_LF_HASHES) == 27
+    verify_protected_sources(root)
+
+    mixed = b"first\r\nsecond\nthird\r\n"
+    lf = b"first\nsecond\nthird\n"
+    crlf = b"first\r\nsecond\r\nthird\r\n"
+    assert canonicalize_newlines(mixed) == lf
+    assert canonicalize_newlines(crlf) == lf
+
+    source = root / "mnist/conditioned_diffusion.py"
+    converted = tmp_path / "conditioned_diffusion.py"
+    converted.write_bytes(canonicalize_newlines(source.read_bytes()))
+    expected = {
+        "conditioned_diffusion.py": PROTECTED_SOURCE_CANONICAL_LF_HASHES[
+            "mnist/conditioned_diffusion.py"
+        ]
+    }
+    verify_protected_sources(tmp_path, expected)
