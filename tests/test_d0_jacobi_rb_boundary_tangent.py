@@ -39,6 +39,30 @@ from mnist.d0_jacobi_rb_boundary_tangent import (
     save_tangent_baseline,
     synthetic_tangent_target,
 )
+from mnist.d0_jacobi_rb_boundary_tangent_fused import (
+    TangentControlledPhaseResult,
+    TangentScoreController,
+    controlled_reverse_phase_tangent as controlled_reverse_phase_tangent_additive,
+)
+
+
+class _StructuralTangentController:
+    def __init__(self, value: float = 0.0) -> None:
+        self.value = float(value)
+        self.input_types: list[type[object]] = []
+
+    def score_prediction(self, inputs: ModelInputs) -> torch.Tensor:
+        self.input_types.append(type(inputs))
+        return torch.full(
+            (inputs.batch_size, EDGES_PER_PHASE),
+            self.value,
+            dtype=torch.float64,
+            device=inputs.later_full_state.device,
+        )
+
+
+def _identity_reference(**kwargs: object) -> dict[str, torch.Tensor]:
+    return {"later_head_fraction": kwargs["head_fraction"]}
 
 
 def _baseline(values: np.ndarray | None = None) -> TangentBaseline:
@@ -424,6 +448,147 @@ def test_controlled_tangent_phase_rejects_wrong_namespace() -> None:
             "changed",
             controller=controller,
             reference_transition=lambda **kwargs: kwargs["head_fraction"],
+            path_ids=(100,),
+            label=3,
+        )
+
+
+def test_structural_tangent_controller_and_telemetry() -> None:
+    controller = _StructuralTangentController(0.4)
+    assert isinstance(controller, TangentScoreController)
+    state = torch.full((2, STATE_SIZE), 1.0 / STATE_SIZE, dtype=torch.float64)
+    result = controlled_reverse_phase_tangent_additive(
+        state,
+        127,
+        0,
+        2,
+        NAMESPACE_VERSION,
+        controller=controller,
+        reference_transition=_identity_reference,
+        path_ids=(100, 101),
+        label=3,
+    )
+    assert isinstance(result, TangentControlledPhaseResult)
+    assert all(item is ModelInputs for item in controller.input_types)
+    assert result.reference_fraction_displacement_squared_sum == 0.0
+    assert result.reference_fraction_displacement_count == 8 * EDGES_PER_PHASE
+    assert result.reference_fraction_displacement_maximum_absolute == 0.0
+    assert result.control_fraction_displacement_squared_sum > 0.0
+    assert result.control_fraction_displacement_count == 2 * 2 * EDGES_PER_PHASE
+    assert result.control_fraction_displacement_maximum_absolute > 0.0
+    assert result.score_squared_sum == pytest.approx(
+        2 * 2 * EDGES_PER_PHASE * 0.4**2
+    )
+    assert result.score_count == 2 * 2 * EDGES_PER_PHASE
+    assert result.score_maximum_absolute == 0.4
+    assert result.logistic_shift_squared_sum > 0.0
+    assert result.logistic_shift_count == 2 * 2 * EDGES_PER_PHASE
+    assert result.logistic_shift_maximum_absolute > 0.0
+    assert result.boundary_fraction_count == 0
+
+
+def test_frequency_one_controller_is_structurally_accepted() -> None:
+    from mnist.d0_jacobi_rb_boundary_tangent_frequency1_coordinate import (
+        FrequencyOneCoordinateZeroBaselinePredictor,
+    )
+
+    controller = FrequencyOneCoordinateZeroBaselinePredictor(zero_residual=True)
+    state = torch.full((1, STATE_SIZE), 1.0 / STATE_SIZE, dtype=torch.float64)
+    result = controlled_reverse_phase_tangent_additive(
+        state,
+        0,
+        0,
+        2,
+        NAMESPACE_VERSION,
+        controller=controller,
+        reference_transition=_identity_reference,
+        path_ids=(100,),
+        label=3,
+    )
+    assert isinstance(result, TangentControlledPhaseResult)
+    assert result.control_fraction_displacement_squared_sum == 0.0
+    assert result.control_fraction_displacement_maximum_absolute == 0.0
+
+
+def test_tangent_phase_rejects_missing_score_protocol() -> None:
+    state = torch.full((1, STATE_SIZE), 1.0 / STATE_SIZE, dtype=torch.float64)
+    with pytest.raises(BoundaryTangentContractError, match="score_prediction"):
+        controlled_reverse_phase_tangent_additive(
+            state,
+            0,
+            0,
+            2,
+            NAMESPACE_VERSION,
+            controller=object(),  # type: ignore[arg-type]
+            reference_transition=_identity_reference,
+            path_ids=(100,),
+            label=3,
+        )
+
+
+@pytest.mark.parametrize(
+    "kind", ["not_tensor", "shape", "integer", "wrong_device", "nonfinite"]
+)
+def test_tangent_phase_rejects_invalid_structural_score(kind: str) -> None:
+    class InvalidController:
+        def score_prediction(self, inputs: ModelInputs) -> object:
+            if kind == "not_tensor":
+                return object()
+            if kind == "shape":
+                return torch.zeros(
+                    (inputs.batch_size, EDGES_PER_PHASE - 1), dtype=torch.float64
+                )
+            if kind == "integer":
+                return torch.zeros(
+                    (inputs.batch_size, EDGES_PER_PHASE), dtype=torch.int64
+                )
+            if kind == "wrong_device":
+                return torch.empty(
+                    (inputs.batch_size, EDGES_PER_PHASE),
+                    dtype=torch.float64,
+                    device="meta",
+                )
+            return torch.full(
+                (inputs.batch_size, EDGES_PER_PHASE),
+                float("nan"),
+                dtype=torch.float64,
+            )
+
+    state = torch.full((1, STATE_SIZE), 1.0 / STATE_SIZE, dtype=torch.float64)
+    with pytest.raises(BoundaryTangentContractError, match="finite floating"):
+        controlled_reverse_phase_tangent_additive(
+            state,
+            0,
+            0,
+            2,
+            NAMESPACE_VERSION,
+            controller=InvalidController(),  # type: ignore[arg-type]
+            reference_transition=_identity_reference,
+            path_ids=(100,),
+            label=3,
+        )
+
+
+def test_tangent_phase_rejects_nonfinite_logistic_shift() -> None:
+    class HugeFiniteController:
+        def score_prediction(self, inputs: ModelInputs) -> torch.Tensor:
+            return torch.full(
+                (inputs.batch_size, EDGES_PER_PHASE),
+                1.0e308,
+                dtype=torch.float64,
+                device=inputs.later_full_state.device,
+            )
+
+    state = torch.full((1, STATE_SIZE), 1.0 / STATE_SIZE, dtype=torch.float64)
+    with pytest.raises(BoundaryTangentContractError, match="logistic shift"):
+        controlled_reverse_phase_tangent_additive(
+            state,
+            0,
+            0,
+            2,
+            NAMESPACE_VERSION,
+            controller=HugeFiniteController(),
+            reference_transition=_identity_reference,
             path_ids=(100,),
             label=3,
         )

@@ -782,8 +782,12 @@ def frozen_score_logistic_flow(
     next_fraction = frozen_score_logistic_fraction(fraction, score, delta_u)
     output = states.clone()
     next_head = pair * next_fraction
-    output[:, heads] = next_head
-    output[:, tails] = pair - next_head
+    # Preserve the identity controller bit-for-bit.  Reconstructing every pair
+    # as ``pair-next_head`` introduces sub-ulp drift even when q or delta_u is
+    # exactly zero; only pairs whose fraction actually moved are rewritten.
+    moved = next_fraction != fraction
+    output[:, heads] = torch.where(moved, next_head, head)
+    output[:, tails] = torch.where(moved, pair - next_head, tail)
     if not bool(torch.isfinite(output).all()) or bool(torch.any(output < 0.0)):
         raise BoundaryTangentContractError("logistic flow produced an invalid state")
     return output[0] if squeezed else output

@@ -3,26 +3,29 @@
 Research code for conditioning measure-valued diffusions on Wasserstein space,
 with small numerical examples and MNIST weighted-point-cloud experiments.
 
-## Active D0 gate: exact Jacobi/RB boundary-tangent controller
+## Active D0 route: global-dilated Jacobi/RB rollout
 
-The active D0 route keeps the certified fixed-grid Jacobi transition and the
-raw Rao--Blackwell denoising label. It fits a boundary-tangent conditional mean
-`m=y(1-y)q` on one frozen MNIST image, then tests only time-local and
-at-most-eight-phase reverse-controller behavior. It does not run a complete
-reverse path or generate an image.
+The active D0 route keeps the certified fixed-grid Jacobi transition and raw
+Rao--Blackwell tangent target, but uses a 34,974-parameter circular dilated model
+whose receptive field spans the 28x28 torus. On one fresh source-forward path, its
+gain-1 controller improved an exact paired 128-step reverse suffix over zero by
+7.454%; the source-informed control improved 98.211%, while both signs of the older
+local frequency-one controller were adverse. This is exploratory one-image evidence,
+not complete generation or a population claim.
 
-The staged production commands and the exact claim boundary are in
-[`docs/jacobi_rb_boundary_tangent_controller_confirmation.md`](docs/jacobi_rb_boundary_tangent_controller_confirmation.md).
-The entry point is:
+The result, claim boundary, and next exact complete-path experiment are in
+[`docs/jacobi_rb_global_dilated_rollout.md`](docs/jacobi_rb_global_dilated_rollout.md)
+and [`HANDOFF.md`](HANDOFF.md). The implemented entry point is:
 
 ```powershell
-.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_boundary_tangent_controller_confirmation --help
+.\.venv\Scripts\python.exe -m mnist.diag_d0_jacobi_rb_global_dilated_rollout --help
 ```
 
-Only the terminal decision
-`exact_rb_boundary_tangent_controller_controlled` authorizes planning a
-separate conditional reconstruction control. D0-v0 and D0-v1 remain available
-as historical diagnostics, not as the current scientific route.
+The successful run is immutable and must not be resumed with changed source. The
+next patch is a fresh child that completes the same path through forward step 511
+and compares exact zero/global/source-informed full reverse trajectories. D0-v0,
+D0-v1, and earlier boundary-tangent gates remain historical evidence rather than
+the current scientific route.
 
 ## Layout
 

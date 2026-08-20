@@ -586,6 +586,7 @@ def propose_alpha1_rb_transition_batch_torch(
     *,
     rng_key: Any,
     profile: JacobiRBSpectralProfile,
+    transition_ids: Tensor | np.ndarray | None = None,
 ) -> JacobiRBDeviceProposal:
     """Return a fast device inverse-CDF proposal for later certification."""
 
@@ -600,10 +601,30 @@ def propose_alpha1_rb_transition_batch_torch(
         raise ValueError("exposure must be nonnegative")
     flat_count = int(x.numel())
     key = _key_bytes(rng_key)
+    explicit_ids: np.ndarray | None = None
+    if transition_ids is not None:
+        ids = (
+            transition_ids.detach().cpu().numpy()
+            if isinstance(transition_ids, Tensor)
+            else np.asarray(transition_ids)
+        )
+        if ids.shape != tuple(x.shape) or not np.issubdtype(ids.dtype, np.integer):
+            raise ValueError("transition_ids must be an integral array matching the inputs")
+        explicit_ids = ids.astype(np.uint64, copy=False).reshape(-1)
+        if np.unique(explicit_ids).size != flat_count:
+            raise ValueError("transition_ids must be unique within a proposal batch")
     uniforms = np.zeros(flat_count, dtype=np.float64)
     for index in range(flat_count):
+        local_key = key
+        local_index = index
+        if explicit_ids is not None:
+            local_key = key + b"\0transition-id:" + int(explicit_ids[index]).to_bytes(8, "big")
+            local_index = 0
         prefix = _LazyDyadicPrefix(
-            key, index, initial_bits=64, max_bits=int(profile.max_prefix_bits)
+            local_key,
+            local_index,
+            initial_bits=64,
+            max_bits=int(profile.max_prefix_bits),
         )
         uniforms[index] = prefix.midpoint()
     uniform = torch.as_tensor(uniforms.reshape(tuple(x.shape)), dtype=x.dtype, device=x.device)
@@ -1920,6 +1941,7 @@ def sample_alpha1_rb_transition_batch(
     *,
     rng_key: Any,
     profile: JacobiRBSpectralProfile,
+    transition_ids: np.ndarray | Tensor | None = None,
 ) -> JacobiRBTransitionBatch:
     """Sample alpha=1 Jacobi transitions and exact-population RB targets.
 
@@ -1939,6 +1961,18 @@ def sample_alpha1_rb_transition_batch(
     if not np.all(np.isfinite(u_array)) or np.any(u_array < 0.0):
         raise ValueError("exposure must be finite and nonnegative")
     key = _key_bytes(rng_key)
+    explicit_ids: np.ndarray | None = None
+    if transition_ids is not None:
+        ids = (
+            transition_ids.detach().cpu().numpy()
+            if isinstance(transition_ids, Tensor)
+            else np.asarray(transition_ids)
+        )
+        if ids.shape != x_array.shape or not np.issubdtype(ids.dtype, np.integer):
+            raise ValueError("transition_ids must be an integral array matching the inputs")
+        explicit_ids = ids.astype(np.uint64, copy=False).reshape(-1)
+        if np.unique(explicit_ids).size != int(x_array.size):
+            raise ValueError("transition_ids must be unique within a certified batch")
     later = np.array(x_array, copy=True)
     target = np.zeros_like(x_array)
     active = u_array > 0.0
@@ -1965,9 +1999,14 @@ def sample_alpha1_rb_transition_batch(
     ):
         if not bool(is_active):
             continue
+        local_key = key
+        local_index = index
+        if explicit_ids is not None:
+            local_key = key + b"\0transition-id:" + int(explicit_ids[index]).to_bytes(8, "big")
+            local_index = 0
         prefix = _LazyDyadicPrefix(
-            key,
-            index,
+            local_key,
+            local_index,
             initial_bits=int(profile.initial_prefix_bits),
             max_bits=int(profile.max_prefix_bits),
         )

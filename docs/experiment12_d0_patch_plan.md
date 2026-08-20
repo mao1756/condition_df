@@ -1,14 +1,15 @@
 # Experiment 12 D0 patch plan
 
-The active milestone is the completed immutable v3 time-local adjudication
-recorded below and in
-[`jacobi_rb_boundary_tangent_v3_time_local_adjudication.md`](jacobi_rb_boundary_tangent_v3_time_local_adjudication.md).
-The global zero-baseline v3 selection gate remains a valid
-`no_validation_candidate` result, but its sealed evidence establishes a
-reproducible exact-Rao--Blackwell signal only in forward quartile `q0` (high
-reverse time). The next authorized work is planning a fresh
-quartile-specialized learner. Confirmation, controller execution,
-reconstruction, and sampling remain unauthorized.
+The active milestone is the completed global-dilated exact fresh suffix recorded
+below and in
+[`jacobi_rb_global_dilated_rollout.md`](jacobi_rb_global_dilated_rollout.md).
+On one fresh source-forward path, the selected 34,974-parameter global controller
+improved exact paired 128-step squared-L2 by `7.45379%` over zero, while the
+source-informed control improved `98.2113%` and both signs of the prior v4
+controller were adverse. This is exploratory one-image evidence, not complete or
+population-level generation. The next patch is an exact same-path complete
+zero/global/source reconstruction in a fresh immutable child; protected confirmation
+remains unopened.
 
 ## Historical D0-v0 one-image baseline
 
@@ -716,6 +717,496 @@ and restricted claim are documented in
 [`jacobi_rb_boundary_tangent_quartile_specialist.md`](jacobi_rb_boundary_tangent_quartile_specialist.md).
 
 <!-- END EXACT JACOBI RB QUARTILE SPECIALIST -->
+
+<!-- BEGIN READ-ONLY QUARTILE DIRECTION ADJUDICATION -->
+
+## 2026-08-08: read-only q1-q3 direction adjudication
+
+The immutable quartile-specialist run
+`20260807-132351_production-exact-quartile-specialist` ended with the valid
+scientific negative `no_training_only_quartile_system`. The unchanged learner
+resolved q0, including 80 rank-eligible candidates and deterministic winner
+`q0.seed261333.update1800`, but no q1, q2, or q3 candidate passed the frozen
+local rank geometry. Fresh selection and confirmation never opened.
+
+The next additive workflow is a historical, nonauthorizing diagnosis of that
+failure. It exactly replays the sealed 480-candidate gain and rank tables, then
+evaluates all 480 nonzero checkpoints on only the already-open, disjoint
+32-path gain-calibration and training-rank caches. For every path, phase,
+midpoint, and 56-cell map it decomposes risk improvement into
+`C=E[Z_bar*m]` and `P=E[m^2]`, checks direct improvement against
+`2*lambda*C-lambda^2*P`, and diagnoses cross-role gain transfer,
+phase/midpoint cancellation, optimization-time rotation, and path stability.
+q0 is retained only as a positive control.
+
+No transition, label, path, seed, model, optimizer update, selection,
+confirmation, controller trajectory, reconstruction, or sample is created.
+The parent is snapshotted before and after the read-only work and must remain
+byte-identical. A hard-stop result means that adding paths or rerunning the
+same width-32 later-state representation is not justified; even a non-hard-stop
+result authorizes only a separately reviewed plan for one mechanism-targeted
+fresh learner.
+
+The exact parent hashes, artifact schemas, decomposition arrays, frozen
+diagnostic screens, decisions, restart rules, and staged commands are in
+[`jacobi_rb_boundary_tangent_quartile_direction_adjudication.md`](jacobi_rb_boundary_tangent_quartile_direction_adjudication.md).
+
+<!-- END READ-ONLY QUARTILE DIRECTION ADJUDICATION -->
+
+<!-- BEGIN READ-ONLY QUARTILE DIRECTIONAL REPRESENTATION ADJUDICATION -->
+
+## 2026-08-08: read-only quartile directional representation adjudication
+
+The terminal quartile-specialist run
+`20260807-132351_production-exact-quartile-specialist` is preserved as the
+valid scientific negative `no_training_only_quartile_system`: q0 learned, q1
+failed the frozen local-direction screen, q2 calibration directions did not
+transfer locally, and q3 generally lacked calibration alignment. The
+authoritative time-local parent
+`20260807-005609_production-v3-time-local-adjudication` remains bound through
+its 29-artifact terminal registry. Neither parent opened specialist selection
+or confirmation evidence.
+
+The additive workflow
+`mnist.diag_d0_jacobi_rb_boundary_tangent_quartile_directional_adjudication`
+is a read-only representation audit. It exactly decomposes every frozen
+checkpoint as `full = local_affine + spatial_cnn`, preserves the raw certified
+Jacobi/Rao--Blackwell target, and accumulates `T=E[Z_bar^2]`,
+`C=E[Z_bar*m]`, and `P=E[m^2]`. Historical `physical_fit` is used only for
+rotation diagnostics; `gain_calibration` seals one diagnostic nominee for
+each of 36 quartile/seed/component streams; only then may `training_rank` be
+opened for a frozen 72-statistic, 50,000-replicate whole-path max-T audit.
+
+No new path, transition, target, model, optimizer step, checkpoint, selection,
+confirmation, controller trajectory, reconstruction, or sample is created.
+The sole positive scientific outcome,
+`unique_representation_hypothesis_identified`, requires one and only one
+branch type to transfer with stable direction and effect across q1--q3 while
+exact branch algebra explains the full-model failures and q0 full passes as a
+positive control. Even then, authority is limited to drafting a separate
+fresh-role branch-restricted learner plan. Every other valid outcome is a
+principled stop rather than permission for another same-class repair loop.
+
+Production uses the sealed stage order
+`preflight -> replay -> controls -> fittrace -> nominate -> adjudicate -> report`
+with specialist and time-local parent directories supplied explicitly. Exact
+commands, immutable hashes, role firewalls, resource limits, artifacts,
+decision precedence, and the restricted claim are documented in
+[`jacobi_rb_quartile_directional_adjudication.md`](jacobi_rb_quartile_directional_adjudication.md).
+
+<!-- END READ-ONLY QUARTILE DIRECTIONAL REPRESENTATION ADJUDICATION -->
+
+<!-- BEGIN PORTABLE QUARTILE DIRECTIONAL CONTINUATION -->
+
+## 2026-08-08: content-addressed RunPod continuation
+
+The immutable Windows child
+`20260808-203454_production-read-only-quartile-directional-adjudication-bootstrap-fix`
+is ready for `fittrace`, but its configuration and parent snapshots bind
+Windows absolute paths. It must not be resumed directly after copying it to a
+Linux host. The additive workflow
+`mnist.diag_d0_jacobi_rb_quartile_directional_portable_continuation` instead
+verifies the complete 26-artifact child, the 37-file scientific source
+closure, and both immutable parent trees by content before creating a fresh
+host-native continuation child.
+
+The relocation imports only the already-passed preflight, historical replay,
+and controls evidence. It preserves the scientific configuration, role order,
+checkpoint bytes, path-level caches, candidate grids, inferential rules, and
+all zero-authority restrictions. Relocated gain-calibration and training-rank
+caches are addressed through their verified local payload roots while their
+historical binding files remain byte-identical. The original child and both
+parents remain read-only.
+
+A complete local relocation seam passed with portable identity
+`a25b766fe6174db985e71946c0a6bcb656747ff95a1f376811defaff7f2070ed` and
+decision `ready_for_fittrace`. It generated no fittrace, nomination,
+adjudication, training, transition, selection, confirmation, controller, or
+sampling evidence. The minimal RunPod transfer and fail-closed launch
+procedure are documented in
+[`runpod_directional_continuation.md`](runpod_directional_continuation.md).
+
+<!-- END PORTABLE QUARTILE DIRECTIONAL CONTINUATION -->
+
+<!-- BEGIN READ-ONLY ABSOLUTE-COORDINATE ADJUDICATION -->
+
+## 2026-08-10: absolute-coordinate symmetry hypothesis
+
+The completed portable continuation is a valid terminal scientific stop with
+decision `representation_cancellation_nonidentifying_stop`.  It identifies no
+stable replacement inside the frozen local-affine-plus-spatial-CNN class and
+authorizes no new learner.  The verified result archive is retained locally
+with SHA-256
+`0f9914b79011a1182bac8fd9645e7ac0e222618d5be92047c03268e8b9ab3f7d`.
+
+The next additive patch is deliberately read-only.  The frozen predictor has
+no absolute-coordinate channels, uses shared circular convolutions with a
+7x7 receptive field, and shares its local-affine map across edges.  Meanwhile,
+the two independent physical coarse-witness panels place essentially all of
+their q1--q3 cross-panel signal outside the phasewise translation-invariant
+subspace.  This motivates a fixed periodic-coordinate hypothesis that was not
+one of the two branches adjudicated by the terminal workflow.
+
+`mnist.diag_d0_jacobi_rb_absolute_coordinate_adjudication` verifies the
+portable archive and immutable coarse witness, audits the model's translation
+symmetry, and decomposes the historical panel means into DC, frequency-one,
+frequency-two, and remaining absolute-edge subspaces.  Panel A seals one
+frequency-one direction per quartile; panel B supplies the held-out linear
+statistics for a joint whole-path max-T family.  All evidence is historical
+and post-hoc.  A positive result may recommend only drafting a separately
+reviewed fresh coordinate-aware learner plan.  It creates no path, transition,
+checkpoint, optimizer update, confirmation evidence, controller trajectory,
+reconstruction, or sample.
+
+The complete contract, inference caveats, decisions, and commands are in
+[`jacobi_rb_absolute_coordinate_adjudication.md`](jacobi_rb_absolute_coordinate_adjudication.md).
+
+<!-- END READ-ONLY ABSOLUTE-COORDINATE ADJUDICATION -->
+
+<!-- BEGIN FREQUENCY-ONE COORDINATE LEARNABILITY V1 -->
+
+## 2026-08-10: planned fresh frequency-one coordinate learner
+
+The terminal absolute-coordinate adjudication ended
+`absolute_coordinate_representation_hypothesis_supported`: Panel-A-sealed
+periodic frequency-one directions transferred to independent Panel B with
+strictly positive simultaneous 99% lower bounds in q0 through q3.  This is
+historical design evidence, not training or confirmation authority.
+
+The next additive workflow,
+`mnist.diag_d0_jacobi_rb_boundary_tangent_frequency1_coordinate_learnability`,
+changes only the predictor representation.  It adds a zero-initialized,
+bias-free 1x1 stem from four frozen periodic row/column sine/cosine planes to
+the existing first spatial preactivation.  The old 24-channel convolution,
+three circular 3x3 layers, width 32, four-output spatial head, 25-feature local
+affine head, exact-zero tangent wrapper, exact raw Rao--Blackwell target,
+plain MSE, optimizer, checkpoint grid, evidence counts, and inferential gates
+remain frozen.  The new stem adds 128 parameters and is exactly function
+equivalent to the coordinate-free model at initialization.
+
+Fresh disjoint roles use 64 train, 32 validation, and a single sealed 64-path
+confirmation.  Synthetic and exact-null controls run before physical labels
+open.  Validation retains the prospective 120-candidate by 228-component
+whole-path 99.5% max-T family; confirmation retains the same 228 components.
+No negative truncation, standard-error floor, alternative nominee, second
+confirmation, controller trajectory, reconstruction, or sampling is allowed.
+
+The full planned scientific contract, provenance bindings, path and seed
+allocations, restart semantics, decisions, and commands are documented in
+[`jacobi_rb_boundary_tangent_frequency1_coordinate_learnability.md`](jacobi_rb_boundary_tangent_frequency1_coordinate_learnability.md).
+
+<!-- END FREQUENCY-ONE COORDINATE LEARNABILITY V1 -->
+
+<!-- BEGIN FREQUENCY-ONE EXPLORATORY REVERSE ROLLOUT -->
+
+## 2026-08-12: objective-bearing frequency-one reverse rollout
+
+The completed frequency-one coordinate learner
+`20260811-010641_production-frequency1-coordinate-v1-one-image` ended with the
+valid scientific negative `no_frequency1_coordinate_validation_candidate`.
+No one of 120 candidates passed its prospective 228-component validation
+family, logical update zero was selected, and protected confirmation remained
+unopened. That result continues to control its confirmatory claim. It does not
+establish that every historical checkpoint is dynamically useless when
+composed through the reverse controller.
+
+The next additive workflow,
+`mnist.diag_d0_jacobi_rb_frequency1_rollout`, is exploratory and directly
+objective-bearing. It fixes the post-hoc checkpoint at seed `261372`, update
+`3700`, chooses one gain from `{0.5,1,2,4}` on a fresh development suffix, and
+then compares paired zero, learned, and target-fraction-oracle controllers on
+fresh 128-step and 512-step reverse trajectories. It starts from exact forward
+states of the frozen one-image mixed target, keeps reference randomness common
+across controller variants, preserves the certified Jacobi transition and
+reference/control/reference phase order, and uses the deliberately exploratory
+`M=2` controller refinement.
+
+The development oracle is an interpretability gate: it must beat paired zero
+before the evaluation path is generated. Learned and oracle endpoint
+improvements, images, and controller/reference displacement ratios are
+diagnostics rather than confirmatory tests. All valid failures retain raw
+states, fixed-scale images, sparse progress anchors, telemetry, health metrics,
+and a compact report. No historical confirmation artifact is opened, and no
+optimization, prior-start generation, multi-image claim, bootstrap family, or
+new representation search occurs.
+
+The main workflow is capped at six GPU hours, 2 GiB persisted storage, and
+exact eight-step restart shards; optional positive replication has a separate
+two-hour cap. Preflight measures the actual adaptive one-path phase rate and
+stops before fresh development work if the frozen `32,313,344`-transition
+workflow cannot fit that budget. This resource stop is an execution result,
+not a learned-signal result. Only a numerically interpretable reverse trajectory
+resets the proxy-only counter; a preflight-only resource or implementation stop
+does not.
+
+The immutable first implementation preflight
+`20260812-005426_production-frequency1-exploratory-rollout` stopped before any
+development evidence because its standalone timing probe supplied phase 0 to
+a reverse-shard adapter that correctly requires phase 6 first. Its earlier
+three-lane exact-CUDA smoke had already realized preflight ID `0xFA000`, so the
+failed directory is not resumed and that ID is not reused. Allocation revision
+`frequency1-rollout-fb-v2-after-fa-smoke` explicitly moves the four roles to
+`0xFB000`, `0xFB100`, `0xFB200`, and `0xFB300` after a collision-free full-history
+scan. The timing probe now uses phase 6, which has the same frozen H0/2
+duration/color as phase 0, without weakening canonical reverse-shard ordering.
+
+The fresh corrected preflight
+`20260812-005942_production-frequency1-exploratory-rollout-fbv2` then completed
+all provenance, source/target, controller-interface, oracle-identity,
+paired-RNG, exact-CUDA, certification, conservation, fallback, and forbidden-
+operation checks. It stopped only at the frozen resource gate. Complete-phase
+rates were `622.364`, `1224.956`, and `1226.581` transitions/s; the required
+slowest-repeat projection was `51,920.364 s` (`14.422 h`) versus the six-hour
+cap. Even the best warmed repeat projects to about `7.32 h`, so discarding the
+cold repeat cannot repair feasibility. No forward development/evaluation path,
+gain selection, reverse trajectory, reconstruction, confirmation, training,
+or sampling was opened. The next admissible patch is an exact cross-variant
+fused tangent-reference scheduling feasibility gate; it must not change the
+checkpoint, gain grid, controller law, random-bit pairing, scientific roles,
+or six-hour cap.
+
+The full decision table, artifact contract, claim boundary, and exact
+production/resume commands are documented in
+[`jacobi_rb_frequency1_exploratory_rollout.md`](jacobi_rb_frequency1_exploratory_rollout.md).
+
+### 2026-08-12 fused laptop continuation implementation
+
+The additive fused continuation is now implemented in the same rollout CLI. Its
+engineering decision is whether exact cross-variant row packing makes the unchanged
+objective-bearing M=2 experiment fit the six-hour laptop contract. It binds the
+immutable `20260812-005942` resource-stopped carrier, transfers only the unopened
+`0xFB100/0xFB200/0xFB300` roles, reserves `[0xFC000,0xFC010)`, and does not reinterpret
+the carrier's resource result as a learned-signal result.
+
+The intended passing preflight runs a complete untimed P6 eight-step warm-up and exact duplicate-ID,
+singleton/fused phase and shard, permutation/chunk, deterministic join, restart,
+oracle-interface, conservation, certification, fallback, memory, and storage
+controls. It then freezes three complete timed repeats of each P1, P3, and P6
+eight-step profile. The authorizing projection uses the slowest repeat without
+averaging or replacement:
+
+```text
+128 * T_P1 + 48 * T_P3 + 32 * T_P6 + 300 seconds
+```
+
+The projection must be at most 21,600 seconds, with every profile at least 1,300
+transitions/s and the exact 32,313,344-transition effective rate at least
+1495.9881481481482/s. A fresh production invocation must use `--stage all`: on a
+pass, the already prepared backend continues in the same process into P6 development,
+P3-to-P6 joined evaluation, and conditional P2 replication. A completed timed-profile
+resource failure stops before objective IDs open; an integrity failure preserves the
+last committed raw row states and failure images; a valid objective run publishes
+zero/learned/oracle short and full trajectories regardless of scientific direction.
+
+The complete schedule, resume contract, outcomes, claim boundary, and commands are in
+[`jacobi_rb_frequency1_fused_rollout.md`](jacobi_rb_frequency1_fused_rollout.md).
+
+### 2026-08-12 fused production preflight adjudication
+
+The mandatory fresh `--stage all` attempt
+`20260812-065538_production-frequency1-exploratory-rollout-fused-laptop-v1`
+stopped during the FC001 infrastructure anchor, before any objective role opened.
+Its 151-record manifest has semantic SHA-256
+`6d13ec893857d0d457fce827923f4e1b4fc746c245fef2f22747769102e2e882`
+and file SHA-256
+`25cd4e1660f2bab390d9ba4771c05acd389b764f2505acd503df891037ded71e`.
+Its immutable artifacts verify all 64 shard pairs and `1,404,928` exact transitions:
+certificate fraction one, zero fallback and forbidden operations, maximum pair-mass
+error `3.469446951953614e-18`, and scheduler simplex error
+`2.220446049250313e-16`. Only `0xFC000` and `0xFC001` were realized. The P3/P6
+profiles `0xFC002`/`0xFC003` and objective roles
+`0xFB100`/`0xFB200`/`0xFB300` remain unopened.
+
+This is not a scientific or authorizing resource result. The forward summary omitted
+aggregate transition and active-count fields, so the health adapter substituted
+sentinel `-1` values despite valid shard evidence. It also applied the timed-profile
+throughput threshold to the untimed anchor. The observed `595.26049998513`
+transitions/s is therefore advisory only; no complete P1/P3/P6 repeat family or
+resource projection ran. The corrected additive classification is
+`fused_forward_anchor_diagnostics_aggregation_invalid` in the
+`implementation_contract` domain, with resource validity not evaluated and
+scientific evidence incomplete. The original terminal records remain unchanged.
+
+The code-only repair exports the missing counts and separates untimed-anchor health
+from authorizing timed-profile throughput. Focused production-shaped regressions pass,
+and the repaired source closure is
+`bd3195e38c33ec56ba98a98382ee0f6537335e1807ccd306aa702026905f35ce`.
+The stopped run must not be resumed or mutated. A further attempt requires a
+separately reviewed continuation binding and fresh preflight namespace because
+`0xFC000` and `0xFC001` are now historical realized identities; the unopened
+objective identities are not independently authorized by this repair.
+No objective-bearing reverse trajectory ran, so the proxy-only counter is not reset.
+
+<!-- END FREQUENCY-ONE EXPLORATORY REVERSE ROLLOUT -->
+
+## 2026-08-12: objective-first frequency-one recovery
+
+Primary mode: exploratory engineering immediately followed by an
+objective-bearing experiment. The immutable run
+`20260812-065538_production-frequency1-exploratory-rollout-fused-laptop-v1`
+stopped before any reverse objective path because its otherwise valid 64-shard
+forward-anchor evidence was normalized without aggregate counts and then subjected
+to an inapplicable timed-profile throughput gate. It is adjudicated as
+`fused_forward_anchor_diagnostics_aggregation_invalid`, an implementation-contract
+failure. Its `0xFB100`, `0xFB200`, and `0xFB300` objective roles remain unopened.
+
+The successor binds only load-bearing predecessor commitments, reuses the verified
+step-127/511 anchors, and runs the smallest decisive system test: paired zero,
+learned-gain-1, and source-informed 128-step reverse rows on FB100. One exact shard
+is a real audit and performance sample. Exact is continued when its total projection
+fits; otherwise the family restarts from its original anchor using the explicitly
+approximate candidate CUDA inverse-CDF backend. Candidate results retain a same-row
+exact shard comparison and an approximation-dominance claim guard. The analytic
+identity control is an integrity gate; the source-informed MNIST endpoint is
+diagnostic and cannot override learned-versus-zero outcome routing.
+
+The hard budget is 21,600 active seconds including 300 seconds reserved for report
+finalization, 2 GiB persisted storage, and 80% peak CUDA memory. There is no
+throughput floor. Optional gains need 20% headroom. FB200 evaluation is fresh-forward
+when affordable and otherwise explicitly historical-anchor; short precedes an
+affordable full path, each with horizon-local exact-first selection and automatic
+candidate restart. FB300 remains unopened. A successful run commits a numerically
+valid 128-step family even when its scientific result is negative; incomplete or
+resource-only execution is not success.
+
+Proxy-only patches since the last objective-bearing experiment: 0 after a completed
+mandatory core, otherwise at least one.
+
+### Immutable 23:33 v3 audit stop
+
+The child `20260812-233343_production-frequency1-objective-first-recovery-v3`
+committed a numerically interpretable exact eight-step three-row audit on FB100 and
+then stopped on a false health classification. Its `263424` transitions were all
+active and certified; fallback, unauthorized, invalid, and forbidden counts were
+zero, pair-mass error was at most `2.22e-16`, the saved state was finite,
+nonnegative, and simplex-valid, and peak allocation was far below the 80% memory
+limit. The synchronous replay producer recorded these authoritative values per row
+but omitted aggregate active/no-op fields; the recovery consumer treated omission
+as zero and mislabeled the implementation-contract mismatch as numerical failure.
+
+The v3 child and its bound predecessor remain immutable. It is not resumable after
+the corrective source-closure change. Only the FB100 exact audit role was realized;
+no candidate trajectory or candidate audit opened, and FB200/FB300 remained fresh
+for the v4 successor. This failed partial objective artifact reset the proxy-only
+counter to zero but did not supply the mandatory 128-step endpoint.
+
+### 2026-08-13 objective-first recovery v4 production outcome
+
+The fresh child
+`20260813-002414_production-frequency1-objective-first-recovery-v4` bound source
+closure `cf27a97d85f335ec7fbd288e93946adefecd45ebfdedceeab6e0e68ac79b28c8`.
+Because v3 had realized preferred development identity FB100 (`1028352`), the
+collision scanner selected FB101 (`1028353`) for v4 development. Fresh evaluation
+used FB200 (`1028608`), and FB300 (`1028864`) remained unopened.
+
+The exact 128-step development family completed with zero, learned gain 1, and the
+source-informed diagnostic. Final squared-L2 errors were `0.00318150204`,
+`0.00392860435`, and `0.0000542526755`: learned worsened error relative to paired
+zero by `0.000747102312` (23.48%), while the source-informed row strongly improved.
+The optional exact gain sweep selected gain `0.5`, but every tested learned gain
+remained worse than zero; gain-0.5 error was `0.00340698454`.
+
+Fresh FB200 forward evaluation committed `1,404,928/1,404,928` active certified
+transitions, one exact fallback, and zero forbidden or invalid events. Its exact
+128-step reverse suffix independently repeated the adverse direction: zero error
+`0.00312099339`, learned gain-0.5 error `0.00323938544` (worse by
+`0.000118392043`, 3.79%), and source-informed error `0.0000554996424`.
+The terminal decision is therefore
+`evaluation_short_rollout_direction_not_useful` at this one-image paired exact
+scope.
+
+The optional full-horizon exact eight-step audit was valid (`263,424/263,424`
+active and certified), but exact completion projected `36,586.23` active seconds,
+above the 21,600-second cap. Auto selected the candidate backend, whose shard-zero
+prelaunch projection also exceeded the remaining budget; the candidate sampler was
+not called and no full endpoint exists. Final accounting passed with
+`16,394.322` active seconds, `0.173` wasted seconds, `10,598,962` persisted bytes,
+and `46,694,400` peak CUDA bytes. An unchanged-source report-only recovery fixed a
+post-terminal bundling bug without sampling or retiming and sealed 381 manifest
+artifacts.
+
+This establishes adverse learned direction at two paired exact 128-step one-image
+suffixes and a working source-informed system path. It does not establish general
+learner failure, full-path behavior, prior matching, multi-image generation, or
+confirmation. The required next action is to inspect sign/order, then compare a
+materially different learner or controller (for example rollout-trained or global),
+not add another proxy-only exactness layer.
+
+## 2026-08-14: global-dilated exact fresh five-row suffix
+
+Primary mode: exploratory. The audited plan changed one principal scientific axis:
+global receptive field. It retained the raw `bar_Z` target, wrapped training output
+`m=Y(1-Y)q`, optimizer family, exact Jacobi transition, shared-randomness controller
+composition, and one-image task. The new circular width-32 model uses dilations
+`1/2/4/8`, receptive field 31, and exactly 34,974 trainable parameters. A separate
+diagnostic-only signed wrapper implemented frozen-v4 gain `-0.5` without relaxing
+the production controller's nonnegative-gain contract.
+
+Two fresh implementation children were sealed before the scientific run. The first,
+`20260813-225613_production-global-dilated-exact-five-row`, stopped before sampling
+because the consumer hashed a stored `(784,)` anchor instead of the v4 producer's
+canonical `(1,784)` row. The second,
+`20260813-230738_production-global-dilated-exact-five-row-v2`, passed exact controls
+and reached training update 100, then stopped because CUDA-mapped RNG state tensors
+were passed to a setter requiring CPU byte tensors. Both are nonresumable
+engineering failures and make no scientific claim. The corrected FROZEN26 source
+validated RNG topology and every serialized CPU/CUDA state on scratch generators
+before mutating default RNGs.
+
+The successful fresh child is
+`runs/experiment12-d0-jacobi-rb-global-dilated-rollout/20260813-233915_production-global-dilated-exact-five-row-v3`.
+It bound transitive source closure
+`65d85cb4345a14fb8b4e442ff978c66bc77bd6bba7051f295706b82bac3a6014`,
+kept all 64 protected confirmation paths unopened, trained through the
+timing-selected cap of 4000, and selected update 3100 from 41 checkpoints. The
+selected raw/normalized validation MSE was `6.806853452/0.999129969`; zero was
+`6.807536109/0.999230172`, and frozen v4's advisory comparison was
+`6.806818435/0.999124829`.
+
+After selection froze, the collision scanner allocated previously unopened FB300
+path `1028864`. Exact forward sampling reached step 127 in 16 shards. The mandatory
+five-row exact suffix then completed all 128 reverse steps with shared random bits.
+Final squared-L2 results were:
+
+| Row | Squared L2 | Relative paired improvement over zero |
+|---|---:|---:|
+| zero | `0.00345927304` | `0%` |
+| frozen v4 `+0.5` | `0.00353129218` | `-2.08192%` |
+| frozen v4 `-0.5` | `0.00352573229` | `-1.92119%` |
+| global `+1.0` | `0.00320142609` | `+7.45379%` |
+| source-informed | `0.0000618750662` | `+98.2113%` |
+
+Thus the outcome was `global_material_improvement`. The sign-flipped v4 diagnostic
+did not reveal a simple controller-wide sign repair. Numerical health passed with
+`7024640/7024640` certified active transitions, two permitted certified fallbacks,
+zero forbidden events, and maximum mass error `4.44e-16`. All 17 shard-boundary
+states, five milestones, 85 metric rows, mechanism telemetry, and raw/demixed images
+were retained.
+
+The predeclared same-path complete branch triggered but was not sampled. Its frozen
+total projection was `24608.895` active seconds against the run's `21600`-second
+cap. The successful short objective remained authoritative. Final accounting was
+`7580.626` active seconds, `12520738` bytes, peak CUDA allocation `75522560` of
+`8546484224` bytes, and no breach. The terminal bundle contains 212 physical files,
+207 manifest artifacts, and 208 checksum entries; independent audits reopened and
+recomputed its scientific and integrity authorities with zero mismatch.
+
+This result establishes one-path exact 128-step feasibility for the global
+controller under the frozen design. It does not establish complete-path behavior,
+multi-image utility, prior-start generation, population performance, confirmation,
+or causal architectural attribution. The required next patch reuses the frozen
+update-3100 model and path `1028864` in a new child, continues forward steps
+128--511, and runs exact paired zero/global/source-informed complete reverse
+trajectories. The measured remaining-work projection is about `17629` active
+seconds including postprocessing and a 600-second report reserve.
+
+After v3 sealed, FROZEN27 changed only the in-memory optimizer `betas` representation
+from tuple to JSON-canonical list and added round-trip/read-only-resume regressions.
+It is the source for future children, not the producer of v3. Normal strict resume
+correctly rejects the old source closure; use the deep read-only bundle verifier and
+separate recorded-closure rehash described in root `HANDOFF.md` for historical v3.
+
+Proxy-only patches since the last objective-bearing experiment: 0.
 
 ## Historical multiscale reproducibility commands
 

@@ -30,14 +30,22 @@ This file maps the paper-facing concepts to the cleaned implementation layout.
 ## D0 Fixed-Grid Models
 
 - The active positive-time theory is `docs/d0_patch_theory.tex`.
-- The active experiment record and staged commands are
-  `docs/experiment12_d0_patch_plan.md` and
-  `docs/jacobi_rb_boundary_tangent_controller_confirmation.md`.
-- The current gate is the exact Jacobi/Rao--Blackwell boundary-tangent
-  controller workflow. Its entry point is
-  `python -m mnist.diag_d0_jacobi_rb_boundary_tangent_controller_confirmation`.
+- The active experiment record, exact result, and next objective-bearing action are
+  `docs/experiment12_d0_patch_plan.md`,
+  `docs/jacobi_rb_global_dilated_rollout.md`, and root `HANDOFF.md`.
+- The current workflow is the exploratory global-dilated
+  Jacobi/Rao--Blackwell rollout. Its implemented entry point is
+  `python -m mnist.diag_d0_jacobi_rb_global_dilated_rollout`. The successful
+  one-path exact 128-step result improved paired squared-L2 by 7.454%; the next
+  scientific milestone is an exact same-path complete reconstruction in a fresh
+  immutable child.
+- The global model, tangent controller, fused bank, and rollout orchestration live
+  in `mnist/d0_jacobi_rb_global_dilated.py`,
+  `mnist/d0_jacobi_rb_tangent_rollout.py`,
+  `mnist/d0_jacobi_rb_tangent_fused.py`, and
+  `mnist/diag_d0_jacobi_rb_global_dilated_rollout.py`.
 - The boundary-tangent representation, exact midpoint cache, provenance,
-  statistical gates, and confirmation aggregation live in
+  statistical gates, and confirmation aggregation remain in
   `mnist/d0_jacobi_rb_boundary_tangent.py`,
   `mnist/d0_jacobi_rb_boundary_tangent_cache.py`,
   `mnist/d0_jacobi_rb_boundary_tangent_provenance.py`,
@@ -47,10 +55,10 @@ This file maps the paper-facing concepts to the cleaned implementation layout.
   `mnist/d0_v0_density_ratio.py`.
 - The older D0-v1 potential-gradient diagnostic lives in
   `mnist/d0_v1_potential_gradient.py` and reuses the D0-v0 cache.
-- Exact Jacobi certification, multi-path scheduling, refinement, Haar
-  coupling, one-image learnability, and coarse-residual modules are the
-  provenance chain for the current gate; they are not archived substitutes or
-  an authorization to sample.
+- Exact Jacobi certification, multi-path scheduling, refinement, Haar coupling,
+  one-image learnability, and coarse-residual modules are the provenance chain for
+  the active rollout. Historical proxy gates do not override the saved direct
+  trajectory result or authorize mutating its sealed run.
 
 ## Notebook Contract
 
